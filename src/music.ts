@@ -7,6 +7,12 @@ export const scales: Record<Scale, number[]> = {
   pentatonic: [0, 2, 4, 7, 9],
 }
 
+const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+export function noteName(note: number): string {
+  return `${noteNames[note % 12]}${Math.floor(note / 12) - 1}`
+}
+
 export function scaleNote(scale: Scale, degree: number): number {
   const notes = scales[scale]
   const octave = Math.floor(degree / notes.length)

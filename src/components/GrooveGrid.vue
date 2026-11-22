@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { canResizeGrid, canSwapItems, copyControl, createControl, isValidPlacement, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
 import { createsCycle, inputs, isCompatible, outputs } from '../parameters'
 import { effectiveControls } from '../modulation'
+import * as Tone from 'tone'
+import { InstrumentFactory, type InstrumentInstance } from '../instruments'
 import MPCPad from './MPCPad.vue'
 import Knob from './Knob.vue'
 import LFO from './LFO.vue'
 import ModWheel from './ModWheel.vue'
 import PianoRoll from './PianoRoll.vue'
 import Arpeggiator from './Arpeggiator.vue'
+import InstrumentPad from './InstrumentPad.vue'
+import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
 import NumericSetting from './NumericSetting.vue'
 import SettingsDialog from './SettingsDialog.vue'
 
@@ -27,6 +31,56 @@ const columns = ref(props.layout.columns)
 const rows = ref(props.layout.rows)
 const selectedId = ref<string | null>(null)
 const draft = ref<GridItem | null>(null)
+const sampleLoading = ref(false)
+let preview: InstrumentInstance | undefined
+let previewGeneration = 0
+let previewVelocity = 100
+
+function stopPreview() {
+  previewGeneration++
+  preview?.dispose()
+  preview = undefined
+}
+
+async function previewInstrument(velocity: number) {
+  const item = draft.value
+  if (!item || item.type !== 'instrument-pad') return
+  if (sampleLoading.value) {
+    message.value = 'Wait for the sample to finish loading.'
+    return
+  }
+  const generation = ++previewGeneration
+  preview?.release()
+  try {
+    await Tone.start()
+    if (generation !== previewGeneration) return
+    preview ??= InstrumentFactory.create(item.settings.instrumentType, item.settings.instrumentParams)
+    await preview.trigger(velocity, 60)
+    if (generation !== previewGeneration) return
+    message.value = ''
+  } catch (error) {
+    if (generation === previewGeneration) {
+      message.value = `Preview error: ${error instanceof Error ? error.message : String(error)}`
+      console.error(message.value, error)
+    }
+  }
+}
+
+function handlePreviewOutput(output: ParameterOutput) {
+  if (output.parameter === 'velocity') previewVelocity = output.value
+  if (output.parameter === 'gate') {
+    if (output.value > 0) void previewInstrument(previewVelocity)
+    else {
+      previewGeneration++
+      preview?.release()
+    }
+  }
+}
+
+watch(() => draft.value?.type === 'instrument-pad'
+  ? [draft.value.settings.instrumentType, draft.value.settings.instrumentParams] : null,
+stopPreview, { deep: true, flush: 'sync' })
+onBeforeUnmount(stopPreview)
 const dropAction = ref<{ original: GridItem; candidate: GridItem; swapId?: string } | null>(null)
 const canCopyDrop = computed(() => {
   const drop = dropAction.value
@@ -151,6 +205,10 @@ function changeType(event: Event) {
 function saveItem() {
   const item = draft.value
   if (!item) return
+  if (sampleLoading.value) {
+    message.value = 'Wait for the sample to finish loading.'
+    return
+  }
   if (!item.label.trim()) {
     message.value = 'Enter a control name.'
     return
@@ -166,14 +224,14 @@ function saveItem() {
       message.value = 'Use a valid range and positive step; default and current values must be inside the range.'
       return
     }
-    if (selectedId.value && props.layout.connections.some((connection) => {
-      const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
-      const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
-      return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter)
-    })) {
-      message.value = 'Remove incompatible wires before changing the control type.'
-      return
-    }
+  }
+  if (selectedId.value && props.layout.connections.some((connection) => {
+    const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
+    const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
+    return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter)
+  })) {
+    message.value = 'Remove incompatible wires before changing the control type.'
+    return
   }
   const index = props.layout.items.findIndex((entry) => entry.id === selectedId.value)
   if (index !== -1) props.layout.items[index] = { ...item, label: item.label.trim() }
@@ -195,12 +253,13 @@ function handleOutput(item: GridItem, output: ParameterOutput) {
   emit('output', item.id, output)
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
   if (!sourceParameter || sourceParameter.kind !== 'note') return
+  if (output.on) void Tone.start().catch((error: unknown) => console.error('Could not start audio:', error))
   for (const connection of props.layout.connections) {
     if (connection.sourceId !== item.id || connection.sourceParameter !== output.parameter) continue
     const target = props.layout.items.find((entry) => entry.id === connection.targetId)
     const targetParameter = target && inputs(target).find((parameter) => parameter.id === connection.targetParameter)
     if (!target || !targetParameter) continue
-    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'arpeggiator')) {
+    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'instrument-pad' || target.type === 'arpeggiator')) {
       const key = `${connection.id}:${output.value}`
       const previous = activeNotes.get(key)
       const count = previous?.count ?? 0
@@ -494,12 +553,15 @@ function itemStyle(item: GridItem) {
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" @output="handleOutput(item, $event)" />
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
             <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" />
             <Arpeggiator v-else :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
           </div>
           <button
             v-else
             type="button"
             class="grid-item-main editing"
+            :class="{ 'has-color': 'color' in item.settings }"
+            :style="'color' in item.settings ? { '--item-color': item.settings.color } : undefined"
             :aria-label="`Edit or move ${item.label}`"
             @pointerdown="startInteraction($event, item, 'move')"
             @pointermove="updateInteraction"
@@ -539,46 +601,61 @@ function itemStyle(item: GridItem) {
           <button type="button" @click="completeDrop('move')">Move</button>
           <button type="button" :disabled="!canCopyDrop" @click="completeDrop('copy')">Copy</button>
         </template>
-        <button type="button" @click="dropAction = null">Cancel</button>
       </div>
       <p v-if="!dropAction.swapId && !canCopyDrop" class="grid-message">There is not enough separate space to copy here.</p>
     </SettingsDialog>
 
-    <SettingsDialog v-if="settingsOpen" title="Grid settings" @close="emit('closeSettings')">
+    <SettingsDialog v-if="settingsOpen" title="Grid settings" :showSaveButton="true" @close="emit('closeSettings')" @save="resizeGrid">
       <form class="settings-form" @submit.prevent="resizeGrid">
         <div class="settings-dimensions grid-dimensions">
           <NumericSetting v-model="columns" label="Columns" :min="1" :max="MAX_GRID_COLUMNS" />
           <NumericSetting v-model="rows" label="Rows" :min="1" :max="MAX_GRID_ROWS" />
         </div>
         <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
-        <div class="settings-actions">
-          <button type="submit">Apply</button>
-          <button type="button" @click="emit('closeSettings')">Cancel</button>
-        </div>
       </form>
     </SettingsDialog>
 
-    <SettingsDialog v-if="draft" title="Control settings" @close="draft = null; selectedId = null; message = ''">
-      <form v-if="draft" class="settings-form" @submit.prevent="saveItem">
-        <label>
-          Type
-          <select :value="draft.type" required @change="changeType">
-            <option value="pad">MPC Pad</option>
-            <option value="knob">Knob</option>
-            <option value="lfo">LFO</option>
-            <option value="mod-wheel">Mod Wheel</option>
-            <option value="piano-roll">Piano Roll</option>
-            <option value="arpeggiator">Arpeggiator</option>
-          </select>
-        </label>
-        <label>Name <input v-model="draft.label" maxlength="40" required /></label>
-        
-        <template v-if="draft.type === 'pad'">
-          <div class="settings-section">
-            <h3>Pad Settings</h3>
-            <label>Color <input v-model="draft.settings.color" type="color" required /></label>
+    <SettingsDialog v-if="draft" title="Control settings" :showSaveButton="true" @close="draft = null; selectedId = null; message = ''" @save="saveItem">
+      <template #header-actions>
+        <MPCPad v-if="draft.type === 'instrument-pad'" class="preview-pad" label="Play"
+          :settings="draft.settings" @output="handlePreviewOutput" />
+      </template>
+      <form v-if="draft" class="settings-form control-settings" @submit.prevent="saveItem">
+        <section class="control-panel">
+          <h3>Control</h3>
+          <label>
+            Type
+            <select :value="draft.type" required @change="changeType">
+              <option value="pad">MPC Pad</option>
+              <option value="instrument-pad">Instrument Pad</option>
+              <option value="knob">Knob</option>
+              <option value="lfo">LFO</option>
+              <option value="mod-wheel">Mod Wheel</option>
+              <option value="piano-roll">Piano Roll</option>
+              <option value="arpeggiator">Arpeggiator</option>
+            </select>
+          </label>
+          <label>Name <input v-model="draft.label" maxlength="40" required /></label>
+          <label v-if="draft.type === 'pad' || draft.type === 'instrument-pad' || draft.type === 'knob' || draft.type === 'piano-roll'">
+            Color <input v-model="draft.settings.color" type="color" required />
+          </label>
+        </section>
+
+        <section class="control-panel">
+          <h3>Layout</h3>
+          <div class="settings-dimensions">
+            <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="layout.columns" @update:model-value="draft.x = $event - 1" />
+            <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="layout.rows" @update:model-value="draft.y = $event - 1" />
+            <NumericSetting v-model="draft.width" label="Width" :min="1" :max="layout.columns" />
+            <NumericSetting v-model="draft.height" label="Height" :min="1" :max="layout.rows" />
           </div>
+        </section>
+
+        <section v-if="draft.type !== 'pad'" class="control-parameters">
+        <template v-if="draft.type === 'instrument-pad'">
+          <InstrumentPadSettingsPanel :draft="draft" @loading-change="sampleLoading = $event" />
         </template>
+        
         
         <template v-else-if="draft.type === 'knob'">
           <div class="settings-section">
@@ -589,7 +666,6 @@ function itemStyle(item: GridItem) {
             <NumericSetting :model-value="draft.settings.defaultValue" label="Default value" :step="0.1" @update:model-value="draft.settings.defaultValue = $event; if (!selectedId) draft.settings.value = $event" />
             <NumericSetting v-model="draft.settings.value" label="Current value" :step="0.1" />
             <label>Unit <input v-model="draft.settings.unit" type="text" maxlength="10" /></label>
-            <label>Color <input v-model="draft.settings.color" type="color" required /></label>
           </div>
         </template>
         <div v-else-if="draft.type === 'lfo'" class="settings-section">
@@ -622,8 +698,9 @@ function itemStyle(item: GridItem) {
           <NumericSetting v-model="draft.settings.gate" label="Gate" :min="0.05" :max="1" :step="0.05" />
           <label>Scale <select v-model="draft.settings.scale"><option value="chromatic">Chromatic</option><option value="major">Major</option><option value="minor">Minor</option><option value="pentatonic">Pentatonic</option></select></label>
         </div>
+        </section>
 
-        <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="settings-section">
+        <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">
           <h3>Connections</h3>
           <div v-for="connection in layout.connections.filter((entry) => entry.sourceId === selectedId || entry.targetId === selectedId)" :key="connection.id" class="wire-entry">
             <span>{{ connectionLabel(connection) }}</span>
@@ -631,16 +708,8 @@ function itemStyle(item: GridItem) {
           </div>
         </div>
 
-        <div class="settings-dimensions">
-          <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="layout.columns" @update:model-value="draft.x = $event - 1" />
-          <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="layout.rows" @update:model-value="draft.y = $event - 1" />
-          <NumericSetting v-model="draft.width" label="Width" :min="1" :max="layout.columns" />
-          <NumericSetting v-model="draft.height" label="Height" :min="1" :max="layout.rows" />
-        </div>
         <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
         <div class="settings-actions">
-          <button type="submit">Save</button>
-          <button type="button" @click="draft = null; selectedId = null; message = ''">Cancel</button>
           <button v-if="selectedId" type="button" class="remove-button" @click="removeItem">Remove</button>
         </div>
       </form>
@@ -664,7 +733,6 @@ function itemStyle(item: GridItem) {
         <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
         <div class="settings-actions">
           <button type="submit" :disabled="!wireInput">Connect</button>
-          <button type="button" @click="wirePair = null; message = ''">Cancel</button>
         </div>
       </form>
     </SettingsDialog>

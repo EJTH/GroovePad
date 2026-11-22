@@ -1,0 +1,22 @@
+import { SamplePlayer } from './SamplePlayer'
+import type { SampleLoopParams } from './types'
+
+export class SampleLoop extends SamplePlayer {
+  readonly type = 'sample-loop' as const
+  readonly params: SampleLoopParams
+
+  constructor(params: Partial<SampleLoopParams>) {
+    super()
+    this.params = {
+      sample: params.sample ?? '',
+      sampleName: params.sampleName ?? '',
+      cuts: params.cuts ?? [],
+      playback: params.playback ?? 'order',
+      volume: params.volume ?? -12,
+      pitch: params.pitch ?? 0,
+      loopStart: params.loopStart ?? 0,
+      loopEnd: params.loopEnd ?? 1,
+      envelope: params.envelope ?? { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.1 },
+    }
+  }
+}

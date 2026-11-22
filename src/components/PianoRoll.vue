@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, watch } from 'vue'
-import { scaleNote, scales } from '../music'
+import { noteName, scaleNote, scales } from '../music'
 import type { ParameterOutput, PianoRollSettings } from '../grid'
 
 const props = defineProps<{ label: string; settings: PianoRollSettings }>()
@@ -30,6 +30,21 @@ function up(event: PointerEvent) {
   pointers.delete(event.pointerId)
   send(note, false)
 }
+function move(event: PointerEvent) {
+  if (!pointers.has(event.pointerId)) return
+  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLButtonElement>('.key')
+  if (!target || !event.currentTarget || !(event.currentTarget instanceof HTMLElement) ||
+    !event.currentTarget.parentElement?.contains(target) || target.dataset.note === undefined) return
+
+  const newNote = Number(target.dataset.note)
+  const currentNote = pointers.get(event.pointerId)
+  
+  if (currentNote === undefined || currentNote === newNote) return
+  
+  send(currentNote, false)
+  pointers.set(event.pointerId, newNote)
+  send(newNote, true)
+}
 function keyDown(event: KeyboardEvent, note: number) {
   if ((event.key !== 'Enter' && event.key !== ' ') || event.repeat || keys.has(note)) return
   event.preventDefault()
@@ -56,13 +71,13 @@ onBeforeUnmount(releaseAll)
 </script>
 
 <template>
-  <div class="piano" :class="settings.orientation" :aria-label="label">
+  <div class="piano" :class="settings.orientation" :style="{ '--piano-color': settings.color }" :aria-label="label">
     <button v-for="(note, index) in notes" :key="index" type="button" class="key"
       :class="{ active: [...pointers.values()].includes(note) || keys.has(note) }"
-      :aria-label="`${label} note ${note}`"
-      @pointerdown="down($event, note)" @pointerup="up" @pointercancel="up" @lostpointercapture="up"
+      :aria-label="`${label} note ${noteName(note)}`" :data-note="note"
+      @pointerdown="down($event, note)" @pointerup="up" @pointermove="move" @pointercancel="up" @lostpointercapture="up"
       @keydown="keyDown($event, note)" @keyup="keyUp($event, note)" @blur="releaseKey(note)">
-      <span>{{ note }}</span>
+      <span>{{ noteName(note) }}</span>
     </button>
   </div>
 </template>
@@ -70,8 +85,8 @@ onBeforeUnmount(releaseAll)
 <style scoped>
 .piano { width: 100%; height: 100%; display: flex; overflow: auto; touch-action: none; }
 .piano.vertical { flex-direction: column-reverse; }
-.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; border: 1px solid #687066; border-radius: 2px; background: #e2e8dd; color: #252820; touch-action: none; }
+.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; border: 1px solid var(--piano-color); border-radius: 2px; background: color-mix(in srgb, var(--piano-color) 35%, #e2e8dd); color: #252820; touch-action: none; }
 .vertical .key { flex-basis: 24px; }
-.key.active { background: var(--accent); }
+.key.active { background: color-mix(in srgb, var(--piano-color) 65%, #e2e8dd); }
 .key span { font-size: 9px; }
 </style>

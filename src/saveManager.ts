@@ -1,22 +1,28 @@
 import { BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter } from '@zip.js/zip.js'
-import { isSavedProject, type SavedProject } from './project'
+import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 
-const maxJsonSize = 2 * 1024 * 1024
 const maxArchiveSize = 20 * 1024 * 1024
+const maxJsonSize = maxArchiveSize
 
 export async function saveProjectToFile(project: SavedProject): Promise<Blob> {
   if (!isSavedProject(project)) throw new Error('Project is invalid.')
-  const writer = new ZipWriter(new BlobWriter('application/zip'))
   const bankFiles = project.banks.map((_, index) => `banks/bank-${index + 1}.json`)
-  await writer.add('manifest.json', new TextReader(JSON.stringify({
+  const manifest = JSON.stringify({
     version: project.version, bpm: project.bpm, selectedBankId: project.selectedBankId, bankFiles,
-  }, null, 2)))
-  for (const [index, bank] of project.banks.entries()) {
-    await writer.add(bankFiles[index]!, new TextReader(JSON.stringify(bank, null, 2)))
+  }, null, 2)
+  const banks = project.banks.map((bank) => JSON.stringify(bank, null, 2))
+  const encoder = new TextEncoder()
+  if ([manifest, ...banks].reduce((total, json) => total + encoder.encode(json).length, 0) > maxArchiveSize) {
+    throw new Error('Project is too large to save.')
   }
+  const writer = new ZipWriter(new BlobWriter('application/zip'))
+  await writer.add('manifest.json', new TextReader(manifest))
+  for (const [index, bank] of banks.entries()) await writer.add(bankFiles[index]!, new TextReader(bank))
   await writer.add('samples/', undefined, { directory: true })
   await writer.add('loop_midi/', undefined, { directory: true })
-  return writer.close()
+  const blob = await writer.close()
+  if (blob.size > maxArchiveSize) throw new Error('Project archive is too large to save.')
+  return blob
 }
 
 export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
@@ -24,6 +30,9 @@ export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
   const reader = new ZipReader(new BlobReader(blob))
   try {
     const entries = await reader.getEntries()
+    if (entries.reduce((total, entry) => total + entry.uncompressedSize, 0) > maxArchiveSize) {
+      throw new Error('Uncompressed project archive is too large.')
+    }
     const names = entries.map((entry) => entry.filename)
     if (new Set(names).size !== names.length) throw new Error('Project contains duplicate archive entries.')
     if (entries.some((entry) => !entry.directory &&
@@ -46,6 +55,7 @@ export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
     const banks: unknown[] = []
     for (const path of manifest.bankFiles) banks.push(await readJson(path))
     const project: unknown = { ...manifest, banks }
+    migrateSavedProject(project)
     if (!isSavedProject(project)) throw new Error('Project data is invalid.')
     return project
   } finally {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { scales } from '../music'
+import { noteName, scales } from '../music'
 import type { ArpeggiatorSettings, HeldNote, ParameterOutput } from '../grid'
 
 const props = defineProps<{ label: string; settings: ArpeggiatorSettings; bpm: number; notes: HeldNote[] }>()
@@ -100,7 +100,7 @@ onBeforeUnmount(() => { stop(); syncForwarded([]) })
   <button type="button" class="arp" :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`"
     :aria-pressed="settings.enabled" @click="emit('toggle')">
     <strong>{{ label }}</strong>
-    <span>{{ settings.enabled ? (notes.length ? `Note ${activeNote ?? '–'}` : 'Waiting for notes') : 'Bypass' }}</span>
+    <span>{{ settings.enabled ? (notes.length ? `Note ${activeNote === null ? '–' : noteName(activeNote)}` : 'Waiting for notes') : 'Bypass' }}</span>
   </button>
 </template>
 

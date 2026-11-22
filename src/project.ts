@@ -1,4 +1,4 @@
-import { canResizeGrid, isValidPlacement, type Connection, type GridItem, type GridLayout } from './grid'
+import { canResizeGrid, DEFAULT_PIANO_COLOR, isValidPlacement, type Connection, type GridItem, type GridLayout } from './grid'
 import { createsCycle, isCompatible, tempoDivisions } from './parameters'
 
 export interface Bank {
@@ -23,6 +23,49 @@ const integer = (value: unknown, min: number, max: number): value is number => w
 const color = (value: unknown): value is string => typeof value === 'string' && /^#[\da-f]{6}$/i.test(value)
 const oneOf = (value: unknown, choices: string[]): boolean => typeof value === 'string' && choices.includes(value)
 
+function validEnvelope(value: unknown): boolean {
+  return object(value) && within(value.attack, 0.001, 1) && within(value.decay, 0.001, 2) &&
+    within(value.sustain, 0, 1) && within(value.release, 0.01, 10)
+}
+
+function validSample(params: Record<string, unknown>, start: unknown, end: unknown, allowLoop = false): boolean {
+  if (typeof params.sample !== 'string' || (params.sample !== '' && !/^data:[^,]*;base64,/.test(params.sample)) ||
+    typeof params.sampleName !== 'string' ||
+    !within(params.pitch, -12, 12) || !within(start, 0, 1) || !within(end, 0, 1) || start >= end ||
+    !Array.isArray(params.cuts)) return false
+  let previous = start
+  for (const cut of params.cuts) {
+    if (!finite(cut) || cut <= previous || cut >= end) return false
+    previous = cut
+  }
+  if (params.playback === 'random' || params.playback === 'order') return true
+  if (params.playback === 'loop') return allowLoop
+  if (typeof params.playback !== 'string' || !/^cut:(0|[1-9]\d*)$/.test(params.playback)) return false
+  return Number(params.playback.slice(4)) <= params.cuts.length
+}
+
+function validInstrument(settings: Record<string, unknown>): boolean {
+  const params = settings.instrumentParams
+  if (!color(settings.color) || !object(params) || !within(params.volume, -48, 0) || !validEnvelope(params.envelope)) return false
+  switch (settings.instrumentType) {
+    case 'sample-hit':
+      return validSample(params, params.start, params.end, true) &&
+        oneOf(params.loopMode, ['once', 'loop', 'back-and-forth']) &&
+        (params.playback === 'loop' ? params.loopMode !== 'once' : params.loopMode === 'once') &&
+        typeof params.reverse === 'boolean'
+    case 'sample-loop':
+      return validSample(params, params.loopStart, params.loopEnd)
+    case '303':
+      return within(params.transpose, -36, 36) && within(params.resonance, 0.1, 30) &&
+        within(params.slideTime, 0, 0.5) && within(params.filterFrequency, 50, 5000) &&
+        within(params.filterAmount, 0, 1) && validEnvelope(params.filterEnvelope)
+    case '808':
+      return oneOf(params.drum, ['kick', 'snare', 'closed-hat', 'open-hat', 'rim', 'tom']) &&
+        within(params.pitch, 50, 300) && within(params.tonality, 0, 1) && within(params.tone, 0, 1)
+    default: return false
+  }
+}
+
 function isItem(value: unknown): value is GridItem {
   if (!object(value) || typeof value.id !== 'string' || !value.id || typeof value.label !== 'string' ||
     !value.label.trim() || !integer(value.x, 0, 7) || !integer(value.y, 0, 9) ||
@@ -30,6 +73,7 @@ function isItem(value: unknown): value is GridItem {
   const s = value.settings
   switch (value.type) {
     case 'pad': return color(s.color)
+    case 'instrument-pad': return validInstrument(s)
     case 'knob': return color(s.color) && finite(s.min) && finite(s.max) && s.min < s.max &&
       finite(s.step) && s.step > 0 && s.step <= s.max - s.min &&
       within(s.defaultValue, s.min, s.max) && within(s.value, s.min, s.max) && typeof s.unit === 'string'
@@ -37,7 +81,7 @@ function isItem(value: unknown): value is GridItem {
       oneOf(s.rateMode, ['free', 'sync']) && within(s.rate, 0.01, 20) &&
       within(s.depth, 0, 1) && within(s.offset, -1, 1) && within(s.smoothness, 0, 0.99)
     case 'mod-wheel': return within(s.depth, 0, 1) && typeof s.autoCenter === 'boolean'
-    case 'piano-roll': return integer(s.octaves, 1, 3) && integer(s.transpose, -36, 36) &&
+    case 'piano-roll': return color(s.color) && integer(s.octaves, 1, 3) && integer(s.transpose, -36, 36) &&
       oneOf(s.scale, ['chromatic', 'major', 'minor', 'pentatonic']) && oneOf(s.orientation, ['horizontal', 'vertical'])
     case 'arpeggiator': return typeof s.enabled === 'boolean' && oneOf(s.style, ['up', 'down', 'up-down', 'random']) &&
       oneOf(s.rate, [...tempoDivisions]) && integer(s.distance, -24, 24) && integer(s.steps, 1, 16) &&
@@ -80,8 +124,35 @@ export function migrateSavedProject(value: unknown): void {
   for (const bank of value.banks) {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
     for (const item of bank.layout.items) {
+      if (object(item) && item.type === 'instrument-pad' && object(item.settings) &&
+        (item.settings.instrumentType === 'sample-hit' || item.settings.instrumentType === 'sample-loop') &&
+        object(item.settings.instrumentParams)) {
+        const params = item.settings.instrumentParams
+        if (typeof params.sample === 'string' && params.sample && !/^data:[^,]*;base64,/.test(params.sample)) {
+          params.sample = ''
+          params.sampleName = ''
+        }
+        if (params.sampleName === undefined) params.sampleName = ''
+        if (params.cuts === undefined) params.cuts = []
+        if (params.playback === undefined) params.playback = 'order'
+        if (item.settings.instrumentType === 'sample-hit') {
+          if (params.start === undefined) params.start = 0
+          if (params.end === undefined) params.end = 1
+          if (params.loopMode === undefined) params.loopMode = 'once'
+          if (params.reverse === undefined) params.reverse = false
+          if (params.loopMode === 'loop' || params.loopMode === 'back-and-forth') params.playback = 'loop'
+        }
+      }
+      if (object(item) && item.type === 'instrument-pad' && object(item.settings) &&
+        item.settings.instrumentType === '303' && object(item.settings.instrumentParams) &&
+        item.settings.instrumentParams.transpose === undefined) {
+        item.settings.instrumentParams.transpose = 0
+      }
       if (object(item) && item.type === 'lfo' && object(item.settings) && item.settings.offset === undefined) {
         item.settings.offset = 0
+      }
+      if (object(item) && item.type === 'piano-roll' && object(item.settings) && item.settings.color === undefined) {
+        item.settings.color = DEFAULT_PIANO_COLOR
       }
       if (object(item) && item.type === 'arpeggiator' && object(item.settings) &&
         finite(item.settings.rate) && item.settings.rate > 0) {

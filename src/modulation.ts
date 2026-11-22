@@ -2,6 +2,16 @@ import { copyControl, type GridItem, type GridLayout } from './grid'
 import { applySelectInput, inputs, outputs, type ParameterMetadata } from './parameters'
 
 function baseValue(item: GridItem, input: ParameterMetadata): number | undefined {
+  if (item.type === 'instrument-pad' && item.settings.instrumentType === '303') {
+    const [key, nested] = input.id.split('.')
+    if (!key) return undefined
+    const value: unknown = item.settings.instrumentParams[key]
+    if (nested && typeof value === 'object' && value !== null && nested in value) {
+      const nestedValue: unknown = Reflect.get(value, nested)
+      return typeof nestedValue === 'number' ? nestedValue : undefined
+    }
+    return typeof value === 'number' ? value : undefined
+  }
   if (item.type === 'knob' && input.id === 'value') return item.settings.value
   if (item.type === 'lfo') {
     if (input.id === 'rate') return item.settings.rate
@@ -28,6 +38,15 @@ function setInput(item: GridItem, input: ParameterMetadata, value: number) {
   if (input.choices) {
     const index = Math.min(input.choices.length - 1, Math.floor(value / 128 * input.choices.length))
     applySelectInput(item, input.id, index)
+  } else if (item.type === 'instrument-pad' && item.settings.instrumentType === '303') {
+    const [key, nested] = input.id.split('.')
+    if (!key) return
+    if (nested) {
+      const envelope: unknown = item.settings.instrumentParams[key]
+      if (typeof envelope === 'object' && envelope !== null && nested in envelope) Reflect.set(envelope, nested, value)
+    } else {
+      item.settings.instrumentParams[key] = value
+    }
   } else if (item.type === 'knob' && input.id === 'value') {
     const { min, max, step } = item.settings
     item.settings.value = Number(Math.max(min, Math.min(max, min + Math.round((value - min) / step) * step)).toPrecision(12))

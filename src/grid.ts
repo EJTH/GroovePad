@@ -1,4 +1,7 @@
-export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator'
+import type { InstrumentType } from './instruments/types'
+import { InstrumentFactory } from './instruments'
+
+export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad'
 
 interface GridItemBase {
   id: string
@@ -11,6 +14,12 @@ interface GridItemBase {
 
 export interface PadSettings {
   color: string
+}
+
+export interface InstrumentPadSettings {
+  color: string
+  instrumentType: InstrumentType
+  instrumentParams: Record<string, any>
 }
 
 export interface KnobSettings {
@@ -35,7 +44,7 @@ export interface LfoSettings {
 export interface ModWheelSettings { depth: number; autoCenter: boolean }
 export type Scale = 'chromatic' | 'major' | 'minor' | 'pentatonic'
 export type TempoDivision = '1/1' | '3/4' | '1/2' | '1/4' | '1/8' | '1/16' | '1/32'
-export interface PianoRollSettings { octaves: number; transpose: number; scale: Scale; orientation: 'horizontal' | 'vertical' }
+export interface PianoRollSettings { color: string; octaves: number; transpose: number; scale: Scale; orientation: 'horizontal' | 'vertical' }
 export interface ArpeggiatorSettings { enabled: boolean; style: 'up' | 'down' | 'up-down' | 'random'; rate: TempoDivision; distance: number; steps: number; gate: number; scale: Scale }
 export interface HeldNote { note: number; velocity: number; count: number }
 
@@ -46,6 +55,7 @@ export type GridItem = GridItemBase & (
   | { type: 'mod-wheel'; settings: ModWheelSettings }
   | { type: 'piano-roll'; settings: PianoRollSettings }
   | { type: 'arpeggiator'; settings: ArpeggiatorSettings }
+  | { type: 'instrument-pad'; settings: InstrumentPadSettings }
 )
 
 export interface ParameterOutput {
@@ -55,15 +65,29 @@ export interface ParameterOutput {
   velocity?: number
 }
 
-export function createControl(id: string, x: number, y: number, type: GridItemType): GridItem {
+export const DEFAULT_PIANO_COLOR = '#b8d986'
+
+export function createControl(id: string, x: number, y: number, type: GridItemType, instrumentType?: InstrumentType): GridItem {
   const base = { id, x, y, width: 1, height: 1 }
   switch (type) {
     case 'pad': return { ...base, type, label: 'Pad', settings: { color: '#b8d986' } }
     case 'knob': return { ...base, type, label: 'Knob', settings: { color: '#83c9bb', min: 0, max: 127, defaultValue: 64, value: 64, step: 1, unit: '' } }
     case 'lfo': return { ...base, type, label: 'LFO', settings: { waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } }
     case 'mod-wheel': return { ...base, type, label: 'Mod Wheel', settings: { depth: 1, autoCenter: false } }
-    case 'piano-roll': return { ...base, type, label: 'Piano', settings: { octaves: 1, transpose: 0, scale: 'chromatic', orientation: 'horizontal' } }
+    case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, transpose: 0, scale: 'chromatic', orientation: 'horizontal' } }
     case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 4, gate: 0.5, scale: 'chromatic' } }
+    case 'instrument-pad':
+      const iType = instrumentType || 'sample-hit'
+      return {
+        ...base,
+        type,
+        label: `${iType} Pad`,
+        settings: {
+          color: '#ff6b9d',
+          instrumentType: iType,
+          instrumentParams: InstrumentFactory.getDefaultParams(iType),
+        },
+      }
   }
 }
 
@@ -100,6 +124,21 @@ export function isValidPlacement(layout: GridLayout, candidate: GridItem): boole
   )
 }
 
+function deepCopyInstrumentParams(params: Record<string, any>): Record<string, any> {
+  const copy: Record<string, any> = {}
+  for (const key in params) {
+    const value = params[key]
+    if (Array.isArray(value)) {
+      copy[key] = [...value]
+    } else if (value && typeof value === 'object') {
+      copy[key] = { ...value }
+    } else {
+      copy[key] = value
+    }
+  }
+  return copy
+}
+
 export function copyControl(item: GridItem, id: string): GridItem {
   switch (item.type) {
     case 'pad': return { ...item, id, settings: { ...item.settings } }
@@ -108,6 +147,7 @@ export function copyControl(item: GridItem, id: string): GridItem {
     case 'mod-wheel': return { ...item, id, settings: { ...item.settings } }
     case 'piano-roll': return { ...item, id, settings: { ...item.settings } }
     case 'arpeggiator': return { ...item, id, settings: { ...item.settings } }
+    case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
   }
 }
 

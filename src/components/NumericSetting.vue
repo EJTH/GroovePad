@@ -56,7 +56,7 @@ function updateKnob(output: ParameterOutput) {
         type="number"
         :min="min"
         :max="max"
-        :step="min !== undefined && max !== undefined ? step : 'any'"
+        step="any"
         required
         @input="updateInput"
       />

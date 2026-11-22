@@ -20,6 +20,15 @@ function select(id: string, label: string, choices: readonly string[]): Paramete
   return { id, label, kind: 'number', min: 0, max: 127, choices }
 }
 
+function envelopeInputs(id: string, label: string): ParameterMetadata[] {
+  return [
+    { id: `${id}.attack`, label: `${label} attack`, kind: 'number', min: 0.001, max: 1 },
+    { id: `${id}.decay`, label: `${label} decay`, kind: 'number', min: 0.001, max: 2 },
+    { id: `${id}.sustain`, label: `${label} sustain`, kind: 'number', min: 0, max: 1 },
+    { id: `${id}.release`, label: `${label} release`, kind: 'number', min: 0.01, max: 10 },
+  ]
+}
+
 export function outputs(item: GridItem): ParameterMetadata[] {
   switch (item.type) {
     case 'knob': return [{ id: 'value', label: 'Value', kind: 'number', min: item.settings.min, max: item.settings.max }]
@@ -27,16 +36,31 @@ export function outputs(item: GridItem): ParameterMetadata[] {
     case 'mod-wheel': return [{ id: 'value', label: 'Position', kind: 'number', min: item.settings.autoCenter ? -1 : 0, max: 1 }]
     case 'piano-roll':
     case 'arpeggiator': return [{ id: 'note', label: 'Notes', kind: 'note' }]
+    case 'instrument-pad':
     case 'pad': return [
       { id: 'velocity', label: 'Velocity', kind: 'number', min: 0, max: 127 },
       { id: 'gate', label: 'Gate', kind: 'number', min: 0, max: 1 },
     ]
+    default: return []
   }
 }
 
 export function inputs(item: GridItem): ParameterMetadata[] {
   switch (item.type) {
     case 'knob': return [{ id: 'value', label: 'Current value', kind: 'number', min: item.settings.min, max: item.settings.max }]
+    case 'instrument-pad': return [
+      { id: 'note', label: 'Note input', kind: 'note' },
+      ...(item.settings.instrumentType === '303' ? [
+        { id: 'transpose', label: 'Transpose', kind: 'number' as const, min: -36, max: 36 },
+        { id: 'resonance', label: 'Resonance', kind: 'number' as const, min: 0.1, max: 30 },
+        { id: 'volume', label: 'Volume', kind: 'number' as const, min: -48, max: 0 },
+        { id: 'slideTime', label: 'Slide time', kind: 'number' as const, min: 0, max: 0.5 },
+        { id: 'filterFrequency', label: 'Filter frequency', kind: 'number' as const, min: 50, max: 5000 },
+        { id: 'filterAmount', label: 'Filter amount', kind: 'number' as const, min: 0, max: 1 },
+        ...envelopeInputs('envelope', 'Amplitude envelope'),
+        ...envelopeInputs('filterEnvelope', 'Filter envelope'),
+      ] : []),
+    ]
     case 'pad': return [{ id: 'note', label: 'Note input', kind: 'note' }]
     case 'lfo': return [
       select('waveform', 'Waveform', waveforms),
@@ -51,6 +75,7 @@ export function inputs(item: GridItem): ParameterMetadata[] {
       { id: 'note', label: 'Note input', kind: 'note' },
       select('style', 'Style', arpStyles), select('rate', 'Rate', tempoDivisions), select('scale', 'Scale', scales),
     ]
+    default: return []
   }
 }
 

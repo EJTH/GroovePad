@@ -2,12 +2,68 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import { canResizeGrid, type GridLayout } from './grid'
+import { canResizeGrid, createControl, type GridLayout } from './grid'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
+}
+
+function createDefaultProject(): Bank {
+  const layout: GridLayout = { columns: 4, rows: 4, items: [], connections: [] }
+
+  const drums = [
+    { label: 'Kick', drum: 'kick' as const, x: 0, y: 0 },
+    { label: 'Snare', drum: 'snare' as const, x: 1, y: 0 },
+    { label: 'Hi-Hat', drum: 'closed-hat' as const, x: 2, y: 0 },
+    { label: 'Open Hat', drum: 'open-hat' as const, x: 3, y: 0 },
+    { label: 'Tom', drum: 'tom' as const, x: 0, y: 1 },
+    { label: 'Rim', drum: 'rim' as const, x: 1, y: 1 },
+  ]
+
+  for (const drum of drums) {
+    const drumPad = createControl(`drum-${drum.drum}`, drum.x, drum.y, 'instrument-pad', '808')
+    drumPad.label = drum.label
+    if (drumPad.type === 'instrument-pad') {
+      drumPad.settings.instrumentParams.drum = drum.drum
+    }
+    layout.items.push(drumPad)
+  }
+
+  const pianoRoll = createControl('piano-roll-1', 0, 2, 'piano-roll')
+  pianoRoll.width = 4
+  pianoRoll.height = 1
+  pianoRoll.y = 3;
+  if (pianoRoll.type === 'piano-roll') {
+    pianoRoll.settings.octaves = 1
+    pianoRoll.settings.scale = 'chromatic'
+    pianoRoll.settings.orientation = 'horizontal'
+  }
+  layout.items.push(pianoRoll)
+
+  const bass303 = createControl('bass-303', 3, 2, 'instrument-pad', '303')
+  bass303.y = 2;
+  bass303.width = 1
+  bass303.height = 1
+  bass303.label = 'Bass 303'
+  layout.items.push(bass303)
+
+  layout.connections.push({
+    id: 'connection-piano-to-bass',
+    sourceId: 'piano-roll-1',
+    sourceParameter: 'note',
+    targetId: 'bass-303',
+    targetParameter: 'note',
+  })
+
+  return {
+    id: 'A',
+    title: 'Beat',
+    icon: '♫',
+    color: '#ff6b9d',
+    layout,
+  }
 }
 
 const banks = ref<Bank[]>([
@@ -248,7 +304,7 @@ async function loadBank(event: Event) {
       importedBanks.value = project.banks
       return
     }
-    if (file.size > 2 * 1024 * 1024) throw new Error('Bank file is too large.')
+    if (file.size > 20 * 1024 * 1024) throw new Error('Bank file is too large.')
     const bank: unknown = JSON.parse(await file.text())
     const candidate: unknown = { version: 1, bpm: 120, banks: [bank], selectedBankId:
       typeof bank === 'object' && bank !== null && 'id' in bank ? bank.id : null }
@@ -277,6 +333,18 @@ function saveTempo() {
   bpm.value = bpmDraft.value
   tempoError.value = ''
   projectSettingsOpen.value = false
+}
+
+function newProject() {
+  if (!window.confirm('Start a new project? The current project will be replaced.')) return
+  gridSettingsOpen.value = false
+  bankDraft.value = null
+  banks.value = [createDefaultProject()]
+  selectedBankId.value = 'A'
+  bpm.value = 120
+  workspaceRevision.value++
+  storageBlocked = false
+  saveLocalProject()
 }
 
 onUnmounted(() => {
@@ -322,6 +390,7 @@ onUnmounted(() => {
           <div class="menu-dismiss" @click="menuOpen = false"></div>
           <nav id="main-menu" class="menu" aria-label="Main menu">
             <p>Project</p>
+            <button type="button" @click="newProject(); menuOpen = false">New project</button>
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>
             <button type="button" :disabled="busy" @click="saveProject(); menuOpen = false">Save project</button>
             <button type="button" @click="bpmDraft = bpm; tempoError = ''; projectSettingsOpen = true; menuOpen = false">Project settings</button>
