@@ -23,6 +23,11 @@ function release() {
   activeNote.value = null
 }
 
+function sendNote(note: number, on: boolean, velocity: number) {
+  if (on) emit('output', { parameter: 'velocity', value: velocity })
+  emit('output', { parameter: 'note', value: note, on, velocity })
+}
+
 function tick() {
   release()
   const notes = [...props.notes].sort((a, b) => a.note - b.note)
@@ -33,12 +38,13 @@ function tick() {
   if (style === 'down') index = steps - 1 - index
   else if (style === 'up-down') { const n = step % period; index = n < steps ? n : period - n }
   else if (style === 'random') index = Math.floor(Math.random() * steps)
-  const root = notes[index % notes.length]!.note
+  const held = notes[index % notes.length]!
+  const root = held.note
   let note = root + Math.floor(index / notes.length) * distance
   while (note < 127 && !scales[scale].includes(((note - root) % 12 + 12) % 12)) note++
   note = Math.max(0, Math.min(127, note))
   activeNote.value = note
-  emit('output', { parameter: 'note', value: note, on: true, velocity: 100 })
+  sendNote(note, true, held.velocity)
   releaseTimer = window.setTimeout(release, stepDuration() * gate)
   step++
 }
@@ -62,13 +68,13 @@ function syncForwarded(notes: HeldNote[]) {
   for (const [pitch, old] of forwarded) {
     const remaining = next.get(pitch)?.count ?? 0
     for (let count = remaining; count < old.count; count++) {
-      emit('output', { parameter: 'note', value: pitch, on: false, velocity: old.velocity })
+      sendNote(pitch, false, old.velocity)
     }
   }
   for (const [pitch, note] of next) {
     const previous = forwarded.get(pitch)?.count ?? 0
     for (let count = previous; count < note.count; count++) {
-      emit('output', { parameter: 'note', value: pitch, on: true, velocity: note.velocity })
+      sendNote(pitch, true, note.velocity)
     }
   }
   forwarded.clear()
@@ -100,7 +106,7 @@ onBeforeUnmount(() => { stop(); syncForwarded([]) })
   <button type="button" class="arp" :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`"
     :aria-pressed="settings.enabled" @click="emit('toggle')">
     <strong>{{ label }}</strong>
-    <span>{{ settings.enabled ? (notes.length ? `Note ${activeNote === null ? '–' : noteName(activeNote)}` : 'Waiting for notes') : 'Bypass' }}</span>
+    <span>{{ settings.enabled ? (notes.length ? `Note ${activeNote === null ? '–' : noteName(activeNote)}` : 'On') : 'Off' }}</span>
   </button>
 </template>
 

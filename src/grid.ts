@@ -1,7 +1,7 @@
 import type { InstrumentType } from './instruments/types'
 import { InstrumentFactory } from './instruments'
 
-export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad'
+export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad' | 'output-selector'
 
 interface GridItemBase {
   id: string
@@ -47,6 +47,7 @@ export type TempoDivision = '1/1' | '3/4' | '1/2' | '1/4' | '1/8' | '1/16' | '1/
 export interface PianoRollSettings { color: string; octaves: number; transpose: number; scale: Scale; orientation: 'horizontal' | 'vertical' }
 export interface ArpeggiatorSettings { enabled: boolean; style: 'up' | 'down' | 'up-down' | 'random'; rate: TempoDivision; distance: number; steps: number; gate: number; scale: Scale }
 export interface HeldNote { note: number; velocity: number; count: number }
+export interface OutputSelectorSettings { index: number }
 
 export type GridItem = GridItemBase & (
   | { type: 'pad'; settings: PadSettings }
@@ -56,6 +57,7 @@ export type GridItem = GridItemBase & (
   | { type: 'piano-roll'; settings: PianoRollSettings }
   | { type: 'arpeggiator'; settings: ArpeggiatorSettings }
   | { type: 'instrument-pad'; settings: InstrumentPadSettings }
+  | { type: 'output-selector'; settings: OutputSelectorSettings }
 )
 
 export interface ParameterOutput {
@@ -76,6 +78,7 @@ export function createControl(id: string, x: number, y: number, type: GridItemTy
     case 'mod-wheel': return { ...base, type, label: 'Mod Wheel', settings: { depth: 1, autoCenter: false } }
     case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, transpose: 0, scale: 'chromatic', orientation: 'horizontal' } }
     case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 4, gate: 0.5, scale: 'chromatic' } }
+    case 'output-selector': return { ...base, type, label: 'Output Selector', settings: { index: 0 } }
     case 'instrument-pad':
       const iType = instrumentType || 'sample-hit'
       return {
@@ -97,6 +100,9 @@ export interface Connection {
   sourceParameter: string
   targetId: string
   targetParameter: string
+  modulationAmount?: number
+  modulationMin?: number
+  modulationMax?: number
 }
 
 export interface GridLayout {
@@ -147,6 +153,7 @@ export function copyControl(item: GridItem, id: string): GridItem {
     case 'mod-wheel': return { ...item, id, settings: { ...item.settings } }
     case 'piano-roll': return { ...item, id, settings: { ...item.settings } }
     case 'arpeggiator': return { ...item, id, settings: { ...item.settings } }
+    case 'output-selector': return { ...item, id, settings: { ...item.settings } }
     case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
   }
 }

@@ -1,5 +1,6 @@
 import { canResizeGrid, DEFAULT_PIANO_COLOR, isValidPlacement, type Connection, type GridItem, type GridLayout } from './grid'
-import { createsCycle, isCompatible, tempoDivisions } from './parameters'
+import { createsCycle, selectorConnectionsCompatible, tempoDivisions } from './parameters'
+import type { SampleAsset } from './sampleAssets'
 
 export interface Bank {
   id: string
@@ -14,6 +15,7 @@ export interface SavedProject {
   bpm: number
   banks: Bank[]
   selectedBankId: string
+  assets?: SampleAsset[]
 }
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -86,6 +88,7 @@ function isItem(value: unknown): value is GridItem {
     case 'arpeggiator': return typeof s.enabled === 'boolean' && oneOf(s.style, ['up', 'down', 'up-down', 'random']) &&
       oneOf(s.rate, [...tempoDivisions]) && integer(s.distance, -24, 24) && integer(s.steps, 1, 16) &&
       within(s.gate, 0.05, 1) && oneOf(s.scale, ['chromatic', 'major', 'minor', 'pentatonic'])
+    case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER)
     default: return false
   }
 }
@@ -93,7 +96,11 @@ function isItem(value: unknown): value is GridItem {
 function isConnection(value: unknown): value is Connection {
   return object(value) && typeof value.id === 'string' && !!value.id &&
     typeof value.sourceId === 'string' && typeof value.sourceParameter === 'string' &&
-    typeof value.targetId === 'string' && typeof value.targetParameter === 'string'
+    typeof value.targetId === 'string' && typeof value.targetParameter === 'string' &&
+    (value.modulationAmount === undefined || within(value.modulationAmount, -100, 100)) &&
+    (value.modulationMin === undefined || within(value.modulationMin, -100, 100)) &&
+    (value.modulationMax === undefined || within(value.modulationMax, -100, 100)) &&
+    (value.modulationAmount === undefined || (value.modulationMin === undefined && value.modulationMax === undefined))
 }
 
 function isLayout(value: unknown): value is GridLayout {
@@ -108,7 +115,7 @@ function isLayout(value: unknown): value is GridLayout {
   for (const connection of layout.connections) {
     const source = layout.items.find((item) => item.id === connection.sourceId)
     const target = layout.items.find((item) => item.id === connection.targetId)
-    if (!source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter) ||
+    if (!source || !target || !selectorConnectionsCompatible(layout.items, seen, connection) ||
       createsCycle(seen, connection.sourceId, connection.targetId) ||
       seen.some((entry) => entry.id === connection.id || (entry.sourceId === connection.sourceId &&
         entry.sourceParameter === connection.sourceParameter && entry.targetId === connection.targetId &&
@@ -175,6 +182,10 @@ export function migrateSavedProject(value: unknown): void {
 export function isSavedProject(value: unknown): value is SavedProject {
   if (!object(value) || value.version !== 1 || typeof value.selectedBankId !== 'string' ||
     !within(value.bpm, 1, 300) || !Array.isArray(value.banks) || !value.banks.length) return false
+  if (value.assets !== undefined && (!Array.isArray(value.assets) ||
+    !value.assets.every((asset: unknown) => object(asset) && typeof asset.name === 'string' &&
+      typeof asset.source === 'string' && /^data:[^,]*;base64,/.test(asset.source)) ||
+    new Set(value.assets.map((asset: SampleAsset) => asset.source)).size !== value.assets.length)) return false
   if (!value.banks.every((bank: unknown) => object(bank) && typeof bank.id === 'string' && !!bank.id &&
     typeof bank.title === 'string' && typeof bank.icon === 'string' && color(bank.color) && isLayout(bank.layout))) return false
   const ids = value.banks.map((bank: Bank) => bank.id)

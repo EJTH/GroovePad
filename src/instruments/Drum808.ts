@@ -1,4 +1,5 @@
 import * as Tone from 'tone'
+import { defaultEnvelope } from './defaultEnvelope'
 import type { Drum808Params, DrumType, InstrumentInstance, ADSREnvelope } from './types'
 
 export class Drum808 implements InstrumentInstance {
@@ -18,7 +19,7 @@ export class Drum808 implements InstrumentInstance {
       drum: this.currentDrumType,
       pitch: params.pitch ?? 150,
       volume: params.volume ?? -12,
-      envelope: params.envelope || { attack: 0.001, decay: 0.5, sustain: 0.1, release: 0.1 },
+      envelope: params.envelope ?? defaultEnvelope('808'),
       tonality: params.tonality ?? 0.5,
       tone: params.tone ?? 0.7,
     }
@@ -32,12 +33,7 @@ export class Drum808 implements InstrumentInstance {
       oscillator: {
         type: 'sine',
       },
-      envelope: {
-        attack: 0.001,
-        decay: 0.4,
-        sustain: 0,
-        release: 0.1,
-      },
+      envelope: this.params.envelope,
     })
 
     this.noiseOsc = new Tone.Oscillator({
@@ -122,8 +118,9 @@ export class Drum808 implements InstrumentInstance {
     } else {
       this.synth.triggerAttackRelease(finalPitch, finalDecay * 0.6, now)
       
-      if (drumParams.noiseMix > 0) {
-        this.noiseGain.gain.setValueAtTime(drumParams.noiseMix * velocityGain * 0.6, now)
+      const noiseMix = Math.min(1, drumParams.noiseMix * 2 * (1 - this.params.tonality))
+      if (noiseMix > 0) {
+        this.noiseGain.gain.setValueAtTime(noiseMix * velocityGain * 0.6, now)
         this.noiseGain.gain.exponentialRampToValueAtTime(0.01, now + finalDecay * 0.8)
         
         const noiseFilterStart = this.params.drum === 'closed-hat' ? 10000 : this.params.drum === 'open-hat' ? 9000 : 6000

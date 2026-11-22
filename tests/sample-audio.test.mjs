@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { createServer } from 'vite'
+import { BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter } from '@zip.js/zip.js'
 
 async function loadTypeScript(path) {
   const source = await readFile(new URL(path, import.meta.url), 'utf8')
@@ -81,6 +82,64 @@ test('release keeps looping until a tail can finish and handles short releases',
   assert.equal(scheduleLoopRelease(full, 1, 8), undefined)
 })
 
+test('sample modulation updates active voices without restarting them and tracks loop position', async () => {
+  const source = await readFile(new URL('../src/instruments/SamplePlayer.ts', import.meta.url), 'utf8')
+  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
+  let time = 2
+  let releasePosition
+  const tone = { now: () => time, ToneAudioBuffer: class { get() { return { sampleRate: 100 } } } }
+  const modules = {
+    tone,
+    './sampleRegion': {},
+    './sampleHitLoop': { scheduleLoopRelease: (_, position) => { releasePosition = position; return undefined } },
+  }
+  const module = { exports: {} }
+  vm.runInNewContext(outputText, { module, exports: module.exports, require: (name) => modules[name] })
+  class Sample extends module.exports.SamplePlayer {
+    type = 'sample-hit'
+    params = { sample: 'audio', pitch: 0, volume: -12, envelope: { attack: 0.1, decay: 0.2, sustain: 0.5, release: 1 } }
+  }
+  const sample = new Sample()
+  const volumeChanges = []
+  const stops = []
+  const player = { playbackRate: 1, volume: { rampTo: (value) => volumeChanges.push(value) }, stop: (when) => stops.push(when) }
+  const envelope = { triggerRelease: () => {} }
+  const voice = { player, envelope, note: 60, looping: true, released: false,
+    loopPlan: { plan: {}, lastTime: 0, elapsedFrames: 0, rate: 1 } }
+  sample.voices.add(voice)
+  sample.updateParameters({ ...sample.params, pitch: 12, volume: -6, envelope: { ...sample.params.envelope, release: 2 } })
+  assert.equal(sample.voices.size, 1)
+  assert.equal(player.playbackRate, 2)
+  assert.deepEqual(volumeChanges, [-6])
+  assert.equal(envelope.release, 2)
+  assert.equal(voice.loopPlan.elapsedFrames, 200)
+  time = 3
+  sample.release()
+  assert.equal(releasePosition, 400)
+  assert.deepEqual(stops, [5])
+})
+
+test('808 tonality changes the noise level on subsequent hits', async () => {
+  const source = await readFile(new URL('../src/instruments/Drum808.ts', import.meta.url), 'utf8')
+  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
+  const module = { exports: {} }
+  vm.runInNewContext(outputText, { module, exports: module.exports, require: () => ({ now: () => 0 }) })
+  const drum = Object.create(module.exports.Drum808.prototype)
+  let noise = -1
+  const parameter = { setValueAtTime: () => {}, exponentialRampToValueAtTime: () => {} }
+  drum.params = { drum: 'snare', pitch: 150, volume: -12, tonality: 0.5, tone: 0.7 }
+  drum.synth = { triggerAttackRelease: () => {} }
+  drum.filter = { frequency: parameter }
+  drum.noiseOsc = {}
+  drum.noiseGain = { gain: { ...parameter, setValueAtTime: (value) => { noise = value } } }
+  drum.noiseFilter = { frequency: parameter }
+  drum.trigger(127)
+  assert.equal(noise, 0.7 * 0.6)
+  drum.params.tonality = 1
+  drum.trigger(127)
+  assert.equal(noise, 0)
+})
+
 test('recorded chunks produce a valid 16-bit mono WAV', async () => {
   const { encodeWav } = await loadTypeScript('../src/audio/wav.ts')
   const blob = encodeWav([Float32Array.of(-1, 0), Float32Array.of(1)], 48000)
@@ -149,6 +208,95 @@ test('sample hit loop playback migrates and validates without changing sample lo
     loop.settings.instrumentParams.playback = 'loop'
     project.banks[0].layout.items.push(loop)
     assert.equal(isSavedProject(project), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('project assets discover legacy samples and update all matching pads without removing them', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { samplesInBanks, replaceSampleInBanks } = await server.ssrLoadModule('/src/sampleAssets.ts')
+    const hit = createControl('hit', 0, 0, 'instrument-pad', 'sample-hit')
+    const loop = createControl('loop', 1, 0, 'instrument-pad', 'sample-loop')
+    const other = createControl('other', 2, 0, 'instrument-pad', 'sample-hit')
+    const old = 'data:audio/wav;base64,YQ=='
+    const replacement = { name: 'new.wav', source: 'data:audio/wav;base64,Yg==' }
+    Object.assign(hit.settings.instrumentParams, { sample: old, sampleName: 'old.wav', start: 0.1, end: 0.9, cuts: [0.5], playback: 'loop', loopMode: 'loop' })
+    Object.assign(loop.settings.instrumentParams, { sample: old, sampleName: 'old.wav', loopStart: 0.2, loopEnd: 0.8, cuts: [0.5], playback: 'cut:1' })
+    Object.assign(other.settings.instrumentParams, { sample: replacement.source, sampleName: replacement.name })
+    const banks = [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [hit, loop, other], connections: [] } }]
+    assert.deepEqual(samplesInBanks(banks), [{ name: 'old.wav', source: old }, replacement])
+    replaceSampleInBanks(banks, old, replacement)
+    assert.equal(hit.settings.instrumentParams.sample, replacement.source)
+    assert.equal(hit.settings.instrumentParams.playback, 'loop')
+    assert.deepEqual([hit.settings.instrumentParams.start, hit.settings.instrumentParams.end, hit.settings.instrumentParams.cuts], [0, 1, []])
+    assert.deepEqual([loop.settings.instrumentParams.loopStart, loop.settings.instrumentParams.loopEnd, loop.settings.instrumentParams.cuts, loop.settings.instrumentParams.playback], [0, 1, [], 'order'])
+    replaceSampleInBanks(banks, replacement.source)
+    assert.equal(banks[0].layout.items.length, 3)
+    for (const item of banks[0].layout.items) {
+      assert.equal(item.settings.instrumentParams.sample, '')
+      assert.equal(item.settings.instrumentParams.sampleName, '')
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('project archives preserve unused assets and reject invalid asset lists', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const asset = { name: 'unused.wav', source: 'data:audio/wav;base64,YQ==' }
+    const hit = createControl('hit', 0, 0, 'instrument-pad', 'sample-hit')
+    Object.assign(hit.settings.instrumentParams, { sample: asset.source, sampleName: asset.name })
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', assets: [asset, { name: 'unused.wav', source: 'data:audio/webm;codecs=opus;base64,Yg==' }],
+      banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+        layout: { columns: 4, rows: 4, items: [hit], connections: [] } }] }
+    const archive = await saveProjectToFile(project)
+    const reader = new ZipReader(new BlobReader(archive))
+    try {
+      const entries = await reader.getEntries()
+      assert.ok(entries.some((entry) => entry.filename === 'samples/unused.wav'))
+      assert.ok(entries.some((entry) => entry.filename === 'samples/unused-2.wav'))
+      for (const entry of entries.filter((entry) => entry.filename.endsWith('.json'))) {
+        assert.doesNotMatch(await entry.getData(new TextWriter()), /data:audio/)
+      }
+    } finally {
+      await reader.close()
+    }
+    const loaded = await loadProjectFromFile(archive)
+    assert.deepEqual(loaded.assets, project.assets)
+    assert.equal(loaded.banks[0].layout.items[0].settings.instrumentParams.sample, asset.source)
+    assert.equal(isSavedProject({ ...project, assets: undefined }), true)
+    project.assets.push(asset)
+    assert.equal(isSavedProject(project), false)
+    project.assets = [{ name: 'invalid', source: 'https://example.com/audio.wav' }]
+    assert.equal(isSavedProject(project), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('older ZIP projects with embedded pad samples still load', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { samplesInBanks } = await server.ssrLoadModule('/src/sampleAssets.ts')
+    const hit = createControl('hit', 0, 0, 'instrument-pad', 'sample-hit')
+    Object.assign(hit.settings.instrumentParams, { sample: 'data:audio/wav;base64,YQ==', sampleName: 'legacy.wav' })
+    const bank = { id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [hit], connections: [] } }
+    const writer = new ZipWriter(new BlobWriter())
+    await writer.add('manifest.json', new TextReader(JSON.stringify({ version: 1, bpm: 120, selectedBankId: 'A', bankFiles: ['banks/bank-1.json'] })))
+    await writer.add('banks/bank-1.json', new TextReader(JSON.stringify(bank)))
+    const project = await loadProjectFromFile(await writer.close())
+    assert.deepEqual(samplesInBanks(project.banks), [{ name: 'legacy.wav', source: 'data:audio/wav;base64,YQ==' }])
   } finally {
     await server.close()
   }

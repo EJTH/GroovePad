@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import type { SampleHitParams, SampleLoopParams, SamplePlayback } from '../instruments/types'
 import { encodeWav } from '../audio/wav'
+import { readSampleFile, sampleAssetKey, setSample, type SampleAsset } from '../sampleAssets'
+import SampleAssetsDialog from './SampleAssetsDialog.vue'
 import WaveformEditor from './WaveformEditor.vue'
 
 const props = defineProps<{ params: SampleHitParams | SampleLoopParams }>()
 const emit = defineEmits<{ 'loading-change': [loading: boolean] }>()
+const assets = inject(sampleAssetKey)
+if (!assets) throw new Error('Sample asset store is unavailable.')
+const assetsOpen = ref(false)
 const buffer = shallowRef<AudioBuffer>()
 const error = ref('')
 const loading = ref(false)
@@ -38,30 +43,17 @@ async function decode(data: ArrayBuffer): Promise<AudioBuffer> {
   }
 }
 
-function dataUrl(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not read the file.'))
-    reader.onerror = () => reject(reader.error ?? new Error('Could not read the file.'))
-    reader.readAsDataURL(file)
-  })
-}
-
 async function loadSample(file: Blob, name: string) {
   const current = ++request
   error.value = ''
   loading.value = true
   try {
-    const [source, decoded] = await Promise.all([dataUrl(file), file.arrayBuffer().then(decode)])
+    const { source, buffer: decoded } = await readSampleFile(file)
     if (disposed || current !== request) return
     decodedSource = source
     buffer.value = decoded
-    props.params.sample = source
-    props.params.sampleName = name
-    start.value = 0
-    end.value = 1
-    props.params.cuts = []
-    props.params.playback = hitLooping.value ? 'loop' : 'order'
+    assets!.add({ source, name })
+    setSample(props.params, { source, name })
   } catch (cause) {
     if (!disposed && current === request) error.value = `Could not load audio: ${cause instanceof Error ? cause.message : String(cause)}`
   } finally {
@@ -131,7 +123,9 @@ async function startRecording() {
       stopMicrophone()
       try {
         const audio = encodeWav(chunks, context.sampleRate)
-        void loadSample(audio, 'Recording.wav').finally(() => {
+        let number = 1
+        while (assets!.assets.value.some((asset) => asset.name.toLowerCase() === `recording-${number}.wav`)) number++
+        void loadSample(audio, `recording-${number}.wav`).finally(() => {
           if (!disposed) recording.value = 'idle'
         })
       } catch (cause) {
@@ -183,12 +177,16 @@ function resetSample() {
   decodedSource = ''
   buffer.value = undefined
   error.value = ''
-  props.params.sample = ''
-  props.params.sampleName = ''
-  start.value = 0
-  end.value = 1
-  props.params.cuts = []
-  props.params.playback = hitLooping.value ? 'loop' : 'order'
+  setSample(props.params)
+}
+
+function selectAsset(asset: SampleAsset) {
+  assetsOpen.value = false
+  setSample(props.params, asset)
+}
+
+function deletedAsset(source: string) {
+  if (props.params.sample === source) resetSample()
 }
 
 watch(() => props.params.sample, async (source) => {
@@ -242,6 +240,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="sample-editor">
     <div class="sample-actions">
+      <button v-if="'loopMode' in params" type="button" aria-label="Load from project" title="Load from project" :disabled="busy" @click="assetsOpen = true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v5H3zM5 9v11h14V9M9 13h6" /></svg>
+      </button>
       <button type="button" aria-label="Open sample file" title="Open sample file" :disabled="busy" @click="fileInput?.click()">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 2h9v12H3z" /><path d="M3 10h18" /></svg>
       </button>
@@ -256,6 +257,7 @@ onBeforeUnmount(() => {
       </button>
       <input ref="fileInput" type="file" hidden accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac" @change="selectFile" />
     </div>
+    <SampleAssetsDialog v-if="assetsOpen" selectable @close="assetsOpen = false" @select="selectAsset" @delete="deletedAsset" />
     <div v-if="params.sample" class="sample-info">
       <div>
         <p><strong>{{ params.sampleName || 'Sample' }}</strong></p>

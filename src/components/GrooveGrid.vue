@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { canResizeGrid, canSwapItems, copyControl, createControl, isValidPlacement, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
-import { createsCycle, inputs, isCompatible, outputs } from '../parameters'
-import { effectiveControls } from '../modulation'
+import { createsCycle, inputs, isCompatible, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
+import { effectiveControls, modulationOffset, normalizeSignal, numericSignal, numericSourceRange, signalSource } from '../modulation'
+import { noteName } from '../music'
 import * as Tone from 'tone'
 import { InstrumentFactory, type InstrumentInstance } from '../instruments'
 import MPCPad from './MPCPad.vue'
@@ -14,7 +15,9 @@ import Arpeggiator from './Arpeggiator.vue'
 import InstrumentPad from './InstrumentPad.vue'
 import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
 import NumericSetting from './NumericSetting.vue'
+import ControlIdentitySettings from './ControlIdentitySettings.vue'
 import SettingsDialog from './SettingsDialog.vue'
+import OutputSelector from './OutputSelector.vue'
 
 const props = defineProps<{
   layout: GridLayout
@@ -31,6 +34,18 @@ const columns = ref(props.layout.columns)
 const rows = ref(props.layout.rows)
 const selectedId = ref<string | null>(null)
 const draft = ref<GridItem | null>(null)
+const controlIdentity = ref<InstanceType<typeof ControlIdentitySettings> | null>(null)
+const addPosition = ref<{ x: number; y: number } | null>(null)
+const controlTypes: { type: GridItemType; label: string; description: string; icon: string }[] = [
+  { type: 'instrument-pad', label: 'Instrument Pad', description: 'Play a sound', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M9 13l2 2 4-6' },
+  { type: 'pad', label: 'Pad', description: 'Trigger a control', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M12 8v8 M8 12h8' },
+  { type: 'knob', label: 'Knob', description: 'Adjust a value', icon: 'M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9z M12 12l4-4' },
+  { type: 'lfo', label: 'LFO', description: 'Modulate with a wave', icon: 'M2 12c2.5 0 2.5-7 5-7s2.5 14 5 14 2.5-14 5-14 2.5 7 5 7' },
+  { type: 'mod-wheel', label: 'Mod Wheel', description: 'Control modulation', icon: 'M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M7 11h10 M7 14h10' },
+  { type: 'piano-roll', label: 'Piano Roll', description: 'Play notes', icon: 'M3 5h18v14H3z M9 5v14 M15 5v14 M6 5v7 M12 5v7 M18 5v7' },
+  { type: 'arpeggiator', label: 'Arpeggiator', description: 'Sequence held notes', icon: 'M4 19h3v-4H4z M10 19h3V9h-3z M16 19h3V4h-3z' },
+  { type: 'output-selector', label: 'Output Selector', description: 'Route a signal', icon: 'M3 12h7 M10 12l5-6h6 M10 12l5 6h6 M18 3l3 3-3 3 M18 15l3 3-3 3' },
+]
 const sampleLoading = ref(false)
 let preview: InstrumentInstance | undefined
 let previewGeneration = 0
@@ -93,6 +108,11 @@ const wireOutput = ref('')
 const wireInput = ref('')
 const activeNotes = reactive(new Map<string, { count: number; velocity: number }>())
 const signals = reactive(new Map<string, number>())
+const selectorNotes = reactive(new Map<string, number>())
+const selectorFlash = ref<{ sourceId: string; targetId: string; sequence: number } | null>(null)
+let selectorFlashSequence = 0
+let selectorFlashTimer: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => clearTimeout(selectorFlashTimer))
 const displayItems = computed(() => props.editing ? props.layout.items : effectiveControls(props.layout, signals))
 const sourceItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.sourceId))
 const targetItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.targetId))
@@ -104,7 +124,8 @@ function availableInputs(outputId: string) {
   const source = sourceItem.value
   const target = targetItem.value
   if (!source || !target || createsCycle(props.layout.connections, source.id, target.id)) return []
-  return inputs(target).filter((input) => isCompatible(source, outputId, target, input.id) &&
+  return inputs(target).filter((input) => selectorConnectionsCompatible(props.layout.items, props.layout.connections,
+    { id: '', sourceId: source.id, sourceParameter: outputId, targetId: target.id, targetParameter: input.id }) &&
     !props.layout.connections.some((connection) => connection.sourceId === source.id &&
       connection.sourceParameter === outputId && connection.targetId === target.id && connection.targetParameter === input.id))
 }
@@ -124,10 +145,11 @@ const cells = computed(() => Array.from({ length: props.layout.columns * props.l
 })))
 
 watch(() => props.editing, (editing) => {
-  if (editing) signals.clear()
+  if (editing) { signals.clear(); selectorNotes.clear() }
   if (!editing) {
     selectedId.value = null
     draft.value = null
+    addPosition.value = null
     interaction.value = null
     dropAction.value = null
     message.value = ''
@@ -173,8 +195,15 @@ function nextControlId() {
 
 function addItem(x: number, y: number) {
   selectedId.value = null
-  draft.value = createControl(nextControlId(), x, y, 'pad')
+  addPosition.value = { x, y }
   message.value = ''
+}
+
+function chooseControlType(type: GridItemType) {
+  const position = addPosition.value
+  if (!position) return
+  addPosition.value = null
+  draft.value = createControl(nextControlId(), position.x, position.y, type)
 }
 
 function isOccupied(x: number, y: number) {
@@ -210,10 +239,12 @@ function saveItem() {
     return
   }
   if (!item.label.trim()) {
+    controlIdentity.value?.open()
     message.value = 'Enter a control name.'
     return
   }
   if (!isValidPlacement(props.layout, item)) {
+    controlIdentity.value?.open()
     message.value = 'The control must fit inside the grid without overlapping another control.'
     return
   }
@@ -228,7 +259,9 @@ function saveItem() {
   if (selectedId.value && props.layout.connections.some((connection) => {
     const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
     const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
-    return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter)
+    const items = props.layout.items.map((entry) => entry.id === item.id ? item : entry)
+    return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter) ||
+      !selectorConnectionsCompatible(items, props.layout.connections, connection)
   })) {
     message.value = 'Remove incompatible wires before changing the control type.'
     return
@@ -254,22 +287,119 @@ function handleOutput(item: GridItem, output: ParameterOutput) {
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
   if (!sourceParameter || sourceParameter.kind !== 'note') return
   if (output.on) void Tone.start().catch((error: unknown) => console.error('Could not start audio:', error))
+  routeNote(item.id, output)
+}
+
+function routeNote(sourceId: string, output: ParameterOutput) {
+  const source = props.layout.items.find((entry) => entry.id === sourceId)
+  if (!source) return
+  const selected = source.type === 'output-selector' ? selectedSelectorWire(props.layout.connections, source) : undefined
   for (const connection of props.layout.connections) {
-    if (connection.sourceId !== item.id || connection.sourceParameter !== output.parameter) continue
+    if (connection.sourceId !== sourceId || connection.sourceParameter !== output.parameter ||
+      (source.type === 'output-selector' && connection.id !== selected?.id)) continue
     const target = props.layout.items.find((entry) => entry.id === connection.targetId)
     const targetParameter = target && inputs(target).find((parameter) => parameter.id === connection.targetParameter)
     if (!target || !targetParameter) continue
-    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'instrument-pad' || target.type === 'arpeggiator')) {
+    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'instrument-pad' || target.type === 'arpeggiator' || target.type === 'output-selector')) {
       const key = `${connection.id}:${output.value}`
       const previous = activeNotes.get(key)
       const count = previous?.count ?? 0
       if (output.on) activeNotes.set(key, { count: count + 1, velocity: output.velocity ?? 100 })
       else if (count > 1) activeNotes.set(key, { count: count - 1, velocity: previous!.velocity })
       else activeNotes.delete(key)
+      if (output.on && (target.type === 'pad' || target.type === 'instrument-pad')) {
+        handleOutput(target, { parameter: 'velocity', value: output.velocity ?? 100 })
+      }
       if (target.type === 'pad') emit('output', target.id, { parameter: 'note', value: output.value, on: output.on, velocity: output.velocity })
+      if (target.type === 'output-selector') {
+        if (output.on) selectorNotes.set(target.id, output.value)
+        emit('output', target.id, output)
+        routeNote(target.id, output)
+      }
     }
   }
 }
+
+function selectorDestination(item: GridItem) {
+  const wire = selectedSelectorWire(props.layout.connections, item)
+  const target = wire && props.layout.items.find((entry) => entry.id === wire.targetId)
+  const input = target && inputs(target).find((parameter) => parameter.id === wire?.targetParameter)
+  return target && input ? `${target.label} / ${input.label}` : 'No destination'
+}
+
+function numericWireValue(wire: Connection) {
+  const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
+  if (!signal) return undefined
+  const offset = modulationOffset(wire, signal)
+  return offset === undefined ? signal.value : Math.max(0, Math.min(127, offset * 127))
+}
+
+function selectorInputValue(wire: Connection) {
+  const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
+  if (!signal) return undefined
+  const offset = modulationOffset(wire, signal)
+  return offset === undefined ? normalizeSignal(signal.value, signal.min, signal.max) * 127
+    : Math.max(0, Math.min(127, offset * 127))
+}
+
+function selectorValue(item: GridItem) {
+  const incoming = props.layout.connections.find((wire) => wire.targetId === item.id && wire.targetParameter !== 'selection')
+  if (!incoming) return 'No signal'
+  if (incoming.targetParameter === 'note') {
+    const note = selectorNotes.get(item.id)
+    return note === undefined ? 'No signal' : noteName(note)
+  }
+  const value = numericWireValue(incoming)
+  return value === undefined ? 'No signal' : Number(value.toPrecision(10)).toString()
+}
+
+function setSelectorIndex(item: GridItem, index: number, userInitiated = false) {
+  if (item.type !== 'output-selector') return
+  const count = props.layout.connections.filter((wire) => wire.sourceId === item.id).length
+  if (!count || item.settings.index % count === index) return
+  const notes = receivedNotes(item.id)
+  for (const note of notes) for (let i = 0; i < note.count; i++) {
+    routeNote(item.id, { parameter: 'note', value: note.note, on: false, velocity: note.velocity })
+  }
+  item.settings.index = index
+  const selected = selectedSelectorWire(props.layout.connections, item)
+  if (selected && userInitiated) {
+    selectorFlash.value = { sourceId: item.id, targetId: selected.targetId, sequence: ++selectorFlashSequence }
+    clearTimeout(selectorFlashTimer)
+    selectorFlashTimer = setTimeout(() => { selectorFlash.value = null }, 900)
+  } else if (!userInitiated && selectorFlash.value?.sourceId === item.id) {
+    clearTimeout(selectorFlashTimer)
+    selectorFlash.value = null
+  }
+  for (const note of notes) for (let i = 0; i < note.count; i++) {
+    routeNote(item.id, { parameter: 'note', value: note.note, on: true, velocity: note.velocity })
+  }
+}
+
+function advanceSelector(item: GridItem) {
+  const original = props.layout.items.find((entry) => entry.id === item.id)
+  if (!original || original.type !== 'output-selector') return
+  const count = props.layout.connections.filter((wire) => wire.sourceId === item.id).length
+  if (count < 2) return
+  setSelectorIndex(original, (original.settings.index + 1) % count, true)
+}
+
+watch(() => props.editing ? [] : props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
+  const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection')
+  const origin = wire && signalSource(props.layout, wire)
+  return { id: item.id, wireId: wire?.id, originId: origin?.id, value: wire && selectorInputValue(wire) }
+}), (current, previous) => {
+  for (const selection of current) {
+    const old = previous?.find((entry) => entry.id === selection.id)
+    if (selection.value === undefined || !Number.isFinite(selection.value) ||
+      (old && old.wireId === selection.wireId && old.originId === selection.originId && old.value === selection.value)) continue
+    const item = props.layout.items.find((entry) => entry.id === selection.id)
+    const count = props.layout.connections.filter((wire) => wire.sourceId === selection.id).length
+    if (!item || !count) continue
+    const value = Math.max(0, Math.min(127, selection.value))
+    setSelectorIndex(item, Math.min(count - 1, Math.floor(value * count / 128)))
+  }
+}, { immediate: true })
 
 function padActive(id: string) {
   return props.layout.connections.some((connection) => connection.targetId === id &&
@@ -299,7 +429,8 @@ function connectWire() {
   const source = sourceItem.value
   const target = targetItem.value
   if (!target || !source || !wireOutput.value || !wireInput.value ||
-    !isCompatible(source, wireOutput.value, target, wireInput.value) ||
+    !selectorConnectionsCompatible(props.layout.items, props.layout.connections,
+      { id: '', sourceId: source.id, sourceParameter: wireOutput.value, targetId: target.id, targetParameter: wireInput.value }) ||
     createsCycle(props.layout.connections, source.id, target.id) ||
     !availableInputs(wireOutput.value).some((option) => option.id === wireInput.value)) {
     message.value = 'Choose a compatible source that does not create a cycle or duplicate wire.'
@@ -323,6 +454,19 @@ function selectWirePair(sourceId: string, targetId: string) {
   wireOutput.value = ''
   wireInput.value = ''
   message.value = ''
+  const choices = availableOutputs.value
+  if (!choices.length) {
+    wirePair.value = null
+    message.value = 'No compatible connection is available between these controls.'
+  } else if (choices.length === 1) {
+    const output = choices[0]!
+    const targets = availableInputs(output.id)
+    if (targets.length === 1) {
+      wireOutput.value = output.id
+      wireInput.value = targets[0]!.id
+      connectWire()
+    }
+  }
 }
 
 function wirePointerDown(event: PointerEvent, item: GridItem) {
@@ -373,6 +517,42 @@ function connectionLabel(connection: Connection) {
   const source = props.layout.items.find((item) => item.id === connection.sourceId)
   const target = props.layout.items.find((item) => item.id === connection.targetId)
   return `${source?.label} / ${source && outputs(source).find((parameter) => parameter.id === connection.sourceParameter)?.label} → ${target?.label} / ${target && inputs(target).find((parameter) => parameter.id === connection.targetParameter)?.label}`
+}
+
+function canSetModulationAmount(connection: Connection) {
+  const source = props.layout.items.find((item) => item.id === connection.sourceId)
+  const target = props.layout.items.find((item) => item.id === connection.targetId)
+  return source && target &&
+    outputs(source).some((output) => output.id === connection.sourceParameter && output.kind === 'number') &&
+    inputs(target).some((input) => input.id === connection.targetParameter && input.kind === 'number')
+}
+
+function modulationEndpoint(connection: Connection, endpoint: 'min' | 'max'): number | undefined {
+  const mapped = endpoint === 'min' ? connection.modulationMin : connection.modulationMax
+  if (mapped !== undefined || connection.modulationAmount === undefined) return mapped
+  if (endpoint === 'max') return connection.modulationAmount
+  const range = numericSourceRange(props.layout, connection)
+  return range && range.min < 0 && range.max > 0
+    ? -connection.modulationAmount : 0
+}
+
+function setModulationEndpoint(connection: Connection, endpoint: 'min' | 'max', event: Event) {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) return
+  if (input.value !== '' && (!input.validity.valid || !Number.isFinite(input.valueAsNumber))) {
+    input.value = modulationEndpoint(connection, endpoint)?.toString() ?? ''
+    message.value = 'Modulation offsets must be between -100 and 100%.'
+    return
+  }
+  if (connection.modulationAmount !== undefined) {
+    connection.modulationMin = modulationEndpoint(connection, 'min')
+    connection.modulationMax = modulationEndpoint(connection, 'max')
+    delete connection.modulationAmount
+  }
+  const key = endpoint === 'min' ? 'modulationMin' : 'modulationMax'
+  if (input.value === '') delete connection[key]
+  else connection[key] = input.valueAsNumber
+  message.value = ''
 }
 
 function wireLine(connection: Connection) {
@@ -554,6 +734,10 @@ function itemStyle(item: GridItem) {
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
             <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
             <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" />
+            <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
+              :destination="selectorDestination(item)" :value="selectorValue(item)"
+              :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
+              @advance="advanceSelector(item)" />
             <Arpeggiator v-else :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
           </div>
           <button
@@ -569,6 +753,8 @@ function itemStyle(item: GridItem) {
             @pointercancel="endInteraction($event, true)"
             @click="editing && $event.detail === 0 && openSettings(item)"
           >{{ item.label }}</button>
+          <span v-if="!editing && selectorFlash?.targetId === item.id" :key="selectorFlash.sequence"
+            class="selector-receiver-flash" aria-hidden="true"></span>
           <button
             v-if="editing && !wiring"
             type="button"
@@ -615,41 +801,25 @@ function itemStyle(item: GridItem) {
       </form>
     </SettingsDialog>
 
+    <SettingsDialog v-if="addPosition" title="Add control" @close="addPosition = null">
+      <p class="control-picker-hint">Choose a control to add to your grid.</p>
+      <div class="control-picker">
+        <button v-for="control in controlTypes" :key="control.type" type="button" class="control-picker-button"
+          @click="chooseControlType(control.type)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="control.icon" /></svg>
+          <span><strong>{{ control.label }}</strong><small>{{ control.description }}</small></span>
+        </button>
+      </div>
+    </SettingsDialog>
+
     <SettingsDialog v-if="draft" title="Control settings" :showSaveButton="true" @close="draft = null; selectedId = null; message = ''" @save="saveItem">
       <template #header-actions>
         <MPCPad v-if="draft.type === 'instrument-pad'" class="preview-pad" label="Play"
           :settings="draft.settings" @output="handlePreviewOutput" />
       </template>
       <form v-if="draft" class="settings-form control-settings" @submit.prevent="saveItem">
-        <section class="control-panel">
-          <h3>Control</h3>
-          <label>
-            Type
-            <select :value="draft.type" required @change="changeType">
-              <option value="pad">MPC Pad</option>
-              <option value="instrument-pad">Instrument Pad</option>
-              <option value="knob">Knob</option>
-              <option value="lfo">LFO</option>
-              <option value="mod-wheel">Mod Wheel</option>
-              <option value="piano-roll">Piano Roll</option>
-              <option value="arpeggiator">Arpeggiator</option>
-            </select>
-          </label>
-          <label>Name <input v-model="draft.label" maxlength="40" required /></label>
-          <label v-if="draft.type === 'pad' || draft.type === 'instrument-pad' || draft.type === 'knob' || draft.type === 'piano-roll'">
-            Color <input v-model="draft.settings.color" type="color" required />
-          </label>
-        </section>
-
-        <section class="control-panel">
-          <h3>Layout</h3>
-          <div class="settings-dimensions">
-            <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="layout.columns" @update:model-value="draft.x = $event - 1" />
-            <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="layout.rows" @update:model-value="draft.y = $event - 1" />
-            <NumericSetting v-model="draft.width" label="Width" :min="1" :max="layout.columns" />
-            <NumericSetting v-model="draft.height" label="Height" :min="1" :max="layout.rows" />
-          </div>
-        </section>
+        <ControlIdentitySettings ref="controlIdentity" :draft="draft" :columns="layout.columns" :rows="layout.rows"
+          :control-types="controlTypes" @change-type="changeType" />
 
         <section v-if="draft.type !== 'pad'" class="control-parameters">
         <template v-if="draft.type === 'instrument-pad'">
@@ -689,7 +859,7 @@ function itemStyle(item: GridItem) {
           <label>Scale <select v-model="draft.settings.scale"><option value="chromatic">Chromatic</option><option value="major">Major</option><option value="minor">Minor</option><option value="pentatonic">Pentatonic</option></select></label>
           <label>Orientation <select v-model="draft.settings.orientation"><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select></label>
         </div>
-        <div v-else class="settings-section">
+        <div v-else-if="draft.type === 'arpeggiator'" class="settings-section">
           <h3>Arpeggiator Settings</h3>
           <label>Style <select v-model="draft.settings.style"><option value="up">Up</option><option value="down">Down</option><option value="up-down">Up-down</option><option value="random">Random</option></select></label>
           <label>Rate <select v-model="draft.settings.rate"><option value="1/1">1/1</option><option value="3/4">3/4</option><option value="1/2">1/2</option><option value="1/4">1/4</option><option value="1/8">1/8</option><option value="1/16">1/16</option><option value="1/32">1/32</option></select></label>
@@ -703,8 +873,21 @@ function itemStyle(item: GridItem) {
         <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">
           <h3>Connections</h3>
           <div v-for="connection in layout.connections.filter((entry) => entry.sourceId === selectedId || entry.targetId === selectedId)" :key="connection.id" class="wire-entry">
-            <span>{{ connectionLabel(connection) }}</span>
-            <button type="button" class="wire-button" @click="removeWire(connection)">Remove wire</button>
+            <div class="wire-entry-heading">
+              <span class="wire-entry-label">{{ connectionLabel(connection) }}</span>
+              <template v-if="canSetModulationAmount(connection)">
+                <input :value="modulationEndpoint(connection, 'min') ?? ''" class="wire-amount" type="number" min="-100" max="100" step="any"
+                  placeholder="Min %" title="Offset at source minimum; leave both blank for the original mapping"
+                  :aria-label="`Minimum modulation offset (%) for ${connectionLabel(connection)}`" @change="setModulationEndpoint(connection, 'min', $event)" />
+                <input :value="modulationEndpoint(connection, 'max') ?? ''" class="wire-amount" type="number" min="-100" max="100" step="any"
+                  placeholder="Max %" title="Offset at source maximum; leave both blank for the original mapping"
+                  :aria-label="`Maximum modulation offset (%) for ${connectionLabel(connection)}`" @change="setModulationEndpoint(connection, 'max', $event)" />
+              </template>
+              <button type="button" class="wire-button" :aria-label="`Remove wire: ${connectionLabel(connection)}`"
+                title="Remove wire" @click="removeWire(connection)">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19" /></svg>
+              </button>
+            </div>
           </div>
         </div>
 

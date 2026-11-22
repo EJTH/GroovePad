@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import GrooveGrid from './components/GrooveGrid.vue'
+import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import { canResizeGrid, createControl, type GridLayout } from './grid'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
+import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -75,6 +77,7 @@ const banks = ref<Bank[]>([
 
 const selectedBankId = ref('A')
 const bpm = ref(120)
+const assets = ref<SampleAsset[]>([])
 const storageKey = 'groovepad.project.v1'
 const storageError = ref('')
 let storageBlocked = false
@@ -89,6 +92,8 @@ try {
     banks.value = data.banks
     selectedBankId.value = data.selectedBankId
     bpm.value = data.bpm
+    assets.value = data.assets ?? []
+    for (const asset of samplesInBanks(data.banks)) addAsset(asset)
   }
 } catch (error) {
   storageBlocked = true
@@ -100,7 +105,7 @@ function saveLocalProject() {
   saveTimer = undefined
   if (storageBlocked) return
   try {
-    localStorage.setItem(storageKey, JSON.stringify({ version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value }))
+    localStorage.setItem(storageKey, JSON.stringify({ version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }))
     storageError.value = ''
   } catch (error) {
     storageError.value = `Local project could not be saved: ${error instanceof Error ? error.message : String(error)}.`
@@ -112,7 +117,7 @@ function replaceInvalidProject() {
   saveLocalProject()
 }
 
-watch([banks, selectedBankId, bpm], () => {
+watch([banks, selectedBankId, bpm, assets], () => {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = window.setTimeout(saveLocalProject, 300)
 }, { deep: true })
@@ -127,6 +132,7 @@ const wiring = ref(false)
 watch(editing, (value) => { if (!value) wiring.value = false })
 const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
+const assetsOpen = ref(false)
 const bpmDraft = ref(120)
 const tempoError = ref('')
 const projectError = ref('')
@@ -142,6 +148,24 @@ let longPressTimer: number | undefined
 let longPressPosition: { x: number; y: number } | undefined
 let suppressBankClick = false
 let beatTimer: number | undefined
+
+function addAsset(asset: SampleAsset) {
+  if (!assets.value.some((entry) => entry.source === asset.source)) assets.value.push(asset)
+}
+
+provide(sampleAssetKey, {
+  assets,
+  add: addAsset,
+  remove(source) {
+    replaceSampleInBanks(banks.value, source)
+    assets.value = assets.value.filter((asset) => asset.source !== source)
+  },
+  swap(source, replacement) {
+    replaceSampleInBanks(banks.value, source, replacement)
+    assets.value = assets.value.filter((asset) => asset.source !== source)
+    addAsset(replacement)
+  },
+})
 
 function updateBeatTimer() {
   if (beatTimer !== undefined) window.clearInterval(beatTimer)
@@ -247,7 +271,7 @@ async function saveProject() {
   projectError.value = ''
   try {
     const blob = await saveProjectToFile(JSON.parse(JSON.stringify({
-      version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value,
+      version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value,
     })))
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -278,6 +302,8 @@ async function loadProject(event: Event) {
     banks.value = project.banks
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
+    assets.value = project.assets ?? []
+    for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
     storageBlocked = false
     saveLocalProject()
@@ -321,6 +347,7 @@ async function loadBank(event: Event) {
 function addImportedBank(bank: Bank) {
   const imported = { ...bank, id: nextBankId() }
   banks.value.push(imported)
+  for (const asset of samplesInBanks([imported])) addAsset(asset)
   selectedBankId.value = imported.id
   importedBanks.value = null
 }
@@ -342,6 +369,7 @@ function newProject() {
   banks.value = [createDefaultProject()]
   selectedBankId.value = 'A'
   bpm.value = 120
+  assets.value = []
   workspaceRevision.value++
   storageBlocked = false
   saveLocalProject()
@@ -393,6 +421,7 @@ onUnmounted(() => {
             <button type="button" @click="newProject(); menuOpen = false">New project</button>
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>
             <button type="button" :disabled="busy" @click="saveProject(); menuOpen = false">Save project</button>
+            <button type="button" @click="assetsOpen = true; menuOpen = false">Manage assets</button>
             <button type="button" @click="bpmDraft = bpm; tempoError = ''; projectSettingsOpen = true; menuOpen = false">Project settings</button>
             <p>Bank</p>
             <button type="button" @click="editBank(); menuOpen = false">Add empty bank</button>
@@ -483,6 +512,7 @@ onUnmounted(() => {
         @close-settings="gridSettingsOpen = false"
       />
     </section>
+    <SampleAssetsDialog v-if="assetsOpen" @close="assetsOpen = false" />
     <SettingsDialog v-if="bankDraft" :title="bankDraft.id ? 'Bank settings' : 'Add bank'" @close="bankDraft = null">
       <form class="settings-form bank-form" @submit.prevent="saveBank">
         <label>Title <input v-model="bankDraft.title" required maxlength="80"></label>

@@ -15,6 +15,8 @@ export const scales = ['chromatic', 'major', 'minor', 'pentatonic'] as const
 export const orientations = ['horizontal', 'vertical'] as const
 export const arpStyles = ['up', 'down', 'up-down', 'random'] as const
 export const tempoDivisions = ['1/1', '3/4', '1/2', '1/4', '1/8', '1/16', '1/32'] as const
+const velocityOutput: ParameterMetadata = { id: 'velocity', label: 'Velocity', kind: 'number', min: 0, max: 127 }
+const pressureOutput: ParameterMetadata = { id: 'pressure', label: 'Pressure', kind: 'number', min: 0, max: 127 }
 
 function select(id: string, label: string, choices: readonly string[]): ParameterMetadata {
   return { id, label, kind: 'number', min: 0, max: 127, choices }
@@ -29,16 +31,59 @@ function envelopeInputs(id: string, label: string): ParameterMetadata[] {
   ]
 }
 
+function instrumentInputs(item: Extract<GridItem, { type: 'instrument-pad' }>): ParameterMetadata[] {
+  const { instrumentType, instrumentParams } = item.settings
+  const volume = { id: 'volume', label: 'Volume', kind: 'number' as const, min: -48, max: 0 }
+  const envelope = envelopeInputs('envelope', 'Amplitude envelope')
+  if (instrumentType === '303') return [
+    { id: 'transpose', label: 'Transpose', kind: 'number', min: -36, max: 36 },
+    { id: 'resonance', label: 'Resonance', kind: 'number', min: 0.1, max: 30 },
+    volume,
+    { id: 'slideTime', label: 'Slide time', kind: 'number', min: 0, max: 0.5 },
+    { id: 'filterFrequency', label: 'Filter frequency', kind: 'number', min: 50, max: 5000 },
+    { id: 'filterAmount', label: 'Filter amount', kind: 'number', min: 0, max: 1 },
+    ...envelope,
+    ...envelopeInputs('filterEnvelope', 'Filter envelope'),
+  ]
+  if (instrumentType === '808') return [
+    select('drum', 'Drum type', ['kick', 'snare', 'closed-hat', 'open-hat', 'rim', 'tom']),
+    { id: 'pitch', label: 'Pitch', kind: 'number', min: 50, max: 300 },
+    volume,
+    { id: 'tonality', label: 'Tonality', kind: 'number', min: 0, max: 1 },
+    { id: 'tone', label: 'Tone', kind: 'number', min: 0, max: 1 },
+    ...envelope,
+  ]
+  const cuts: unknown = instrumentParams.cuts
+  const count = Array.isArray(cuts) ? cuts.length : 0
+  const playback = ['random', 'order', ...Array.from({ length: count ? count + 1 : 0 }, (_, i) => `cut:${i}`)]
+  if (instrumentType === 'sample-hit') playback.push('loop')
+  return [
+    volume,
+    { id: 'pitch', label: 'Transpose', kind: 'number', min: -12, max: 12 },
+    ...envelope,
+    select('playback', 'Playback', playback),
+    ...(instrumentType === 'sample-hit' ? [
+      select('loopMode', 'Loop mode', ['loop', 'back-and-forth']),
+      select('reverse', 'Reverse playback', ['off', 'on']),
+    ] : []),
+  ]
+}
+
 export function outputs(item: GridItem): ParameterMetadata[] {
   switch (item.type) {
     case 'knob': return [{ id: 'value', label: 'Value', kind: 'number', min: item.settings.min, max: item.settings.max }]
     case 'lfo': return [{ id: 'value', label: 'Modulation', kind: 'number', min: -1, max: 1 }]
     case 'mod-wheel': return [{ id: 'value', label: 'Position', kind: 'number', min: item.settings.autoCenter ? -1 : 0, max: 1 }]
-    case 'piano-roll':
-    case 'arpeggiator': return [{ id: 'note', label: 'Notes', kind: 'note' }]
+    case 'piano-roll': return [{ id: 'note', label: 'Notes', kind: 'note' }, velocityOutput, pressureOutput]
+    case 'arpeggiator': return [{ id: 'note', label: 'Notes', kind: 'note' }, velocityOutput]
+    case 'output-selector': return [
+      { id: 'value', label: 'Number', kind: 'number', min: 0, max: 127 },
+      { id: 'note', label: 'Notes', kind: 'note' },
+    ]
     case 'instrument-pad':
     case 'pad': return [
-      { id: 'velocity', label: 'Velocity', kind: 'number', min: 0, max: 127 },
+      velocityOutput,
+      pressureOutput,
       { id: 'gate', label: 'Gate', kind: 'number', min: 0, max: 1 },
     ]
     default: return []
@@ -47,19 +92,15 @@ export function outputs(item: GridItem): ParameterMetadata[] {
 
 export function inputs(item: GridItem): ParameterMetadata[] {
   switch (item.type) {
+    case 'output-selector': return [
+      { id: 'value', label: 'Number', kind: 'number', min: 0, max: 127 },
+      { id: 'note', label: 'Notes', kind: 'note' },
+      { id: 'selection', label: 'Output selection', kind: 'number', min: 0, max: 127 },
+    ]
     case 'knob': return [{ id: 'value', label: 'Current value', kind: 'number', min: item.settings.min, max: item.settings.max }]
     case 'instrument-pad': return [
       { id: 'note', label: 'Note input', kind: 'note' },
-      ...(item.settings.instrumentType === '303' ? [
-        { id: 'transpose', label: 'Transpose', kind: 'number' as const, min: -36, max: 36 },
-        { id: 'resonance', label: 'Resonance', kind: 'number' as const, min: 0.1, max: 30 },
-        { id: 'volume', label: 'Volume', kind: 'number' as const, min: -48, max: 0 },
-        { id: 'slideTime', label: 'Slide time', kind: 'number' as const, min: 0, max: 0.5 },
-        { id: 'filterFrequency', label: 'Filter frequency', kind: 'number' as const, min: 50, max: 5000 },
-        { id: 'filterAmount', label: 'Filter amount', kind: 'number' as const, min: 0, max: 1 },
-        ...envelopeInputs('envelope', 'Amplitude envelope'),
-        ...envelopeInputs('filterEnvelope', 'Filter envelope'),
-      ] : []),
+      ...instrumentInputs(item),
     ]
     case 'pad': return [{ id: 'note', label: 'Note input', kind: 'note' }]
     case 'lfo': return [
@@ -80,7 +121,20 @@ export function inputs(item: GridItem): ParameterMetadata[] {
 }
 
 export function applySelectInput(item: GridItem, parameter: string, index: number): void {
-  if (item.type === 'lfo') {
+  if (item.type === 'instrument-pad') {
+    const choice = inputs(item).find((input) => input.id === parameter)?.choices?.[index]
+    if (choice === undefined) return
+    const params = item.settings.instrumentParams
+    if (parameter === 'reverse') params.reverse = choice === 'on'
+    else if (parameter === 'playback') {
+      params.playback = choice
+      if (item.settings.instrumentType === 'sample-hit') {
+        params.loopMode = choice === 'loop' ? (params.loopMode === 'back-and-forth' ? 'back-and-forth' : 'loop') : 'once'
+      }
+    } else if (parameter === 'loopMode') {
+      if (params.playback === 'loop') params.loopMode = choice
+    } else if (parameter === 'drum') params.drum = choice
+  } else if (item.type === 'lfo') {
     const waveform = waveforms[index]
     const mode = rateModes[index]
     if (parameter === 'waveform' && waveform !== undefined) item.settings.waveform = waveform
@@ -104,6 +158,35 @@ export function isCompatible(source: GridItem, sourceParameter: string, target: 
   const output = outputs(source).find((parameter) => parameter.id === sourceParameter)
   const input = inputs(target).find((parameter) => parameter.id === targetParameter)
   return source.id !== target.id && !!output && !!input && output.kind === input.kind
+}
+
+export function selectorConnectionsCompatible(items: GridItem[], connections: Connection[], candidate: Connection): boolean {
+  const source = items.find((item) => item.id === candidate.sourceId)
+  const target = items.find((item) => item.id === candidate.targetId)
+  if (!source || !target || !isCompatible(source, candidate.sourceParameter, target, candidate.targetParameter)) return false
+  const kind = outputs(source).find((parameter) => parameter.id === candidate.sourceParameter)!.kind
+  for (const selector of [source, target]) {
+    if (selector.type !== 'output-selector') continue
+    const related = connections.filter((wire) => wire.id !== candidate.id &&
+      (wire.sourceId === selector.id || wire.targetId === selector.id))
+    if (target.id === selector.id && candidate.targetParameter === 'selection') {
+      if (related.some((wire) => wire.targetId === selector.id && wire.targetParameter === 'selection')) return false
+      continue
+    }
+    const signalWires = related.filter((wire) => wire.targetId !== selector.id || wire.targetParameter !== 'selection')
+    if (target.id === selector.id && signalWires.some((wire) => wire.targetId === selector.id)) return false
+    for (const wire of signalWires) {
+      const parameter = wire.sourceId === selector.id ? wire.sourceParameter : wire.targetParameter
+      if (parameter !== (kind === 'note' ? 'note' : 'value')) return false
+    }
+  }
+  return true
+}
+
+export function selectedSelectorWire(connections: Connection[], item: GridItem): Connection | undefined {
+  if (item.type !== 'output-selector') return undefined
+  const outgoing = connections.filter((wire) => wire.sourceId === item.id)
+  return outgoing[item.settings.index % outgoing.length]
 }
 
 export function createsCycle(connections: Connection[], sourceId: string, targetId: string): boolean {

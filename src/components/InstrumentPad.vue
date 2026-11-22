@@ -2,7 +2,8 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import type { HeldNote, InstrumentPadSettings, ParameterOutput } from '../grid'
-import { Bass303, InstrumentFactory, type InstrumentInstance } from '../instruments'
+import { Bass303, Drum808, InstrumentFactory, SampleHit, SampleLoop, type InstrumentInstance } from '../instruments'
+import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
 const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[] }>()
@@ -14,18 +15,33 @@ let localVelocity = 100
 let currentKey = ''
 let generation = 0
 let unmounted = false
-let sampleParameters = ''
-const appliedParameters = new Map<string, number>()
+const appliedParameters = new Map<string, number | string>()
 
 function syncParameters() {
-  if (!(instrument instanceof Bass303)) return
+  if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
+    if (instrument.params.sample !== props.settings.instrumentParams.sample) {
+      generation++
+      instrument.dispose()
+      instrument = undefined
+      currentKey = ''
+      syncNote()
+    } else if (instrument instanceof SampleHit) {
+      instrument.updateParameters(props.settings.instrumentParams as SampleHitParams)
+    } else {
+      instrument.updateParameters(props.settings.instrumentParams as SampleLoopParams)
+    }
+    return
+  }
+  if (!(instrument instanceof Bass303) && !(instrument instanceof Drum808)) return
   for (const [key, value] of Object.entries(props.settings.instrumentParams)) {
     const values = typeof value === 'object' && value !== null
       ? Object.entries(value).map(([field, entry]) => [`${key}.${field}`, entry] as const)
       : [[key, value] as const]
     for (const [name, entry] of values) {
-      if (typeof entry !== 'number' || !Number.isFinite(entry) || appliedParameters.get(name) === entry) continue
-      instrument.updateParameter(name, entry)
+      if (appliedParameters.get(name) === entry) continue
+      if (typeof entry === 'number' && Number.isFinite(entry)) instrument.updateParameter(name, entry)
+      else if (instrument instanceof Drum808 && name === 'drum' && typeof entry === 'string') instrument.updateParameter(name, entry)
+      else continue
       appliedParameters.set(name, entry)
     }
   }
@@ -69,19 +85,7 @@ function handlePadOutput(output: ParameterOutput) {
 }
 
 watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(','), syncNote, { immediate: true })
-watch(() => props.settings.instrumentParams, () => {
-  if (props.settings.instrumentType === 'sample-hit' || props.settings.instrumentType === 'sample-loop') {
-    const snapshot = JSON.stringify(props.settings.instrumentParams)
-    if (sampleParameters && snapshot !== sampleParameters && instrument) {
-      generation++
-      instrument.dispose()
-      instrument = undefined
-      currentKey = ''
-      syncNote()
-    }
-    sampleParameters = snapshot
-  } else syncParameters()
-}, { deep: true, immediate: true })
+watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
 onBeforeUnmount(() => {
   unmounted = true
   generation++

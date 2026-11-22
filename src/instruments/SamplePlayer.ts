@@ -6,9 +6,10 @@ import { createHitLoop, createSliceLoop, scheduleLoopRelease, type HitLoopPlan }
 interface Voice {
   player: Tone.Player
   envelope: Tone.AmplitudeEnvelope
+  note: number
   looping: boolean
   released: boolean
-  loopPlan?: { plan: HitLoopPlan; reversed?: AudioBuffer; startTime: number; rate: number }
+  loopPlan?: { plan: HitLoopPlan; reversed?: AudioBuffer; lastTime: number; elapsedFrames: number; rate: number }
 }
 
 export abstract class SamplePlayer implements InstrumentInstance {
@@ -106,8 +107,8 @@ export abstract class SamplePlayer implements InstrumentInstance {
       loopEnd: looping ? loopEnd : 0,
     }).connect(envelope)
     const now = Tone.now()
-    const voice: Voice = { player, envelope, looping, released: false }
-    if (hitPlan) voice.loopPlan = { plan: hitPlan, reversed, startTime: now, rate }
+    const voice: Voice = { player, envelope, note, looping, released: false }
+    if (hitPlan) voice.loopPlan = { plan: hitPlan, reversed, lastTime: now, elapsedFrames: 0, rate }
     this.voices.add(voice)
     player.onstop = () => {
       if (!this.voices.delete(voice)) return
@@ -122,6 +123,29 @@ export abstract class SamplePlayer implements InstrumentInstance {
     )
   }
 
+  updateParameters(params: SampleHitParams | SampleLoopParams): void {
+    const pitchChanged = this.params.pitch !== params.pitch
+    const volumeChanged = this.params.volume !== params.volume
+    Object.assign(this.params, params)
+    const now = Tone.now()
+    for (const voice of this.voices) {
+      if (volumeChanged) voice.player.volume.rampTo(params.volume, 0.02)
+      Object.assign(voice.envelope, params.envelope)
+      if (pitchChanged && !voice.released) {
+        const rate = 2 ** ((voice.note - 60 + params.pitch) / 12)
+        if (voice.loopPlan) {
+          const sampleRate = this.buffer.get()?.sampleRate
+          if (sampleRate !== undefined) {
+            voice.loopPlan.elapsedFrames += (now - voice.loopPlan.lastTime) * sampleRate * voice.loopPlan.rate
+          }
+          voice.loopPlan.lastTime = now
+          voice.loopPlan.rate = rate
+        }
+        voice.player.playbackRate = rate
+      }
+    }
+  }
+
   release(): void {
     this.generation++
     const now = Tone.now()
@@ -129,12 +153,12 @@ export abstract class SamplePlayer implements InstrumentInstance {
       if (!voice.looping || voice.released) continue
       voice.released = true
       if (voice.loopPlan) {
-        const { plan, reversed, startTime, rate } = voice.loopPlan
+        const { plan, reversed, lastTime, elapsedFrames, rate } = voice.loopPlan
         const original = this.buffer.get()
         if (!original) throw new Error('Sample audio is not loaded.')
         const framesPerSecond = original.sampleRate * rate
         const release = this.params.envelope.release
-        const schedule = scheduleLoopRelease(plan, (now - startTime) * framesPerSecond, release * framesPerSecond)
+        const schedule = scheduleLoopRelease(plan, elapsedFrames + (now - lastTime) * framesPerSecond, release * framesPerSecond)
         voice.envelope.triggerRelease(now)
         if (!schedule) {
           voice.player.stop(now + release)

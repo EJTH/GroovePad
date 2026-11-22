@@ -1,19 +1,25 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, watch } from 'vue'
 import { noteName, scaleNote, scales } from '../music'
+import { ExpressionTracker } from '../expression'
 import type { ParameterOutput, PianoRollSettings } from '../grid'
 
 const props = defineProps<{ label: string; settings: PianoRollSettings }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointers = reactive(new Map<number, number>())
 const keys = reactive(new Set<number>())
+const expression = new ExpressionTracker()
 const notes = computed(() => Array.from(
   { length: scales[props.settings.scale].length * props.settings.octaves },
   (_, degree) => Math.max(0, Math.min(127, 48 + props.settings.transpose + scaleNote(props.settings.scale, degree))),
 ))
 
-function send(note: number, on: boolean) {
-  emit('output', { parameter: 'note', value: note, on, velocity: 100 })
+function send(note: number, on: boolean, velocity = 100) {
+  if (on) emit('output', { parameter: 'velocity', value: velocity })
+  emit('output', { parameter: 'note', value: note, on, velocity })
+}
+function sendPressure() {
+  emit('output', { parameter: 'pressure', value: expression.pressure })
 }
 function down(event: PointerEvent, note: number) {
   if (event.button !== 0 || pointers.has(event.pointerId)) return
@@ -22,19 +28,26 @@ function down(event: PointerEvent, note: number) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointers.set(event.pointerId, note)
-  send(note, true)
+  const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.settings.orientation === 'vertical' ? 'x' : 'y')
+  sendPressure()
+  send(note, true, velocity)
 }
 function up(event: PointerEvent) {
   const note = pointers.get(event.pointerId)
   if (note === undefined) return
   pointers.delete(event.pointerId)
   send(note, false)
+  expression.remove(event.pointerId)
+  sendPressure()
 }
 function move(event: PointerEvent) {
   if (!pointers.has(event.pointerId)) return
   const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLButtonElement>('.key')
-  if (!target || !event.currentTarget || !(event.currentTarget instanceof HTMLElement) ||
-    !event.currentTarget.parentElement?.contains(target) || target.dataset.note === undefined) return
+  if (!(event.currentTarget instanceof HTMLElement)) return
+  const key = target && event.currentTarget.parentElement?.contains(target) ? target : event.currentTarget
+  const velocity = expression.updatePointer(event.pointerId, event, key.getBoundingClientRect(), props.settings.orientation === 'vertical' ? 'x' : 'y')
+  sendPressure()
+  if (key !== target || !target || target.dataset.note === undefined) return
 
   const newNote = Number(target.dataset.note)
   const currentNote = pointers.get(event.pointerId)
@@ -43,12 +56,14 @@ function move(event: PointerEvent) {
   
   send(currentNote, false)
   pointers.set(event.pointerId, newNote)
-  send(newNote, true)
+  send(newNote, true, velocity)
 }
 function keyDown(event: KeyboardEvent, note: number) {
   if ((event.key !== 'Enter' && event.key !== ' ') || event.repeat || keys.has(note)) return
   event.preventDefault()
   keys.add(note)
+  expression.set(`key:${note}`, 100)
+  sendPressure()
   send(note, true)
 }
 function keyUp(event: KeyboardEvent, note: number) {
@@ -59,12 +74,17 @@ function keyUp(event: KeyboardEvent, note: number) {
 function releaseKey(note: number) {
   if (!keys.delete(note)) return
   send(note, false)
+  expression.remove(`key:${note}`)
+  sendPressure()
 }
 function releaseAll() {
+  const hadContacts = pointers.size > 0 || keys.size > 0
   for (const note of pointers.values()) send(note, false)
   for (const note of keys) send(note, false)
   pointers.clear()
   keys.clear()
+  expression.clear()
+  if (hadContacts) sendPressure()
 }
 watch([() => props.settings.scale, () => props.settings.transpose, () => props.settings.octaves], releaseAll, { flush: 'sync' })
 onBeforeUnmount(releaseAll)

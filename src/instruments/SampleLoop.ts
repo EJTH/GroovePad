@@ -1,4 +1,5 @@
 import { SamplePlayer } from './SamplePlayer'
+import { defaultEnvelope } from './defaultEnvelope'
 import type { SampleLoopParams } from './types'
 
 export class SampleLoop extends SamplePlayer {
@@ -16,7 +17,7 @@ export class SampleLoop extends SamplePlayer {
       pitch: params.pitch ?? 0,
       loopStart: params.loopStart ?? 0,
       loopEnd: params.loopEnd ?? 1,
-      envelope: params.envelope ?? { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.1 },
+      envelope: params.envelope ?? defaultEnvelope('sample-loop'),
     }
   }
 }

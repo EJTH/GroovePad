@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 import type { PadSettings, ParameterOutput } from '../grid'
+import { ExpressionTracker } from '../expression'
 
 defineProps<{ label: string; settings: PadSettings; wiredActive?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointerId = ref<number | null>(null)
 const keyboardPressed = ref(false)
+const expression = new ExpressionTracker()
 
 function press(event: PointerEvent) {
   if (event.button !== 0 || pointerId.value !== null || keyboardPressed.value) return
@@ -14,18 +16,22 @@ function press(event: PointerEvent) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
-  const rect = target.getBoundingClientRect()
-  // Browsers often report a synthetic pressure of 0.5 for non-pressure devices.
-  const pressure = event.pointerType !== 'mouse' && event.pressure > 0 && event.pressure !== 0.5
-    ? event.pressure
-    : (event.clientY - rect.top) / rect.height
-  emit('output', { parameter: 'velocity', value: Math.round(Math.max(0, Math.min(1, pressure)) * 127) })
+  const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect())
+  emit('output', { parameter: 'velocity', value: velocity })
+  emit('output', { parameter: 'pressure', value: velocity })
   emit('output', { parameter: 'gate', value: 1 })
+}
+
+function move(event: PointerEvent) {
+  if (pointerId.value !== event.pointerId || !(event.currentTarget instanceof HTMLElement)) return
+  emit('output', { parameter: 'pressure', value: expression.updatePointer(event.pointerId, event, event.currentTarget.getBoundingClientRect()) })
 }
 
 function release(event: PointerEvent) {
   if (pointerId.value !== event.pointerId) return
   pointerId.value = null
+  expression.remove(event.pointerId)
+  emit('output', { parameter: 'pressure', value: expression.pressure })
   emit('output', { parameter: 'gate', value: 0 })
 }
 
@@ -33,7 +39,9 @@ function keyDown(event: KeyboardEvent) {
   if ((event.key !== ' ' && event.key !== 'Enter') || event.repeat || pointerId.value !== null) return
   event.preventDefault()
   keyboardPressed.value = true
+  expression.set('keyboard', 100)
   emit('output', { parameter: 'velocity', value: 100 })
+  emit('output', { parameter: 'pressure', value: 100 })
   emit('output', { parameter: 'gate', value: 1 })
 }
 
@@ -46,11 +54,16 @@ function keyUp(event: KeyboardEvent) {
 function releaseKeyboard() {
   if (!keyboardPressed.value) return
   keyboardPressed.value = false
+  expression.remove('keyboard')
+  emit('output', { parameter: 'pressure', value: expression.pressure })
   emit('output', { parameter: 'gate', value: 0 })
 }
 
 onBeforeUnmount(() => {
-  if (pointerId.value !== null || keyboardPressed.value) emit('output', { parameter: 'gate', value: 0 })
+  if (pointerId.value !== null || keyboardPressed.value) {
+    emit('output', { parameter: 'pressure', value: 0 })
+    emit('output', { parameter: 'gate', value: 0 })
+  }
 })
 </script>
 
@@ -63,6 +76,7 @@ onBeforeUnmount(() => {
     :aria-label="`Pad: ${label}`"
     :aria-pressed="pointerId !== null || keyboardPressed"
     @pointerdown="press"
+    @pointermove="move"
     @pointerup="release"
     @pointercancel="release"
     @lostpointercapture="release"

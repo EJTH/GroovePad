@@ -1,4 +1,5 @@
 import * as Tone from 'tone'
+import { defaultEnvelope } from './defaultEnvelope'
 import type { Bass303Params, InstrumentInstance } from './types'
 
 export class Bass303 implements InstrumentInstance {
@@ -12,9 +13,9 @@ export class Bass303 implements InstrumentInstance {
       transpose: params.transpose ?? 0,
       resonance: params.resonance ?? 6,
       volume: params.volume ?? -12,
-      envelope: { ...(params.envelope ?? { attack: 0.005, decay: 0.3, sustain: 0, release: 0.1 }) },
+      envelope: { ...(params.envelope ?? defaultEnvelope('303')) },
       filterFrequency: params.filterFrequency ?? 1000,
-      filterEnvelope: { ...(params.filterEnvelope ?? { attack: 0.005, decay: 0.3, sustain: 0, release: 0.1 }) },
+      filterEnvelope: { ...(params.filterEnvelope ?? defaultEnvelope('303')) },
       filterAmount: params.filterAmount ?? 0.6,
       slideTime: params.slideTime ?? 0.08,
     }

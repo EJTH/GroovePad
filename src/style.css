@@ -410,6 +410,64 @@ button:focus-visible {
   padding: 16px;
 }
 
+.control-picker-hint {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.control-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.control-picker-button {
+  min-width: 0;
+  min-height: 100px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #292a26;
+  color: #ecece8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.control-picker-button:hover {
+  border-color: var(--accent);
+  background: #32372b;
+}
+
+.control-picker-button svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.control-picker-button strong,
+.control-picker-button small {
+  display: block;
+}
+
+.control-picker-button strong {
+  font-size: 14px;
+}
+
+.control-picker-button small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .settings-form label {
   min-width: 0;
   display: flex;
@@ -491,16 +549,23 @@ button:focus-visible {
 .wire-control.selected { border-color: var(--accent); background: #455c36; }
 
 .wire-button {
-  min-height: 40px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  border: 1px solid #c75c5c;
   border-radius: 4px;
-  background: #30392b;
-  color: #e2edd9;
+  background: #592a2a;
+  color: #ffd3d3;
   cursor: pointer;
 }
+.wire-button:hover { background: #783434; }
+.wire-button svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
-.wire-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 12px; }
+.wire-entry { margin-top: 8px; font-size: 12px; }
+.wire-entry-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wire-entry-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.settings-form .wire-amount { flex: 0 0 68px; width: 68px; padding: 6px; }
 .settings-form .inline-checkbox { flex-direction: row; align-items: center; margin-top: 8px; }
 .settings-form .inline-checkbox input { width: 20px; min-height: 20px; }
 
@@ -534,6 +599,24 @@ button:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.selector-receiver-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  pointer-events: none;
+  animation: selector-receiver-blink 300ms step-end 3;
+}
+
+@keyframes selector-receiver-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selector-receiver-flash { animation: none; }
 }
 
 .grid-item-main {

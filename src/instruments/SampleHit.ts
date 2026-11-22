@@ -1,4 +1,5 @@
 import { SamplePlayer } from './SamplePlayer'
+import { defaultEnvelope } from './defaultEnvelope'
 import type { SampleHitParams } from './types'
 
 export class SampleHit extends SamplePlayer {
@@ -18,7 +19,7 @@ export class SampleHit extends SamplePlayer {
       reverse: params.reverse ?? false,
       volume: params.volume ?? -12,
       pitch: params.pitch ?? 0,
-      envelope: params.envelope ?? { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 },
+      envelope: params.envelope ?? defaultEnvelope('sample-hit'),
     }
   }
 }

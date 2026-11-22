@@ -2,6 +2,7 @@ import { SampleHit } from './SampleHit'
 import { SampleLoop } from './SampleLoop'
 import { Bass303 } from './Bass303'
 import { Drum808 } from './Drum808'
+import { defaultEnvelope } from './defaultEnvelope'
 import type {
   InstrumentType,
   InstrumentInstance,
@@ -46,7 +47,7 @@ export class InstrumentFactory {
           reverse: false,
           volume: -12,
           pitch: 0,
-          envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 },
+          envelope: defaultEnvelope(type),
         } as SampleHitParams
 
       case 'sample-loop':
@@ -59,7 +60,7 @@ export class InstrumentFactory {
           pitch: 0,
           loopStart: 0,
           loopEnd: 1,
-          envelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.1 },
+          envelope: defaultEnvelope(type),
         } as SampleLoopParams
 
       case '303':
@@ -67,9 +68,9 @@ export class InstrumentFactory {
           transpose: 0,
           resonance: 6,
           volume: -12,
-          envelope: { attack: 0.005, decay: 0.3, sustain: 0, release: 0.1 },
+          envelope: defaultEnvelope(type),
           filterFrequency: 1000,
-          filterEnvelope: { attack: 0.005, decay: 0.3, sustain: 0, release: 0.1 },
+          filterEnvelope: defaultEnvelope(type),
           filterAmount: 0.6,
           slideTime: 0.08,
         } as Bass303Params
@@ -79,7 +80,7 @@ export class InstrumentFactory {
           drum: 'kick',
           pitch: 150,
           volume: -12,
-          envelope: { attack: 0.001, decay: 0.5, sustain: 0.1, release: 0.1 },
+          envelope: defaultEnvelope(type),
           tonality: 0.5,
           tone: 0.7,
         } as Drum808Params
