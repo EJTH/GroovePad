@@ -7,8 +7,11 @@ interface Voice {
   player: Tone.Player
   envelope: Tone.AmplitudeEnvelope
   note: number
+  id?: string
+  bend?: number
   looping: boolean
   released: boolean
+  retired?: Set<Tone.Player>
   loopPlan?: { plan: HitLoopPlan; reversed?: AudioBuffer; lastTime: number; elapsedFrames: number; rate: number }
 }
 
@@ -22,12 +25,17 @@ export abstract class SamplePlayer implements InstrumentInstance {
   private generation = 0
   private nextCut = 0
   private disposed = false
+  private pitchBend = 0
+  private readonly noteGenerations = new Map<string, number>()
+  private readonly noteBends = new Map<string, number>()
 
-  async trigger(velocity: number, note = 60): Promise<void> {
+  async trigger(velocity: number, note = 60, id?: string, bend = 0): Promise<void> {
     if (!this.params.sample || !/^data:[^,]*;base64,/.test(this.params.sample)) {
       throw new Error('Choose a sample file in the pad settings.')
     }
     const generation = this.generation
+    const noteGeneration = id === undefined ? undefined : (this.noteGenerations.get(id) ?? 0)
+    if (id !== undefined) this.noteBends.set(id, bend)
     const hit = 'start' in this.params ? this.params : undefined
     const looping = this.type === 'sample-loop' || (hit !== undefined && hit.loopMode !== 'once')
     if (!this.buffer.loaded) {
@@ -39,7 +47,8 @@ export abstract class SamplePlayer implements InstrumentInstance {
         throw error
       }
     }
-    if (this.disposed || (looping && generation !== this.generation)) return
+    if (this.disposed || (looping && generation !== this.generation) ||
+      (id !== undefined && noteGeneration !== (this.noteGenerations.get(id) ?? 0))) return
 
     const loop = this.type === 'sample-loop' && 'loopStart' in this.params ? this.params : undefined
     const start = loop ? loop.loopStart : hit!.start
@@ -96,7 +105,9 @@ export abstract class SamplePlayer implements InstrumentInstance {
       offset = 0
       length = source.duration
     }
-    const rate = 2 ** ((note - 60 + this.params.pitch) / 12)
+    const voiceBend = id === undefined ? undefined : (this.noteBends.get(id) ?? bend)
+    const rate = 2 ** ((note - 60 + this.params.pitch + (voiceBend ?? this.pitchBend)) / 12)
+    if (hit) this.limitVoices(hit.polyphony - 1)
     const envelope = new Tone.AmplitudeEnvelope(this.params.envelope).toDestination()
     const player = new Tone.Player({
       url: source,
@@ -107,7 +118,7 @@ export abstract class SamplePlayer implements InstrumentInstance {
       loopEnd: looping ? loopEnd : 0,
     }).connect(envelope)
     const now = Tone.now()
-    const voice: Voice = { player, envelope, note, looping, released: false }
+    const voice: Voice = { player, envelope, note, id, bend: voiceBend, looping, released: false }
     if (hitPlan) voice.loopPlan = { plan: hitPlan, reversed, lastTime: now, elapsedFrames: 0, rate }
     this.voices.add(voice)
     player.onstop = () => {
@@ -127,30 +138,73 @@ export abstract class SamplePlayer implements InstrumentInstance {
     const pitchChanged = this.params.pitch !== params.pitch
     const volumeChanged = this.params.volume !== params.volume
     Object.assign(this.params, params)
+    if ('polyphony' in params) this.limitVoices(params.polyphony)
     const now = Tone.now()
     for (const voice of this.voices) {
       if (volumeChanged) voice.player.volume.rampTo(params.volume, 0.02)
       Object.assign(voice.envelope, params.envelope)
       if (pitchChanged && !voice.released) {
-        const rate = 2 ** ((voice.note - 60 + params.pitch) / 12)
-        if (voice.loopPlan) {
-          const sampleRate = this.buffer.get()?.sampleRate
-          if (sampleRate !== undefined) {
-            voice.loopPlan.elapsedFrames += (now - voice.loopPlan.lastTime) * sampleRate * voice.loopPlan.rate
-          }
-          voice.loopPlan.lastTime = now
-          voice.loopPlan.rate = rate
-        }
-        voice.player.playbackRate = rate
+        this.updateVoicePitch(voice, now)
       }
     }
   }
 
-  release(): void {
-    this.generation++
+  setPitchBend(semitones: number): void {
+    if (this.pitchBend === semitones) return
+    this.pitchBend = semitones
+    const now = Tone.now()
+    for (const voice of this.voices) if (!voice.released && voice.bend === undefined) this.updateVoicePitch(voice, now)
+  }
+
+  setVoicePitchBend(id: string, semitones: number): void {
+    this.noteBends.set(id, semitones)
     const now = Tone.now()
     for (const voice of this.voices) {
-      if (!voice.looping || voice.released) continue
+      if (voice.id !== id || voice.released || voice.bend === semitones) continue
+      voice.bend = semitones
+      this.updateVoicePitch(voice, now)
+    }
+  }
+
+  private updateVoicePitch(voice: Voice, now: number): void {
+    const rate = 2 ** ((voice.note - 60 + this.params.pitch + (voice.bend ?? this.pitchBend)) / 12)
+    if (voice.loopPlan) {
+      const sampleRate = this.buffer.get()?.sampleRate
+      if (sampleRate !== undefined) {
+        voice.loopPlan.elapsedFrames += (now - voice.loopPlan.lastTime) * sampleRate * voice.loopPlan.rate
+      }
+      voice.loopPlan.lastTime = now
+      voice.loopPlan.rate = rate
+    }
+    voice.player.playbackRate = rate
+  }
+
+  private limitVoices(limit: number): void {
+    while (this.voices.size > limit) {
+      const voice = this.voices.values().next().value
+      if (!voice) break
+      this.voices.delete(voice)
+      voice.player.dispose()
+      voice.envelope.dispose()
+      for (const player of voice.retired ?? []) {
+        this.retiredPlayers.delete(player)
+        player.dispose()
+      }
+    }
+  }
+
+  release(id?: string): void {
+    if (id === undefined) {
+      this.generation++
+      for (const key of this.noteBends.keys()) this.noteGenerations.set(key, (this.noteGenerations.get(key) ?? 0) + 1)
+      this.noteBends.clear()
+    } else {
+      this.noteGenerations.set(id, (this.noteGenerations.get(id) ?? 0) + 1)
+      this.noteBends.delete(id)
+    }
+    const now = Tone.now()
+    for (const voice of this.voices) {
+      if ((id !== undefined && voice.id !== id) || !voice.looping || voice.released) continue
       voice.released = true
       if (voice.loopPlan) {
         const { plan, reversed, lastTime, elapsedFrames, rate } = voice.loopPlan
@@ -177,7 +231,9 @@ export abstract class SamplePlayer implements InstrumentInstance {
         const tail = new Tone.Player({ url: source, playbackRate: rate, volume: this.params.volume }).connect(voice.envelope)
         const previous = voice.player
         this.retiredPlayers.add(previous)
-        previous.onstop = () => { this.retiredPlayers.delete(previous); previous.dispose() }
+        voice.retired ??= new Set()
+        voice.retired.add(previous)
+        previous.onstop = () => { this.retiredPlayers.delete(previous); voice.retired?.delete(previous); previous.dispose() }
         voice.player = tail
         tail.onstop = () => {
           if (!this.voices.delete(voice)) return

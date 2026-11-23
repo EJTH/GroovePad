@@ -3,7 +3,7 @@ import { onBeforeUnmount, ref } from 'vue'
 import type { PadSettings, ParameterOutput } from '../grid'
 import { ExpressionTracker } from '../expression'
 
-defineProps<{ label: string; settings: PadSettings; wiredActive?: boolean }>()
+const props = defineProps<{ label: string; settings: PadSettings; wiredActive?: boolean; rotated?: boolean; inputMuted?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointerId = ref<number | null>(null)
 const keyboardPressed = ref(false)
@@ -16,7 +16,7 @@ function press(event: PointerEvent) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
-  const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect())
+  const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.rotated ? 'x' : 'y', props.rotated)
   emit('output', { parameter: 'velocity', value: velocity })
   emit('output', { parameter: 'pressure', value: velocity })
   emit('output', { parameter: 'gate', value: 1 })
@@ -24,14 +24,15 @@ function press(event: PointerEvent) {
 
 function move(event: PointerEvent) {
   if (pointerId.value !== event.pointerId || !(event.currentTarget instanceof HTMLElement)) return
-  emit('output', { parameter: 'pressure', value: expression.updatePointer(event.pointerId, event, event.currentTarget.getBoundingClientRect()) })
+  emit('output', { parameter: 'pressure', value: expression.updatePointer(event.pointerId, event, event.currentTarget.getBoundingClientRect(),
+    props.rotated ? 'x' : 'y', props.rotated) })
 }
 
 function release(event: PointerEvent) {
   if (pointerId.value !== event.pointerId) return
   pointerId.value = null
   expression.remove(event.pointerId)
-  emit('output', { parameter: 'pressure', value: expression.pressure })
+  emit('output', { parameter: 'pressure', value: expression.pressure, active: false })
   emit('output', { parameter: 'gate', value: 0 })
 }
 
@@ -55,13 +56,13 @@ function releaseKeyboard() {
   if (!keyboardPressed.value) return
   keyboardPressed.value = false
   expression.remove('keyboard')
-  emit('output', { parameter: 'pressure', value: expression.pressure })
+  emit('output', { parameter: 'pressure', value: expression.pressure, active: false })
   emit('output', { parameter: 'gate', value: 0 })
 }
 
 onBeforeUnmount(() => {
   if (pointerId.value !== null || keyboardPressed.value) {
-    emit('output', { parameter: 'pressure', value: 0 })
+    emit('output', { parameter: 'pressure', value: 0, active: false })
     emit('output', { parameter: 'gate', value: 0 })
   }
 })
@@ -71,10 +72,11 @@ onBeforeUnmount(() => {
   <button
     type="button"
     class="pad"
-    :class="{ active: pointerId !== null || keyboardPressed || wiredActive }"
+    :class="{ active: pointerId !== null || keyboardPressed || wiredActive, 'input-muted': inputMuted }"
     :style="{ '--pad-color': settings.color }"
-    :aria-label="`Pad: ${label}`"
-    :aria-pressed="pointerId !== null || keyboardPressed"
+    :aria-label="inputMuted === undefined ? `Pad: ${label}` : `Pad: ${label}, input connections ${inputMuted ? 'muted' : 'unmuted'}`"
+    :aria-pressed="inputMuted ?? (pointerId !== null || keyboardPressed)"
+    :title="inputMuted === undefined ? undefined : `Input connections ${inputMuted ? 'muted' : 'unmuted'}`"
     @pointerdown="press"
     @pointermove="move"
     @pointerup="release"
@@ -106,6 +108,13 @@ onBeforeUnmount(() => {
 
 .pad.active {
   background: var(--pad-color);
+  box-shadow: inset 0 2px 6px #0006;
+}
+
+.pad.input-muted {
+  border-color: #777970;
+  background: #353631;
+  color: #c2c3bb;
   box-shadow: inset 0 2px 6px #0006;
 }
 </style>

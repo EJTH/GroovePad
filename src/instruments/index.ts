@@ -45,6 +45,7 @@ export class InstrumentFactory {
           playback: 'order',
           loopMode: 'once',
           reverse: false,
+          polyphony: 1,
           volume: -12,
           pitch: 0,
           envelope: defaultEnvelope(type),

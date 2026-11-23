@@ -27,6 +27,13 @@ function changeInstrumentType(type: InstrumentType) {
 <template>
   <div class="settings-section">
     <h3>Instrument Pad Settings</h3>
+    <label class="pad-mode-setting">
+      Pad mode
+      <select v-model="draft.settings.mode">
+        <option value="trigger">Trigger</option>
+        <option value="toggle">Toggle input mute</option>
+      </select>
+    </label>
     <div class="instrument-types" role="group" aria-label="Instrument type">
       <button v-for="instrument in instrumentTypes" :key="instrument.type" type="button"
         :class="{ selected: draft.settings.instrumentType === instrument.type }"
@@ -45,6 +52,7 @@ function changeInstrumentType(type: InstrumentType) {
 
 <style scoped>
 .instrument-types { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pad-mode-setting { display: flex; flex-direction: column; gap: 4px; }
 .instrument-types button { min-width: 0; min-height: 64px; padding: 8px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 4px; background: #292a26; color: #ecece8; text-align: left; cursor: pointer; }
 .instrument-types button:hover, .instrument-types button.selected { border-color: var(--accent); background: #32372b; }
 .instrument-types button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

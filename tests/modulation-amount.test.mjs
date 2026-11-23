@@ -145,3 +145,165 @@ test('numeric mappings work through output selector inputs, outputs and selectio
     await server.close()
   }
 })
+
+test('ABS sets the destination range while MOD adjusts the base and switching clamps negatives', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { connectionMappingMode, effectiveControls, mappingEndpoint, setConnectionMappingMode, setMappingEndpoint } = await server.ssrLoadModule('/src/modulation.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const pad = createControl('pad', 0, 0, 'pad')
+    const target = createControl('target', 1, 0, 'lfo')
+    target.settings.offset = 0.4
+    const wire = { id: 'wire', sourceId: 'pad', sourceParameter: 'pressure', targetId: 'target', targetParameter: 'offset' }
+    const layout = { columns: 2, rows: 1, items: [pad, target], connections: [wire] }
+    const signals = new Map([['pad:pressure', 0]])
+    const value = () => effectiveControls(layout, signals)[1].settings.offset
+    assert.equal(connectionMappingMode(layout, wire), 'abs')
+    setConnectionMappingMode(layout, wire, 'mod')
+    wire.modulationMin = -20
+    wire.modulationMax = 20
+    assert.ok(Math.abs(value()) < 1e-10)
+    signals.set('pad:pressure', 127)
+    assert.equal(value(), 0.8)
+    setConnectionMappingMode(layout, wire, 'abs')
+    assert.equal(wire.absoluteMin, -1)
+    assert.equal(wire.absoluteMax, -0.6)
+    assert.equal(value(), -0.6)
+    signals.set('pad:pressure', 0)
+    assert.equal(value(), -1)
+    wire.absoluteMin = 0.6
+    wire.absoluteMax = -0.6
+    assert.ok(Math.abs(value() - 0.6) < 1e-10)
+    signals.set('pad:pressure', 127)
+    assert.equal(value(), -0.6)
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
+    assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
+    wire.absoluteMin = NaN
+    assert.equal(isSavedProject(project), false)
+    wire.absoluteMin = 0.6
+    wire.modulationMin = 10
+    assert.equal(isSavedProject(project), false)
+    delete wire.absoluteMin
+    delete wire.absoluteMax
+    delete wire.mappingMode
+    delete wire.modulationMin
+    delete wire.modulationMax
+    wire.modulationAmount = -30
+    assert.equal(mappingEndpoint(layout, wire, 'max'), -30)
+    setConnectionMappingMode(layout, wire, 'abs')
+    assert.equal(wire.absoluteMax, -1)
+    assert.equal(wire.modulationAmount, undefined)
+    assert.equal(isSavedProject(project), true)
+
+    setMappingEndpoint(layout, wire, 'min', -0.75)
+    setMappingEndpoint(layout, wire, 'max', -0.75)
+    signals.set('pad:pressure', 63.5)
+    assert.equal(value(), -0.75)
+    setMappingEndpoint(layout, wire, 'min', undefined)
+    signals.set('pad:pressure', 0)
+    assert.equal(value(), -1)
+    target.settings.offset = 0.4
+    wire.absoluteMax = 2
+    signals.set('pad:pressure', 127)
+    assert.equal(value(), 1)
+
+    delete wire.absoluteMin
+    delete wire.absoluteMax
+    wire.modulationMin = 25
+    wire.modulationMax = 75
+    assert.equal(isSavedProject(project), true)
+    assert.equal(mappingEndpoint(layout, wire, 'min'), -0.5)
+    assert.equal(value(), 0.5)
+    setMappingEndpoint(layout, wire, 'max', 0.25)
+    assert.equal(wire.absoluteMin, -0.5)
+    assert.equal(wire.absoluteMax, 0.25)
+    assert.equal(wire.modulationMin, undefined)
+    assert.equal(wire.modulationMax, undefined)
+    assert.equal(value(), 0.25)
+    setConnectionMappingMode(layout, wire, 'mod')
+    assert.equal(wire.modulationMin, 25)
+    assert.equal(wire.modulationMax, 62.5)
+    assert.equal(isSavedProject(project), true)
+  } finally {
+    await server.close()
+  }
+})
+
+test('selector MOD adds to its incoming signal while ABS replaces it', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { effectiveControls, selectorNumericValue, numericSignal } = await server.ssrLoadModule('/src/modulation.ts')
+    const pad = createControl('pad', 0, 0, 'pad')
+    const selector = createControl('selector', 1, 0, 'output-selector')
+    const target = createControl('target', 2, 0, 'lfo')
+    const incoming = { id: 'in', sourceId: 'pad', sourceParameter: 'pressure', targetId: 'selector', targetParameter: 'value',
+      mappingMode: 'mod', modulationMin: 10, modulationMax: 10 }
+    const outgoing = { id: 'out', sourceId: 'selector', sourceParameter: 'value', targetId: 'target', targetParameter: 'depth' }
+    const layout = { columns: 3, rows: 1, items: [pad, selector, target], connections: [incoming, outgoing] }
+    const signals = new Map([['pad:pressure', 63.5]])
+    assert.ok(Math.abs(effectiveControls(layout, signals)[2].settings.depth - 0.6) < 1e-10)
+    incoming.mappingMode = 'abs'
+    assert.ok(Math.abs(effectiveControls(layout, signals)[2].settings.depth - 0.1) < 1e-10)
+    delete incoming.modulationMin
+    delete incoming.modulationMax
+    incoming.absoluteMin = 20
+    incoming.absoluteMax = 80
+    assert.ok(Math.abs(effectiveControls(layout, signals)[2].settings.depth - 50 / 127) < 1e-10)
+    signals.set('pad:pressure', 127)
+    assert.ok(Math.abs(effectiveControls(layout, signals)[2].settings.depth - 80 / 127) < 1e-10)
+    incoming.modulationMin = 10
+    incoming.modulationMax = 10
+    delete incoming.absoluteMin
+    delete incoming.absoluteMax
+    signals.set('pad:pressure', 63.5)
+    const selection = { ...incoming, targetParameter: 'selection', mappingMode: 'mod' }
+    const signal = numericSignal(layout, selection, signals)
+    assert.ok(Math.abs(selectorNumericValue(selection, signal, 32) - 44.7) < 1e-10)
+    selection.mappingMode = 'abs'
+    assert.ok(Math.abs(selectorNumericValue(selection, signal, 32) - 12.7) < 1e-10)
+  } finally {
+    await server.close()
+  }
+})
+
+test('ABS saved values survive destination range changes and legacy mappings convert when switched', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { effectiveControls, mappingEndpoint, setConnectionMappingMode } = await server.ssrLoadModule('/src/modulation.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const pad = createControl('pad', 0, 0, 'pad')
+    const knob = createControl('knob', 1, 0, 'knob')
+    knob.settings.max = 100
+    knob.settings.defaultValue = 40
+    knob.settings.value = 40
+    const wire = { id: 'wire', sourceId: 'pad', sourceParameter: 'pressure', targetId: 'knob',
+      targetParameter: 'value', mappingMode: 'abs', absoluteMin: 25, absoluteMax: 80 }
+    const layout = { columns: 2, rows: 1, items: [pad, knob], connections: [wire] }
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
+    const signals = new Map([['pad:pressure', 127]])
+    const value = () => effectiveControls(layout, signals)[1].settings.value
+    assert.equal(value(), 80)
+    knob.settings.max = 50
+    assert.equal(isSavedProject(project), true)
+    assert.equal(value(), 50)
+    signals.set('pad:pressure', 0)
+    assert.equal(value(), 25)
+
+    delete wire.absoluteMin
+    delete wire.absoluteMax
+    wire.modulationMin = 20
+    wire.modulationMax = 80
+    assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
+    assert.equal(mappingEndpoint(layout, wire, 'min'), 10)
+    assert.equal(value(), 10)
+    setConnectionMappingMode(layout, wire, 'mod')
+    assert.equal(wire.modulationMin, 20)
+    assert.equal(wire.modulationMax, 80)
+    assert.equal(isSavedProject(project), true)
+  } finally {
+    await server.close()
+  }
+})

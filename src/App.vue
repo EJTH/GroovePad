@@ -122,7 +122,26 @@ watch([banks, selectedBankId, bpm, assets], () => {
   saveTimer = window.setTimeout(saveLocalProject, 300)
 }, { deep: true })
 
-onMounted(() => window.addEventListener('pagehide', saveLocalProject))
+const fullScreen = ref(false)
+
+function syncFullScreen() {
+  fullScreen.value = document.fullscreenElement !== null
+}
+
+async function toggleFullScreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen()
+    else await document.documentElement.requestFullscreen()
+  } catch (error) {
+    projectError.value = `Full screen mode could not be changed: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('pagehide', saveLocalProject)
+  document.addEventListener('fullscreenchange', syncFullScreen)
+  syncFullScreen()
+})
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
 const playing = ref(false)
 const beat = ref(0)
@@ -377,6 +396,7 @@ function newProject() {
 
 onUnmounted(() => {
   window.removeEventListener('pagehide', saveLocalProject)
+  document.removeEventListener('fullscreenchange', syncFullScreen)
   saveLocalProject()
   if (beatTimer !== undefined) window.clearInterval(beatTimer)
   cancelBankPress()
@@ -386,7 +406,38 @@ onUnmounted(() => {
 <template>
   <main class="app">
     <header class="header">
-      <div class="brand">GroovePad<span>.js</span></div>
+      <section class="transport" aria-label="Transport">
+        <button class="transport-button record" type="button" disabled aria-label="Record (not yet available)">
+          <span class="record-icon" aria-hidden="true"></span>
+        </button>
+        <button
+          class="transport-button"
+          type="button"
+          :aria-label="playing ? 'Pause' : 'Play'"
+          :aria-pressed="playing"
+          @click="togglePlayback"
+        >
+          <svg v-if="playing" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5h3v14H8zM14 5h3v14h-3z" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 4v16l13-8z" />
+          </svg>
+        </button>
+
+        <div class="display" aria-label="Tempo and current bank">
+          <div><strong>{{ bpm }}</strong><span>BPM</span></div>
+          <div class="display-bank" :title="selectedBank.title">{{ selectedBank.title }}</div>
+        </div>
+
+        <div class="beats" aria-label="Beat indicator">
+          <span
+            v-for="index in 4"
+            :key="index"
+            :class="{ active: playing && beat === index - 1 }"
+          ></span>
+        </div>
+      </section>
       <div class="header-actions">
         <button v-if="editing" class="icon-button" type="button" :aria-label="wiring ? 'Exit wire mode' : 'Wire controls'"
           :aria-pressed="wiring" title="Wire controls" @click="wiring = !wiring">
@@ -417,12 +468,17 @@ onUnmounted(() => {
         <template v-if="menuOpen">
           <div class="menu-dismiss" @click="menuOpen = false"></div>
           <nav id="main-menu" class="menu" aria-label="Main menu">
+            <div class="brand">GroovePad<span>.js</span></div>
             <p>Project</p>
             <button type="button" @click="newProject(); menuOpen = false">New project</button>
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>
             <button type="button" :disabled="busy" @click="saveProject(); menuOpen = false">Save project</button>
             <button type="button" @click="assetsOpen = true; menuOpen = false">Manage assets</button>
             <button type="button" @click="bpmDraft = bpm; tempoError = ''; projectSettingsOpen = true; menuOpen = false">Project settings</button>
+            <p>View</p>
+            <button type="button" :aria-pressed="fullScreen" @click="toggleFullScreen(); menuOpen = false">
+              {{ fullScreen ? 'Exit full screen' : 'Enter full screen' }}
+            </button>
             <p>Bank</p>
             <button type="button" @click="editBank(); menuOpen = false">Add empty bank</button>
             <button type="button" :disabled="busy" @click="bankInput?.click(); menuOpen = false">Add bank from file</button>
@@ -444,39 +500,6 @@ onUnmounted(() => {
       {{ projectError }}
       <button type="button" @click="projectError = ''">Dismiss</button>
     </div>
-
-    <section class="transport" aria-label="Transport">
-      <button class="transport-button record" type="button" disabled aria-label="Record (not yet available)">
-        <span class="record-icon" aria-hidden="true"></span>
-      </button>
-      <button
-        class="transport-button"
-        type="button"
-        :aria-label="playing ? 'Pause' : 'Play'"
-        :aria-pressed="playing"
-        @click="togglePlayback"
-      >
-        <svg v-if="playing" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M8 5h3v14H8zM14 5h3v14h-3z" />
-        </svg>
-        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M7 4v16l13-8z" />
-        </svg>
-      </button>
-
-      <div class="display" aria-label="Tempo and current bank">
-        <div><strong>{{ bpm }}</strong><span>BPM</span></div>
-        <div class="display-bank">{{ selectedBank.title }}</div>
-      </div>
-
-      <div class="beats" aria-label="Beat indicator">
-        <span
-          v-for="index in 4"
-          :key="index"
-          :class="{ active: playing && beat === index - 1 }"
-        ></span>
-      </div>
-    </section>
 
     <section class="banks" aria-label="Banks">
       <button

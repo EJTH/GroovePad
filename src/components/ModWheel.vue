@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ModWheelSettings, ParameterOutput } from '../grid'
 
-const props = defineProps<{ label: string; settings: ModWheelSettings }>()
+const props = defineProps<{ label: string; settings: ModWheelSettings; rotated?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const position = ref(0.5)
 const pointer = ref<number | null>(null)
@@ -17,7 +17,7 @@ function move(event: PointerEvent) {
   const target = event.currentTarget
   if (!(target instanceof HTMLElement)) return
   const rect = target.getBoundingClientRect()
-  setPosition(1 - (event.clientY - rect.top) / rect.height)
+  setPosition(props.rotated ? (event.clientX - rect.left) / rect.width : 1 - (event.clientY - rect.top) / rect.height)
 }
 function start(event: PointerEvent) {
   if (pointer.value !== null || event.button !== 0) return
@@ -34,8 +34,8 @@ function end(event: PointerEvent) {
   if (props.settings.autoCenter) setPosition(0.5)
 }
 function key(event: KeyboardEvent) {
-  if (event.key === 'ArrowUp') setPosition(position.value + 0.05)
-  else if (event.key === 'ArrowDown') setPosition(position.value - 0.05)
+  if (event.key === 'ArrowUp' || event.key === 'ArrowRight') setPosition(position.value + 0.05)
+  else if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') setPosition(position.value - 0.05)
   else return
   event.preventDefault()
 }

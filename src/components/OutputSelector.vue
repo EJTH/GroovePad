@@ -1,10 +1,14 @@
 <script setup lang="ts">
+import { pointerTap } from '../pointerTap'
+
 defineProps<{ label: string; destination: string; value: string; flashSequence: number }>()
-defineEmits<{ advance: [] }>()
+const emit = defineEmits<{ advance: [] }>()
+const tap = pointerTap(() => emit('advance'))
 </script>
 
 <template>
-  <button type="button" class="output-selector" :aria-label="`${label}: ${destination}, ${value}. Select next output`" @click="$emit('advance')">
+  <button type="button" class="output-selector" :aria-label="`${label}: ${destination}, ${value}. Select next output`"
+    @pointerdown="tap.down" @pointerup="tap.up" @pointercancel="tap.cancel" @lostpointercapture="tap.cancel" @click="tap.click">
     <span v-if="flashSequence" :key="flashSequence" class="flash" aria-hidden="true"></span>
     <span class="label">{{ label }}</span>
     <span :key="flashSequence" class="destination" :class="{ blinking: flashSequence }">{{ destination }}</span>
@@ -30,6 +34,7 @@ defineEmits<{ advance: [] }>()
   background: #30392b;
   color: #e2edd9;
   cursor: pointer;
+  touch-action: none;
 }
 .output-selector span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .output-selector .flash { position: absolute; inset: 0; max-width: none; background: var(--accent); opacity: 0; pointer-events: none; animation: flash 900ms ease-out; }

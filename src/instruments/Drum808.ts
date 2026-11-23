@@ -136,6 +136,10 @@ export class Drum808 implements InstrumentInstance {
     // Drum hits finish their own envelope after the pad is released.
   }
 
+  setPitchBend(semitones: number): void {
+    this.synth?.detune.setValueAtTime(semitones * 100, Tone.now())
+  }
+
   updateParameter(param: string, value: number | string): void {
     if (param.startsWith('envelope.')) {
       const envParam = param.split('.')[1] as keyof ADSREnvelope

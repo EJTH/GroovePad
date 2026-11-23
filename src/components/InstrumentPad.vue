@@ -6,9 +6,10 @@ import { Bass303, Drum808, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[] }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; rotated?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const error = ref('')
+const inputsMuted = ref(false)
 let instrument: InstrumentInstance | undefined
 let localPressed = false
 let localVelocity = 100
@@ -16,6 +17,16 @@ let currentKey = ''
 let generation = 0
 let unmounted = false
 const appliedParameters = new Map<string, number | string>()
+const hitNotes = new Map<string, { note: number; velocity: number; bend: number }>()
+
+function incomingNotes() {
+  return inputsMuted.value ? [] : props.notes
+}
+
+function incomingBend() {
+  const notes = incomingNotes()
+  return notes[notes.length - 1]?.bend ?? 0
+}
 
 function syncParameters() {
   if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
@@ -24,6 +35,7 @@ function syncParameters() {
       instrument.dispose()
       instrument = undefined
       currentKey = ''
+      hitNotes.clear()
       syncNote()
     } else if (instrument instanceof SampleHit) {
       instrument.updateParameters(props.settings.instrumentParams as SampleHitParams)
@@ -48,7 +60,12 @@ function syncParameters() {
 }
 
 function syncNote() {
-  const wired = props.notes[props.notes.length - 1]
+  if (props.settings.instrumentType === 'sample-hit' && props.settings.instrumentParams.polyphony > 1) {
+    syncHitNotes()
+    return
+  }
+  const notes = incomingNotes()
+  const wired = notes[notes.length - 1]
   const key = localPressed ? 'local' : wired ? `note:${wired.note}` : ''
   if (key === currentKey) return
   currentKey = key
@@ -64,6 +81,7 @@ function syncNote() {
       if (unmounted || request !== generation) return
       instrument ??= InstrumentFactory.create(props.settings.instrumentType, props.settings.instrumentParams)
       syncParameters()
+      instrument.setPitchBend?.(localPressed ? 0 : incomingBend())
       await instrument.trigger(velocity, note)
       if (!unmounted && request === generation) error.value = ''
     } catch (cause) {
@@ -75,16 +93,71 @@ function syncNote() {
   })()
 }
 
+function syncHitNotes() {
+  const next = new Map<string, { note: number; velocity: number; bend: number }>(incomingNotes().map((note) =>
+    [`note:${note.note}`, { note: note.note, velocity: note.velocity, bend: note.bend ?? 0 }] as const))
+  if (localPressed) next.set('local', { note: 60, velocity: localVelocity, bend: 0 })
+  for (const id of hitNotes.keys()) {
+    if (next.has(id)) continue
+    hitNotes.delete(id)
+    if (instrument instanceof SampleHit) instrument.release(id)
+  }
+  for (const [id, note] of next) {
+    const previous = hitNotes.get(id)
+    if (previous) {
+      if (previous.bend !== note.bend && instrument instanceof SampleHit) instrument.setVoicePitchBend(id, note.bend)
+      previous.bend = note.bend
+      continue
+    }
+    hitNotes.set(id, note)
+    const request = generation
+    void (async () => {
+      try {
+        await Tone.start()
+        if (unmounted || request !== generation || hitNotes.get(id) !== note) return
+        instrument ??= InstrumentFactory.create('sample-hit', props.settings.instrumentParams)
+        if (!(instrument instanceof SampleHit)) return
+        syncParameters()
+        if (!(instrument instanceof SampleHit) || hitNotes.get(id) !== note) return
+        await instrument.trigger(note.velocity, note.note, id, note.bend)
+        if (!unmounted && request === generation) error.value = ''
+      } catch (cause) {
+        if (!unmounted && request === generation) {
+          error.value = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+          console.error(error.value, cause)
+        }
+      }
+    })()
+  }
+}
+
 function handlePadOutput(output: ParameterOutput) {
   emit('output', output)
   if (output.parameter === 'velocity') localVelocity = output.value
   if (output.parameter === 'gate') {
+    if (props.settings.mode === 'toggle') {
+      if (output.value > 0) {
+        inputsMuted.value = !inputsMuted.value
+        syncNote()
+      }
+      return
+    }
     localPressed = output.value > 0
     syncNote()
   }
 }
 
-watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(','), syncNote, { immediate: true })
+watch(() => props.settings.mode, (mode, previous) => {
+  if (previous === undefined || mode === previous) return
+  inputsMuted.value = false
+  syncNote()
+})
+watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
+  syncNote, { immediate: true, flush: 'sync' })
+watch(() => localPressed ? 0 : incomingBend(),
+  (bend) => {
+    if (!(instrument instanceof SampleHit) || props.settings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
+  })
 watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
 onBeforeUnmount(() => {
   unmounted = true
@@ -95,7 +168,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="instrument-pad">
-    <MPCPad :label="label" :settings="settings" :wired-active="notes.length > 0" @output="handlePadOutput" />
+    <MPCPad :label="label" :settings="settings" :rotated="rotated" :wired-active="!inputsMuted && notes.length > 0"
+      :input-muted="settings.mode === 'toggle' ? inputsMuted : undefined" @output="handlePadOutput" />
     <span v-if="error" class="instrument-error" role="alert">{{ error }}</span>
   </div>
 </template>

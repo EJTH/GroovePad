@@ -2,21 +2,24 @@
 import { computed, onMounted, ref } from 'vue'
 import type { KnobSettings, ParameterOutput } from '../grid'
 
-const props = defineProps<{ label: string; settings: KnobSettings; emitInitial?: boolean }>()
+const props = defineProps<{ label: string; settings: KnobSettings; emitInitial?: boolean; rotated?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointerId = ref<number | null>(null)
-let startY = 0
-let startValue = 0
+let lastY = 0
+let lastX = 0
+let dragValue = 0
+let lastDragValue = 0
 const rotation = computed(() => props.settings.max === props.settings.min
   ? 0
   : (props.settings.value - props.settings.min) / (props.settings.max - props.settings.min) * 270 - 135)
 const displayedValue = computed(() => Number(props.settings.value.toPrecision(10)).toString())
 
-function setValue(value: number) {
+function setValue(value: number, previous = props.settings.value): number {
   const { min, max, step } = props.settings
   const snapped = min + Math.round((value - min) / step) * step
   const next = Number(Math.max(min, Math.min(max, snapped)).toPrecision(12))
-  if (next !== props.settings.value) emit('output', { parameter: 'value', value: next })
+  if (next !== previous) emit('output', { parameter: 'value', value: next, delta: next - previous })
+  return next
 }
 
 function start(event: PointerEvent) {
@@ -26,13 +29,28 @@ function start(event: PointerEvent) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
-  startY = event.clientY
-  startValue = props.settings.value
+  lastX = event.clientX
+  lastY = event.clientY
+  dragValue = props.settings.value
+  lastDragValue = dragValue
 }
 
 function move(event: PointerEvent) {
   if (pointerId.value !== event.pointerId) return
-  setValue(startValue + (startY - event.clientY) / 100 * (props.settings.max - props.settings.min))
+  const horizontal = event.clientX - lastX
+  const vertical = props.rotated ? event.clientY - lastY : lastY - event.clientY
+  const distance = Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical
+  lastX = event.clientX
+  lastY = event.clientY
+  const { min, max } = props.settings
+  dragValue = Math.max(min, Math.min(max, dragValue + distance / 100 * (max - min)))
+  lastDragValue = setValue(dragValue, lastDragValue)
+}
+
+function wheel(event: WheelEvent) {
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+    ? event.deltaX : props.rotated ? event.deltaY : -event.deltaY
+  if (delta !== 0) setValue(props.settings.value + Math.sign(delta) * props.settings.step)
 }
 
 function end(event: PointerEvent) {
@@ -69,7 +87,7 @@ onMounted(() => {
       @pointercancel="end"
       @lostpointercapture="end"
       @keydown="keyDown"
-      @wheel.prevent="setValue(settings.value + ($event.deltaY < 0 ? settings.step : -settings.step))"
+      @wheel.prevent="wheel"
     >
       <span class="indicator" :style="{ transform: `rotate(${rotation}deg)` }"></span>
       <span class="value">{{ displayedValue }}{{ settings.unit }}</span>
@@ -105,7 +123,7 @@ onMounted(() => {
   background: #30392b;
   color: #e2edd9;
   touch-action: none;
-  cursor: ns-resize;
+  cursor: move;
 }
 
 .knob-control:focus-visible {

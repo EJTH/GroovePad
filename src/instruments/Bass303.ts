@@ -7,6 +7,7 @@ export class Bass303 implements InstrumentInstance {
   readonly params: Bass303Params
   private readonly synth: Tone.MonoSynth
   private activeNote: number | undefined
+  private pitchBend = 0
 
   constructor(params: Partial<Bass303Params>) {
     this.params = {
@@ -35,7 +36,7 @@ export class Bass303 implements InstrumentInstance {
 
   trigger(velocity: number, note = 60): void {
     this.activeNote = note
-    const pitch = Math.max(0, Math.min(127, note + this.params.transpose))
+    const pitch = Math.max(0, Math.min(127, note + this.params.transpose + this.pitchBend))
     this.synth.triggerAttack(Tone.Frequency(pitch, 'midi').toFrequency(), Tone.now(), velocity / 127)
   }
 
@@ -44,12 +45,19 @@ export class Bass303 implements InstrumentInstance {
     this.synth.triggerRelease()
   }
 
+  setPitchBend(semitones: number): void {
+    this.pitchBend = semitones
+    if (this.activeNote !== undefined) {
+      this.synth.setNote(Tone.Frequency(Math.max(0, Math.min(127, this.activeNote + this.params.transpose + semitones)), 'midi').toFrequency())
+    }
+  }
+
   updateParameter(param: string, value: number): void {
     switch (param) {
       case 'transpose':
         this.params.transpose = value
         if (this.activeNote !== undefined) {
-          this.synth.setNote(Tone.Frequency(Math.max(0, Math.min(127, this.activeNote + value)), 'midi').toFrequency())
+          this.synth.setNote(Tone.Frequency(Math.max(0, Math.min(127, this.activeNote + value + this.pitchBend)), 'midi').toFrequency())
         }
         break
       case 'volume': this.params.volume = value; this.synth.volume.rampTo(value, 0.02); break

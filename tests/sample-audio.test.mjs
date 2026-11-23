@@ -119,6 +119,77 @@ test('sample modulation updates active voices without restarting them and tracks
   assert.deepEqual(stops, [5])
 })
 
+test('sample hit limits voices, bends and releases each note independently, and cancels pending notes', async () => {
+  const source = await readFile(new URL('../src/instruments/SamplePlayer.ts', import.meta.url), 'utf8')
+  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
+  let finishLoad
+  const load = new Promise((resolve) => { finishLoad = resolve })
+  const players = []
+  class Buffer {
+    loaded = false
+    duration = 1
+    async load() { await load; this.loaded = true }
+    dispose() {}
+  }
+  class Player {
+    constructor(options) { Object.assign(this, options); this.volume = { rampTo() {} }; players.push(this) }
+    connect() { return this }
+    start() {}
+    stop() { this.stopped = true }
+    dispose() { this.disposed = true }
+  }
+  class Envelope {
+    constructor(params) { Object.assign(this, params) }
+    toDestination() { return this }
+    triggerAttack() {}
+    triggerAttackRelease() {}
+    triggerRelease() { this.released = true }
+    dispose() { this.disposed = true }
+  }
+  const tone = { now: () => 0, ToneAudioBuffer: Buffer, Player, AmplitudeEnvelope: Envelope }
+  const module = { exports: {} }
+  vm.runInNewContext(outputText, { module, exports: module.exports, require: (name) =>
+    name === 'tone' ? tone : name === './sampleRegion' ? { oneShotGateDuration: () => 1 } : {} })
+  class Sample extends module.exports.SamplePlayer {
+    type = 'sample-hit'
+    params = { sample: 'data:audio/wav;base64,AA==', start: 0, end: 1, cuts: [], playback: 'order',
+      loopMode: 'once', reverse: false, polyphony: 2, pitch: 0, volume: -12,
+      envelope: { attack: 0.1, decay: 0.2, sustain: 1, release: 1 } }
+  }
+  const sample = new Sample()
+  const cancelled = sample.trigger(100, 60, 'cancelled')
+  sample.release('cancelled')
+  const first = sample.trigger(100, 60, 'first')
+  const second = sample.trigger(100, 64, 'second')
+  finishLoad()
+  await Promise.all([cancelled, first, second])
+  assert.equal(players.length, 2)
+  sample.setVoicePitchBend('first', 12)
+  assert.equal(players[0].playbackRate, 2)
+  assert.equal(players[1].playbackRate, 2 ** (4 / 12))
+  await sample.trigger(100, 67, 'third')
+  assert.equal(players[0].disposed, true)
+  assert.equal(players[1].disposed, undefined)
+  assert.equal(sample.voices.size, 2)
+  sample.updateParameters({ ...sample.params, polyphony: 1 })
+  assert.equal(players[1].disposed, true)
+  assert.equal(sample.voices.size, 1)
+  sample.dispose()
+
+  const looping = new Sample()
+  const voices = ['first', 'second'].map((id) => ({
+    id, note: 60, looping: true, released: false,
+    player: { stop() { this.stopped = true }, dispose() {} },
+    envelope: { triggerRelease() { this.released = true }, dispose() {} },
+  }))
+  for (const voice of voices) looping.voices.add(voice)
+  looping.release('first')
+  assert.equal(voices[0].envelope.released, true)
+  assert.equal(voices[0].player.stopped, true)
+  assert.equal(voices[1].envelope.released, undefined)
+  looping.dispose()
+})
+
 test('808 tonality changes the noise level on subsequent hits', async () => {
   const source = await readFile(new URL('../src/instruments/Drum808.ts', import.meta.url), 'utf8')
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })

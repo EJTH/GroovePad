@@ -1,5 +1,6 @@
 import type { InstrumentType } from './instruments/types'
 import { InstrumentFactory } from './instruments'
+import { PIANO_ROOT_NOTES, scaleNote, scales, type PianoRootNote } from './music'
 
 export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad' | 'output-selector'
 
@@ -10,6 +11,7 @@ interface GridItemBase {
   y: number
   width: number
   height: number
+  orientation?: 'horizontal' | 'vertical'
 }
 
 export interface PadSettings {
@@ -19,6 +21,7 @@ export interface PadSettings {
 export interface InstrumentPadSettings {
   color: string
   instrumentType: InstrumentType
+  mode: 'trigger' | 'toggle'
   instrumentParams: Record<string, any>
 }
 
@@ -42,12 +45,35 @@ export interface LfoSettings {
 }
 
 export interface ModWheelSettings { depth: number; autoCenter: boolean }
-export type Scale = 'chromatic' | 'major' | 'minor' | 'pentatonic'
+export type Scale = 'chromatic' | 'major' | 'minor' | 'dorian' | 'phrygian' | 'lydian' | 'mixolydian' | 'locrian' | 'major-pentatonic' | 'minor-pentatonic' | 'blues'
 export type TempoDivision = '1/1' | '3/4' | '1/2' | '1/4' | '1/8' | '1/16' | '1/32'
-export interface PianoRollSettings { color: string; octaves: number; transpose: number; scale: Scale; orientation: 'horizontal' | 'vertical' }
+export type PianoRollStyle = 'pads' | 'whites-blacks' | 'glide-strip'
+export interface PianoRollSettings { color: string; octaves: number; rootNote: PianoRootNote; octaveTranspose: number; scale: Scale; orientation: 'horizontal' | 'vertical'; numRows: number; style: PianoRollStyle; pressureMode: 'pressure' | 'position' }
+export function validPianoRollNoteRange(scale: unknown, rootNote: unknown, octaves: unknown, octaveTranspose: unknown, numRows: unknown, style: unknown) {
+  if (typeof scale !== 'string' || !Object.prototype.hasOwnProperty.call(scales, scale) ||
+    typeof rootNote !== 'string' || !PIANO_ROOT_NOTES.includes(rootNote as PianoRootNote) ||
+    typeof octaves !== 'number' || !Number.isSafeInteger(octaves) ||
+    typeof octaveTranspose !== 'number' || !Number.isSafeInteger(octaveTranspose) ||
+    typeof numRows !== 'number' || !Number.isSafeInteger(numRows)) return false
+  const degreeCount = (style === 'whites-blacks' ? 12 : scales[scale as Scale].length) * octaves * numRows
+  if (degreeCount < 1) return false
+  const lastNoteOffset = style === 'whites-blacks'
+    ? degreeCount - 1
+    : scaleNote(scale as Scale, degreeCount - 1, rootNote as PianoRootNote)
+  const firstNote = 48 + octaveTranspose * 12 + (style === 'whites-blacks' ? 0 : PIANO_ROOT_NOTES.indexOf(rootNote as PianoRootNote))
+  return firstNote >= 0 && firstNote + lastNoteOffset <= 127
+}
+
+export function validPianoRollSettings(settings: PianoRollSettings) {
+  return Number.isSafeInteger(settings.numRows) && settings.numRows >= 1 && settings.numRows <= 8 &&
+    Number.isSafeInteger(settings.octaves) && settings.octaves >= 1 && settings.octaves <= 3 &&
+    Number.isSafeInteger(settings.octaveTranspose) && settings.octaveTranspose >= -3 && settings.octaveTranspose <= 3 &&
+    ['pads', 'whites-blacks', 'glide-strip'].includes(settings.style) &&
+    validPianoRollNoteRange(settings.scale, settings.rootNote, settings.octaves, settings.octaveTranspose, settings.numRows, settings.style)
+}
 export interface ArpeggiatorSettings { enabled: boolean; style: 'up' | 'down' | 'up-down' | 'random'; rate: TempoDivision; distance: number; steps: number; gate: number; scale: Scale }
-export interface HeldNote { note: number; velocity: number; count: number }
-export interface OutputSelectorSettings { index: number }
+export interface HeldNote { note: number; velocity: number; count: number; bend?: number }
+export interface OutputSelectorSettings { index: number; baseIndex?: number }
 
 export type GridItem = GridItemBase & (
   | { type: 'pad'; settings: PadSettings }
@@ -63,21 +89,24 @@ export type GridItem = GridItemBase & (
 export interface ParameterOutput {
   parameter: string
   value: number
+  delta?: number
+  active?: boolean
   on?: boolean
   velocity?: number
+  bend?: number
 }
 
 export const DEFAULT_PIANO_COLOR = '#b8d986'
 
 export function createControl(id: string, x: number, y: number, type: GridItemType, instrumentType?: InstrumentType): GridItem {
-  const base = { id, x, y, width: 1, height: 1 }
+  const base = { id, x, y, width: 1, height: 1, orientation: 'horizontal' as const }
   switch (type) {
     case 'pad': return { ...base, type, label: 'Pad', settings: { color: '#b8d986' } }
     case 'knob': return { ...base, type, label: 'Knob', settings: { color: '#83c9bb', min: 0, max: 127, defaultValue: 64, value: 64, step: 1, unit: '' } }
     case 'lfo': return { ...base, type, label: 'LFO', settings: { waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } }
     case 'mod-wheel': return { ...base, type, label: 'Mod Wheel', settings: { depth: 1, autoCenter: false } }
-    case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, transpose: 0, scale: 'chromatic', orientation: 'horizontal' } }
-    case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 4, gate: 0.5, scale: 'chromatic' } }
+    case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, rootNote: 'C', octaveTranspose: 0, scale: 'chromatic', orientation: 'horizontal', numRows: 1, style: 'pads', pressureMode: 'position' } }
+    case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 0, gate: 0.5, scale: 'chromatic' } }
     case 'output-selector': return { ...base, type, label: 'Output Selector', settings: { index: 0 } }
     case 'instrument-pad':
       const iType = instrumentType || 'sample-hit'
@@ -88,6 +117,7 @@ export function createControl(id: string, x: number, y: number, type: GridItemTy
         settings: {
           color: '#ff6b9d',
           instrumentType: iType,
+          mode: 'trigger',
           instrumentParams: InstrumentFactory.getDefaultParams(iType),
         },
       }
@@ -103,6 +133,9 @@ export interface Connection {
   modulationAmount?: number
   modulationMin?: number
   modulationMax?: number
+  mappingMode?: 'mod' | 'abs'
+  absoluteMin?: number
+  absoluteMax?: number
 }
 
 export interface GridLayout {

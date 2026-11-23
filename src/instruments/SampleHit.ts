@@ -17,6 +17,7 @@ export class SampleHit extends SamplePlayer {
       playback: params.playback ?? 'order',
       loopMode: params.loopMode ?? 'once',
       reverse: params.reverse ?? false,
+      polyphony: params.polyphony ?? 1,
       volume: params.volume ?? -12,
       pitch: params.pitch ?? 0,
       envelope: params.envelope ?? defaultEnvelope('sample-hit'),

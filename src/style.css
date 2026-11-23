@@ -14,11 +14,25 @@
 
 * {
   box-sizing: border-box;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 body {
   min-width: 320px;
   margin: 0;
+}
+
+html,
+body {
+  overscroll-behavior-y: none;
 }
 
 button {
@@ -43,14 +57,14 @@ button:focus-visible {
   min-height: 58px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
   border-bottom: 1px solid var(--border);
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .header-actions .icon-button[aria-pressed="true"] {
@@ -59,6 +73,7 @@ button:focus-visible {
 }
 
 .brand {
+  margin: 4px 8px 12px;
   font-size: 19px;
   font-weight: 650;
   letter-spacing: -0.04em;
@@ -166,14 +181,19 @@ button:focus-visible {
 }
 
 .transport {
-  margin-top: 12px;
+  min-width: 0;
+  flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
+.header .icon-button,
 .transport-button {
-  flex: 0 0 44px;
+  width: 38px;
+  height: 38px;
+  padding: 8px;
+  flex: 0 0 38px;
 }
 
 .transport-button:not(:disabled):hover,
@@ -200,13 +220,12 @@ button:focus-visible {
 
 .display {
   min-width: 0;
-  min-height: 44px;
+  height: 44px;
   flex: 1;
-  padding: 6px 10px;
+  padding: 3px 6px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  justify-content: center;
   border: 1px solid #536149;
   border-radius: 4px;
   background: #252e22;
@@ -214,30 +233,31 @@ button:focus-visible {
 }
 
 .display strong {
-  font-size: 18px;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
 }
 
 .display span {
-  margin-left: 4px;
-  font-size: 11px;
+  margin-left: 3px;
+  font-size: 10px;
 }
 
 .display-bank {
   overflow: hidden;
-  font-size: 14px;
+  font-size: 11px;
+  line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .beats {
   display: flex;
-  gap: 4px;
+  gap: 2px;
 }
 
 .beats span {
-  width: 7px;
-  height: 7px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: #55574e;
 }
@@ -549,10 +569,10 @@ button:focus-visible {
 .wire-control.selected { border-color: var(--accent); background: #455c36; }
 
 .wire-button {
-  flex: 0 0 40px;
-  width: 40px;
-  height: 40px;
-  padding: 8px;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  padding: 7px;
   border: 1px solid #c75c5c;
   border-radius: 4px;
   background: #592a2a;
@@ -563,9 +583,11 @@ button:focus-visible {
 .wire-button svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
 .wire-entry { margin-top: 8px; font-size: 12px; }
-.wire-entry-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wire-entry-heading { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
 .wire-entry-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.settings-form .wire-amount { flex: 0 0 68px; width: 68px; padding: 6px; }
+.wire-mode { flex: 0 0 42px; min-height: 34px; padding: 4px; border: 1px solid var(--border); border-radius: 4px; background: #30392b; color: #e2edd9; font-size: 11px; cursor: pointer; }
+.settings-form .wire-amount { flex: 0 0 60px; width: 60px; min-height: 34px; padding: 4px; font-size: 12px; }
+.settings-form select.wire-amount { flex: 0 0 78px; width: 78px; }
 .settings-form .inline-checkbox { flex-direction: row; align-items: center; margin-top: 8px; }
 .settings-form .inline-checkbox input { width: 20px; min-height: 20px; }
 
@@ -576,6 +598,11 @@ button:focus-visible {
   border: 1px solid #393a35;
   border-radius: 4px;
   background: #1c1d1a;
+}
+
+.groove-grid:not(.editing) .grid-cell {
+  border-color: transparent;
+  background: transparent;
 }
 
 .grid-cell.editable:not(:disabled) {
@@ -596,6 +623,7 @@ button:focus-visible {
 .grid-item {
   z-index: 1;
   position: relative;
+  container-type: size;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -643,6 +671,16 @@ button:focus-visible {
 
 .grid-item-main.editing:active {
   cursor: grabbing;
+}
+
+.vertical-edit-label {
+  display: inline-block;
+  max-height: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+  text-orientation: sideways;
 }
 
 .resize-handle {
@@ -694,6 +732,15 @@ button:focus-visible {
   display: flex;
   align-items: stretch;
   justify-content: stretch;
+}
+
+.grid-item-component.rotated {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100cqh;
+  height: 100cqw;
+  transform: translate(-50%, -50%) rotate(90deg);
 }
 
 .grid-item-placeholder {
@@ -784,6 +831,9 @@ button:focus-visible {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+.lfo-preview { height: 100px; border: 1px solid color-mix(in srgb, var(--accent) 55%, #26332e); border-radius: 4px; overflow: hidden; }
+.piano-preview { height: 140px; margin-top: 8px; overflow: hidden; }
 
 .settings-section label {
   margin-top: 8px;

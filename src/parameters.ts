@@ -11,7 +11,7 @@ export interface ParameterMetadata {
 
 export const waveforms = ['sine', 'saw', 'square', 'random'] as const
 export const rateModes = ['free', 'sync'] as const
-export const scales = ['chromatic', 'major', 'minor', 'pentatonic'] as const
+export const scales = ['chromatic', 'major', 'minor', 'major-pentatonic', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'locrian', 'minor-pentatonic', 'blues'] as const
 export const orientations = ['horizontal', 'vertical'] as const
 export const arpStyles = ['up', 'down', 'up-down', 'random'] as const
 export const tempoDivisions = ['1/1', '3/4', '1/2', '1/4', '1/8', '1/16', '1/32'] as const
@@ -114,6 +114,7 @@ export function inputs(item: GridItem): ParameterMetadata[] {
     case 'piano-roll': return [select('scale', 'Scale', scales), select('orientation', 'Orientation', orientations)]
     case 'arpeggiator': return [
       { id: 'note', label: 'Note input', kind: 'note' },
+      select('enabled', 'On/off', ['off', 'on']),
       select('style', 'Style', arpStyles), select('rate', 'Rate', tempoDivisions), select('scale', 'Scale', scales),
     ]
     default: return []
@@ -148,7 +149,8 @@ export function applySelectInput(item: GridItem, parameter: string, index: numbe
     const scale = scales[index]
     const style = arpStyles[index]
     const rate = tempoDivisions[index]
-    if (parameter === 'scale' && scale !== undefined) item.settings.scale = scale
+    if (parameter === 'enabled' && (index === 0 || index === 1)) item.settings.enabled = index === 1
+    else if (parameter === 'scale' && scale !== undefined) item.settings.scale = scale
     else if (parameter === 'style' && style !== undefined) item.settings.style = style
     else if (parameter === 'rate' && rate !== undefined) item.settings.rate = rate
   }

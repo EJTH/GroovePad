@@ -1,5 +1,6 @@
-import { canResizeGrid, DEFAULT_PIANO_COLOR, isValidPlacement, type Connection, type GridItem, type GridLayout } from './grid'
-import { createsCycle, selectorConnectionsCompatible, tempoDivisions } from './parameters'
+import { canResizeGrid, DEFAULT_PIANO_COLOR, isValidPlacement, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
+import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
+import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
 
 export interface Bank {
@@ -48,13 +49,14 @@ function validSample(params: Record<string, unknown>, start: unknown, end: unkno
 
 function validInstrument(settings: Record<string, unknown>): boolean {
   const params = settings.instrumentParams
-  if (!color(settings.color) || !object(params) || !within(params.volume, -48, 0) || !validEnvelope(params.envelope)) return false
+  if (!color(settings.color) || !oneOf(settings.mode, ['trigger', 'toggle']) ||
+    !object(params) || !within(params.volume, -48, 0) || !validEnvelope(params.envelope)) return false
   switch (settings.instrumentType) {
     case 'sample-hit':
       return validSample(params, params.start, params.end, true) &&
         oneOf(params.loopMode, ['once', 'loop', 'back-and-forth']) &&
         (params.playback === 'loop' ? params.loopMode !== 'once' : params.loopMode === 'once') &&
-        typeof params.reverse === 'boolean'
+        typeof params.reverse === 'boolean' && integer(params.polyphony, 1, 16)
     case 'sample-loop':
       return validSample(params, params.loopStart, params.loopEnd)
     case '303':
@@ -71,7 +73,8 @@ function validInstrument(settings: Record<string, unknown>): boolean {
 function isItem(value: unknown): value is GridItem {
   if (!object(value) || typeof value.id !== 'string' || !value.id || typeof value.label !== 'string' ||
     !value.label.trim() || !integer(value.x, 0, 7) || !integer(value.y, 0, 9) ||
-    !integer(value.width, 1, 8) || !integer(value.height, 1, 10) || !object(value.settings)) return false
+    !integer(value.width, 1, 8) || !integer(value.height, 1, 10) ||
+    (value.orientation !== undefined && !oneOf(value.orientation, ['horizontal', 'vertical'])) || !object(value.settings)) return false
   const s = value.settings
   switch (value.type) {
     case 'pad': return color(s.color)
@@ -83,12 +86,19 @@ function isItem(value: unknown): value is GridItem {
       oneOf(s.rateMode, ['free', 'sync']) && within(s.rate, 0.01, 20) &&
       within(s.depth, 0, 1) && within(s.offset, -1, 1) && within(s.smoothness, 0, 0.99)
     case 'mod-wheel': return within(s.depth, 0, 1) && typeof s.autoCenter === 'boolean'
-    case 'piano-roll': return color(s.color) && integer(s.octaves, 1, 3) && integer(s.transpose, -36, 36) &&
-      oneOf(s.scale, ['chromatic', 'major', 'minor', 'pentatonic']) && oneOf(s.orientation, ['horizontal', 'vertical'])
+    case 'piano-roll': return color(s.color) && integer(s.octaves, 1, 3) && integer(s.octaveTranspose, -3, 3) &&
+      oneOf(s.rootNote, [...PIANO_ROOT_NOTES]) &&
+      oneOf(s.scale, [...scaleChoices]) &&
+      oneOf(s.orientation, ['horizontal', 'vertical']) &&
+      integer(s.numRows, 1, 8) && oneOf(s.style, ['pads', 'whites-blacks', 'glide-strip']) &&
+      oneOf(s.pressureMode, ['pressure', 'position']) &&
+      validPianoRollNoteRange(s.scale, s.rootNote, s.octaves, s.octaveTranspose, s.numRows, s.style)
     case 'arpeggiator': return typeof s.enabled === 'boolean' && oneOf(s.style, ['up', 'down', 'up-down', 'random']) &&
-      oneOf(s.rate, [...tempoDivisions]) && integer(s.distance, -24, 24) && integer(s.steps, 1, 16) &&
-      within(s.gate, 0.05, 1) && oneOf(s.scale, ['chromatic', 'major', 'minor', 'pentatonic'])
-    case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER)
+      oneOf(s.rate, [...tempoDivisions]) && integer(s.distance, -24, 24) && integer(s.steps, 0, 16) &&
+      within(s.gate, 0.05, 1) &&
+      oneOf(s.scale, [...scaleChoices])
+    case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER) &&
+      (s.baseIndex === undefined || integer(s.baseIndex, 0, Number.MAX_SAFE_INTEGER))
     default: return false
   }
 }
@@ -98,9 +108,14 @@ function isConnection(value: unknown): value is Connection {
     typeof value.sourceId === 'string' && typeof value.sourceParameter === 'string' &&
     typeof value.targetId === 'string' && typeof value.targetParameter === 'string' &&
     (value.modulationAmount === undefined || within(value.modulationAmount, -100, 100)) &&
-    (value.modulationMin === undefined || within(value.modulationMin, -100, 100)) &&
-    (value.modulationMax === undefined || within(value.modulationMax, -100, 100)) &&
-    (value.modulationAmount === undefined || (value.modulationMin === undefined && value.modulationMax === undefined))
+    (value.mappingMode === undefined || oneOf(value.mappingMode, ['mod', 'abs'])) &&
+    (value.modulationMin === undefined || within(value.modulationMin, value.mappingMode === 'abs' ? 0 : -100, 100)) &&
+    (value.modulationMax === undefined || within(value.modulationMax, value.mappingMode === 'abs' ? 0 : -100, 100)) &&
+    (value.absoluteMin === undefined || finite(value.absoluteMin)) &&
+    (value.absoluteMax === undefined || finite(value.absoluteMax)) &&
+    ((value.absoluteMin === undefined && value.absoluteMax === undefined) ||
+      (value.mappingMode === 'abs' && value.modulationMin === undefined && value.modulationMax === undefined)) &&
+    (value.modulationAmount === undefined || (value.modulationMin === undefined && value.modulationMax === undefined && value.mappingMode === undefined))
 }
 
 function isLayout(value: unknown): value is GridLayout {
@@ -131,6 +146,10 @@ export function migrateSavedProject(value: unknown): void {
   for (const bank of value.banks) {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
     for (const item of bank.layout.items) {
+      if (object(item) && item.orientation === undefined) item.orientation = 'horizontal'
+      if (object(item) && item.type === 'instrument-pad' && object(item.settings) && item.settings.mode === undefined) {
+        item.settings.mode = 'trigger'
+      }
       if (object(item) && item.type === 'instrument-pad' && object(item.settings) &&
         (item.settings.instrumentType === 'sample-hit' || item.settings.instrumentType === 'sample-loop') &&
         object(item.settings.instrumentParams)) {
@@ -147,6 +166,7 @@ export function migrateSavedProject(value: unknown): void {
           if (params.end === undefined) params.end = 1
           if (params.loopMode === undefined) params.loopMode = 'once'
           if (params.reverse === undefined) params.reverse = false
+          if (params.polyphony === undefined) params.polyphony = 1
           if (params.loopMode === 'loop' || params.loopMode === 'back-and-forth') params.playback = 'loop'
         }
       }
@@ -158,8 +178,29 @@ export function migrateSavedProject(value: unknown): void {
       if (object(item) && item.type === 'lfo' && object(item.settings) && item.settings.offset === undefined) {
         item.settings.offset = 0
       }
-      if (object(item) && item.type === 'piano-roll' && object(item.settings) && item.settings.color === undefined) {
-        item.settings.color = DEFAULT_PIANO_COLOR
+      if (object(item) && item.type === 'piano-roll' && object(item.settings)) {
+        if (item.settings.scale === 'pentatonic') item.settings.scale = 'major-pentatonic'
+        if (item.settings.color === undefined) item.settings.color = DEFAULT_PIANO_COLOR
+        if (item.settings.numRows === undefined) item.settings.numRows = 1
+        if (item.settings.style === undefined) item.settings.style = 'pads'
+        const legacyTranspose = item.settings.transpose
+        let migratedRoot: unknown = 'C'
+        let migratedOctaveTranspose: unknown = legacyTranspose === undefined ? 0 : legacyTranspose
+        if (typeof legacyTranspose === 'number' && Number.isSafeInteger(legacyTranspose) &&
+          legacyTranspose >= -36 && legacyTranspose <= 36) {
+          migratedRoot = PIANO_ROOT_NOTES[((legacyTranspose % 12) + 12) % 12]
+          migratedOctaveTranspose = item.settings.style === 'whites-blacks'
+            ? Math.trunc(legacyTranspose / 12)
+            : Math.floor(legacyTranspose / 12)
+        }
+        if (item.settings.rootNote === undefined) {
+          item.settings.rootNote = migratedRoot
+        }
+        if (item.settings.octaveTranspose === undefined) {
+          item.settings.octaveTranspose = migratedOctaveTranspose
+        }
+        delete item.settings.transpose
+        if (item.settings.pressureMode === undefined) item.settings.pressureMode = 'position'
       }
       if (object(item) && item.type === 'arpeggiator' && object(item.settings) &&
         finite(item.settings.rate) && item.settings.rate > 0) {
@@ -171,6 +212,10 @@ export function migrateSavedProject(value: unknown): void {
           }
           return Math.abs(duration(division) - oldSeconds) < Math.abs(duration(best) - oldSeconds) ? division : best
         })
+      }
+      if (object(item) && item.type === 'arpeggiator' && object(item.settings) &&
+        item.settings.scale === 'pentatonic') {
+        item.settings.scale = 'major-pentatonic'
       }
       if (object(item) && item.type === 'arpeggiator' && object(item.settings) && item.settings.enabled === undefined) {
         item.settings.enabled = true

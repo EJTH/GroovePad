@@ -22,13 +22,37 @@ export interface NumericSignal {
   source: GridItem
 }
 
+function hasMapping(wire: Connection): boolean {
+  return wire.mappingMode !== undefined || wire.modulationMin !== undefined ||
+    wire.modulationMax !== undefined || wire.modulationAmount !== undefined
+}
+
+export function connectionMappingMode(layout: GridLayout, wire: Connection): 'mod' | 'abs' {
+  if (wire.mappingMode) return wire.mappingMode
+  if (hasMapping(wire)) return 'mod'
+  const target = layout.items.find((item) => item.id === wire.targetId)
+  if (target?.type === 'output-selector') return 'abs'
+  let sourceWire: Connection | undefined = wire
+  while (sourceWire) {
+    const source = layout.items.find((item) => item.id === sourceWire!.sourceId)
+    if (!source) return 'abs'
+    if (source.type !== 'output-selector') {
+      return source.type === 'knob' || (source.type === 'mod-wheel' && source.settings.autoCenter) ? 'mod' : 'abs'
+    }
+    const incoming: Connection | undefined = layout.connections.find((entry) => entry.targetId === source.id && entry.targetParameter === 'value')
+    if (!incoming || hasMapping(incoming)) return 'abs'
+    sourceWire = incoming
+  }
+  return 'abs'
+}
+
 export function numericSourceRange(layout: GridLayout, wire: Connection): { min: number; max: number } | undefined {
   const source = layout.items.find((item) => item.id === wire.sourceId)
   if (!source) return undefined
   if (source.type === 'output-selector') {
     const incoming = layout.connections.find((entry) => entry.targetId === source.id && entry.targetParameter === 'value')
     if (!incoming) return undefined
-    if (incoming.modulationMin !== undefined || incoming.modulationMax !== undefined || incoming.modulationAmount !== undefined) {
+    if (hasMapping(incoming)) {
       return { min: 0, max: 127 }
     }
     return numericSourceRange(layout, incoming)
@@ -37,9 +61,79 @@ export function numericSourceRange(layout: GridLayout, wire: Connection): { min:
   return output?.min !== undefined && output.max !== undefined ? { min: output.min, max: output.max } : undefined
 }
 
+export function mappingEndpoint(layout: GridLayout, wire: Connection, endpoint: 'min' | 'max'): number | undefined {
+  if (wire.mappingMode === 'abs') {
+    const absolute = endpoint === 'min' ? wire.absoluteMin : wire.absoluteMax
+    if (absolute !== undefined) return absolute
+    const legacy = endpoint === 'min' ? wire.modulationMin : wire.modulationMax
+    if (legacy === undefined) return undefined
+    const target = mappingTarget(layout, wire)
+    return target.min + legacy / 100 * (target.max - target.min)
+  }
+  const mapped = endpoint === 'min' ? wire.modulationMin : wire.modulationMax
+  if (mapped !== undefined || wire.modulationAmount === undefined) return mapped
+  if (endpoint === 'max') return wire.modulationAmount
+  const range = numericSourceRange(layout, wire)
+  return range && range.min < 0 && range.max > 0 ? -wire.modulationAmount : 0
+}
+
+export function mappingTarget(layout: GridLayout, wire: Connection): ParameterMetadata & { min: number; max: number } {
+  const target = layout.items.find((item) => item.id === wire.targetId)
+  const input = target && inputs(target).find((entry) => entry.id === wire.targetParameter && entry.kind === 'number')
+  if (!input || input.min === undefined || input.max === undefined || input.min >= input.max) {
+    throw new Error('Numeric mapping destination is unavailable.')
+  }
+  return { ...input, min: input.min, max: input.max }
+}
+
+export function setConnectionMappingMode(layout: GridLayout, wire: Connection, mode: 'mod' | 'abs', updateSelectorBase = true): void {
+  const previous = connectionMappingMode(layout, wire)
+  const min = mappingEndpoint(layout, wire, 'min')
+  const max = mappingEndpoint(layout, wire, 'max')
+  const targetInput = mappingTarget(layout, wire)
+  delete wire.modulationAmount
+  delete wire.modulationMin
+  delete wire.modulationMax
+  delete wire.absoluteMin
+  delete wire.absoluteMax
+  wire.mappingMode = mode
+  const convert = (value: number) => previous === mode ? value : mode === 'abs'
+    ? targetInput.min + Math.max(0, value) / 100 * (targetInput.max - targetInput.min)
+    : normalizeSignal(value, targetInput.min, targetInput.max) * 100
+  if (min !== undefined) {
+    if (mode === 'abs') wire.absoluteMin = convert(min)
+    else wire.modulationMin = convert(min)
+  }
+  if (max !== undefined) {
+    if (mode === 'abs') wire.absoluteMax = convert(max)
+    else wire.modulationMax = convert(max)
+  }
+  const target = layout.items.find((item) => item.id === wire.targetId)
+  if (updateSelectorBase && mode === 'mod' && target?.type === 'output-selector' && wire.targetParameter === 'selection' &&
+    target.settings.baseIndex === undefined) target.settings.baseIndex = target.settings.index
+}
+
+export function setMappingEndpoint(layout: GridLayout, wire: Connection, endpoint: 'min' | 'max', value: number | undefined, updateSelectorBase = true): void {
+  const mode = connectionMappingMode(layout, wire)
+  if (!hasMapping(wire) && value === undefined) return
+  setConnectionMappingMode(layout, wire, mode, updateSelectorBase)
+  const key = mode === 'abs'
+    ? (endpoint === 'min' ? 'absoluteMin' : 'absoluteMax')
+    : (endpoint === 'min' ? 'modulationMin' : 'modulationMax')
+  if (value === undefined) delete wire[key]
+  else wire[key] = value
+}
+
+export function absoluteMappingValue(wire: Connection, signal: NumericSignal, targetMin: number, targetMax: number): number {
+  const span = targetMax - targetMin
+  const min = wire.absoluteMin ?? (wire.modulationMin === undefined ? targetMin : targetMin + wire.modulationMin / 100 * span)
+  const max = wire.absoluteMax ?? (wire.modulationMax === undefined ? targetMax : targetMin + wire.modulationMax / 100 * span)
+  return min + (max - min) * normalizeSignal(signal.value, signal.min, signal.max)
+}
+
 export function modulationOffset(wire: Connection, signal: NumericSignal): number | undefined {
-  if (wire.modulationMin !== undefined || wire.modulationMax !== undefined) {
-    const min = wire.modulationMin ?? (signal.min < 0 && signal.max > 0 ? -100 : 0)
+  if (wire.mappingMode !== undefined || wire.modulationMin !== undefined || wire.modulationMax !== undefined) {
+    const min = wire.modulationMin ?? (wire.mappingMode !== 'abs' && signal.min < 0 && signal.max > 0 ? -100 : 0)
     const max = wire.modulationMax ?? 100
     return (min + (max - min) * normalizeSignal(signal.value, signal.min, signal.max)) / 100
   }
@@ -50,6 +144,14 @@ export function modulationOffset(wire: Connection, signal: NumericSignal): numbe
     return value * wire.modulationAmount / 100
   }
   return undefined
+}
+
+export function selectorNumericValue(wire: Connection, signal: NumericSignal, modBase: number): number {
+  if (wire.mappingMode === 'abs') return Math.max(0, Math.min(127, absoluteMappingValue(wire, signal, 0, 127)))
+  const mapped = modulationOffset(wire, signal)
+  if (mapped === undefined) return normalizeSignal(signal.value, signal.min, signal.max) * 127
+  const base = wire.mappingMode === 'mod' ? modBase : 0
+  return Math.max(0, Math.min(127, base + mapped * 127))
 }
 
 export function numericSignal(
@@ -66,8 +168,9 @@ export function numericSignal(
     if (!incoming) return undefined
     const signal = numericSignal(layout, incoming, signals, getItem)
     if (!signal) return undefined
-    const offset = modulationOffset(incoming, signal)
-    return offset === undefined ? signal : { source, min: 0, max: 127, value: Math.max(0, Math.min(127, offset * 127)) }
+    if (!hasMapping(incoming)) return signal
+    const base = normalizeSignal(signal.value, signal.min, signal.max) * 127
+    return { source, min: 0, max: 127, value: selectorNumericValue(incoming, signal, base) }
   }
   const output = outputs(source).find((parameter) => parameter.id === wire.sourceParameter && parameter.kind === 'number')
   if (!output || output.min === undefined || output.max === undefined || output.min >= output.max) return undefined
@@ -108,8 +211,9 @@ function baseValue(item: GridItem, input: ParameterMetadata): number | undefined
     const index = input.choices?.indexOf(item.settings[input.id]) ?? -1
     return index < 0 ? undefined : (index + 0.5) * 128 / input.choices!.length - 0.5
   }
-  if (item.type === 'arpeggiator' && (input.id === 'style' || input.id === 'scale' || input.id === 'rate')) {
-    const index = input.choices?.indexOf(item.settings[input.id]) ?? -1
+  if (item.type === 'arpeggiator' && (input.id === 'enabled' || input.id === 'style' || input.id === 'scale' || input.id === 'rate')) {
+    const choice = input.id === 'enabled' ? (item.settings.enabled ? 'on' : 'off') : item.settings[input.id]
+    const index = input.choices?.indexOf(choice) ?? -1
     return index < 0 ? undefined : (index + 0.5) * 128 / input.choices!.length - 0.5
   }
   return undefined
@@ -164,7 +268,8 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
         if (!signal) continue
         driven = true
         const offset = modulationOffset(wire, signal)
-        if (offset !== undefined) adjustment += offset * (input.max - input.min)
+        if (wire.mappingMode === 'abs') absolute = absoluteMappingValue(wire, signal, input.min, input.max)
+        else if (offset !== undefined) adjustment += offset * (input.max - input.min)
         else if (signal.source.type === 'knob') adjustment += signal.value
         else if (signal.source.type === 'mod-wheel' && signal.source.settings.autoCenter) adjustment += signal.value * (input.max - input.min)
         else {

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { canResizeGrid, canSwapItems, copyControl, createControl, isValidPlacement, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
+import { canResizeGrid, canSwapItems, copyControl, createControl, isValidPlacement, MAX_GRID_COLUMNS, MAX_GRID_ROWS, validPianoRollSettings, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
 import { createsCycle, inputs, isCompatible, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
-import { effectiveControls, modulationOffset, normalizeSignal, numericSignal, numericSourceRange, signalSource } from '../modulation'
+import { effectiveControls, modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
 import { InstrumentFactory, type InstrumentInstance } from '../instruments'
@@ -14,10 +14,16 @@ import PianoRoll from './PianoRoll.vue'
 import Arpeggiator from './Arpeggiator.vue'
 import InstrumentPad from './InstrumentPad.vue'
 import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
+import KnobSettingsPanel from './KnobSettingsPanel.vue'
+import LFOSettingsPanel from './LFOSettingsPanel.vue'
+import ModWheelSettingsPanel from './ModWheelSettingsPanel.vue'
+import PianoRollSettingsPanel from './PianoRollSettingsPanel.vue'
+import ArpeggiatorSettingsPanel from './ArpeggiatorSettingsPanel.vue'
 import NumericSetting from './NumericSetting.vue'
 import ControlIdentitySettings from './ControlIdentitySettings.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import OutputSelector from './OutputSelector.vue'
+import ConnectionMapping from './ConnectionMapping.vue'
 
 const props = defineProps<{
   layout: GridLayout
@@ -106,7 +112,8 @@ const wireDrag = ref<{ pointerId: number; sourceId: string; x: number; y: number
 const wirePair = ref<{ sourceId: string; targetId: string } | null>(null)
 const wireOutput = ref('')
 const wireInput = ref('')
-const activeNotes = reactive(new Map<string, { count: number; velocity: number }>())
+const wireDraft = ref<Connection | null>(null)
+const activeNotes = reactive(new Map<string, { count: number; velocity: number; bend?: number }>())
 const signals = reactive(new Map<string, number>())
 const selectorNotes = reactive(new Map<string, number>())
 const selectorFlash = ref<{ sourceId: string; targetId: string; sequence: number } | null>(null)
@@ -166,7 +173,13 @@ watch(() => props.wiring, (wiring) => {
   }
 })
 
-watch(wireOutput, () => { wireInput.value = '' })
+watch(wireOutput, () => { wireInput.value = '' }, { flush: 'sync' })
+watch([wirePair, wireOutput, wireInput], ([pair, output, input]) => {
+  wireDraft.value = pair && output && input
+    ? { id: '', sourceId: pair.sourceId, sourceParameter: output, targetId: pair.targetId, targetParameter: input }
+    : null
+  message.value = ''
+}, { flush: 'sync' })
 
 watch(() => props.settingsOpen, (open) => {
   if (open) {
@@ -227,6 +240,7 @@ function changeType(event: Event) {
   const replacement = createControl(item.id, item.x, item.y, type)
   replacement.width = item.width
   replacement.height = item.height
+  replacement.orientation = item.orientation
   if (item.label !== 'Pad' && item.label !== 'Knob') replacement.label = item.label
   draft.value = replacement
 }
@@ -256,6 +270,21 @@ function saveItem() {
       return
     }
   }
+  if (item.type === 'piano-roll' && !validPianoRollSettings(item.settings)) {
+    message.value = 'Use valid piano roll settings and keep the note range within MIDI notes 0 to 127.'
+    return
+  }
+  if (item.type === 'arpeggiator' && (!Number.isSafeInteger(item.settings.steps) ||
+    item.settings.steps < 0 || item.settings.steps > 16)) {
+    message.value = 'Arpeggiator steps must be a whole number from 0 to 16.'
+    return
+  }
+  if (item.type === 'instrument-pad' && item.settings.instrumentType === 'sample-hit' &&
+    (!Number.isSafeInteger(item.settings.instrumentParams.polyphony) ||
+      item.settings.instrumentParams.polyphony < 1 || item.settings.instrumentParams.polyphony > 16)) {
+    message.value = 'Polyphony must be a whole number from 1 to 16.'
+    return
+  }
   if (selectedId.value && props.layout.connections.some((connection) => {
     const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
     const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
@@ -278,10 +307,11 @@ function handleOutput(item: GridItem, output: ParameterOutput) {
   const original = props.layout.items.find((entry) => entry.id === item.id)
   if (!original) return
   if (original.type === 'knob' && item.type === 'knob' && output.parameter === 'value') {
-    const adjusted = original.settings.value + output.value - item.settings.value
+    const adjusted = original.settings.value + (output.delta ?? output.value - item.settings.value)
     original.settings.value = Math.max(original.settings.min, Math.min(original.settings.max, adjusted))
-  } else if (output.on === undefined) {
-    signals.set(`${item.id}:${output.parameter}`, output.value)
+  } else if (output.on === undefined && output.parameter !== 'note') {
+    if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
+    else signals.set(`${item.id}:${output.parameter}`, output.value)
   }
   emit('output', item.id, output)
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
@@ -304,8 +334,11 @@ function routeNote(sourceId: string, output: ParameterOutput) {
       const key = `${connection.id}:${output.value}`
       const previous = activeNotes.get(key)
       const count = previous?.count ?? 0
-      if (output.on) activeNotes.set(key, { count: count + 1, velocity: output.velocity ?? 100 })
-      else if (count > 1) activeNotes.set(key, { count: count - 1, velocity: previous!.velocity })
+      if (output.on === undefined) {
+        if (previous && output.bend !== undefined) activeNotes.set(key, { ...previous, bend: output.bend })
+        else continue
+      } else if (output.on) activeNotes.set(key, { count: count + 1, velocity: output.velocity ?? 100, bend: output.bend })
+      else if (count > 1) activeNotes.set(key, { ...previous!, count: count - 1 })
       else activeNotes.delete(key)
       if (output.on && (target.type === 'pad' || target.type === 'instrument-pad')) {
         handleOutput(target, { parameter: 'velocity', value: output.velocity ?? 100 })
@@ -331,15 +364,17 @@ function numericWireValue(wire: Connection) {
   const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
   if (!signal) return undefined
   const offset = modulationOffset(wire, signal)
-  return offset === undefined ? signal.value : Math.max(0, Math.min(127, offset * 127))
+  return offset === undefined ? signal.value : selectorNumericValue(wire, signal, normalizeSignal(signal.value, signal.min, signal.max) * 127)
 }
 
 function selectorInputValue(wire: Connection) {
   const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
   if (!signal) return undefined
-  const offset = modulationOffset(wire, signal)
-  return offset === undefined ? normalizeSignal(signal.value, signal.min, signal.max) * 127
-    : Math.max(0, Math.min(127, offset * 127))
+  const target = props.layout.items.find((item) => item.id === wire.targetId)
+  const count = props.layout.connections.filter((connection) => connection.sourceId === wire.targetId).length
+  const base = target?.type === 'output-selector' && count
+    ? ((target.settings.baseIndex ?? target.settings.index) % count + 0.5) * 128 / count : 0
+  return selectorNumericValue(wire, signal, base)
 }
 
 function selectorValue(item: GridItem) {
@@ -356,6 +391,7 @@ function selectorValue(item: GridItem) {
 function setSelectorIndex(item: GridItem, index: number, userInitiated = false) {
   if (item.type !== 'output-selector') return
   const count = props.layout.connections.filter((wire) => wire.sourceId === item.id).length
+  if (userInitiated && count) item.settings.baseIndex = index
   if (!count || item.settings.index % count === index) return
   const notes = receivedNotes(item.id)
   for (const note of notes) for (let i = 0; i < note.count; i++) {
@@ -372,7 +408,7 @@ function setSelectorIndex(item: GridItem, index: number, userInitiated = false) 
     selectorFlash.value = null
   }
   for (const note of notes) for (let i = 0; i < note.count; i++) {
-    routeNote(item.id, { parameter: 'note', value: note.note, on: true, velocity: note.velocity })
+    routeNote(item.id, { parameter: 'note', value: note.note, on: true, velocity: note.velocity, bend: note.bend })
   }
 }
 
@@ -391,11 +427,18 @@ watch(() => props.editing ? [] : props.layout.items.filter((item) => item.type =
 }), (current, previous) => {
   for (const selection of current) {
     const old = previous?.find((entry) => entry.id === selection.id)
-    if (selection.value === undefined || !Number.isFinite(selection.value) ||
-      (old && old.wireId === selection.wireId && old.originId === selection.originId && old.value === selection.value)) continue
+    if (old && old.wireId === selection.wireId && old.originId === selection.originId && old.value === selection.value) continue
     const item = props.layout.items.find((entry) => entry.id === selection.id)
     const count = props.layout.connections.filter((wire) => wire.sourceId === selection.id).length
-    if (!item || !count) continue
+    if (!item || item.type !== 'output-selector' || !count) continue
+    const wire = props.layout.connections.find((entry) => entry.id === selection.wireId)
+    if (selection.value === undefined || !Number.isFinite(selection.value)) {
+      if (wire?.mappingMode === 'mod' && item.settings.baseIndex !== undefined) {
+        setSelectorIndex(item, item.settings.baseIndex % count)
+      }
+      continue
+    }
+    if (wire?.mappingMode === 'mod' && item.settings.baseIndex === undefined) item.settings.baseIndex = item.settings.index
     const value = Math.max(0, Math.min(127, selection.value))
     setSelectorIndex(item, Math.min(count - 1, Math.floor(value * count / 128)))
   }
@@ -415,7 +458,7 @@ function receivedNotes(id: string): HeldNote[] {
       if (!key.startsWith(prefix)) continue
       const note = Number(key.slice(prefix.length))
       const previous = notes.get(note)
-      notes.set(note, { note, count: (previous?.count ?? 0) + active.count, velocity: active.velocity })
+      notes.set(note, { note, count: (previous?.count ?? 0) + active.count, velocity: active.velocity, bend: active.bend })
     }
   }
   return [...notes.values()].sort((a, b) => a.note - b.note)
@@ -428,7 +471,8 @@ function toggleArpeggiator(id: string) {
 function connectWire() {
   const source = sourceItem.value
   const target = targetItem.value
-  if (!target || !source || !wireOutput.value || !wireInput.value ||
+  const pending = wireDraft.value
+  if (!target || !source || !pending || !wireOutput.value || !wireInput.value ||
     !selectorConnectionsCompatible(props.layout.items, props.layout.connections,
       { id: '', sourceId: source.id, sourceParameter: wireOutput.value, targetId: target.id, targetParameter: wireInput.value }) ||
     createsCycle(props.layout.connections, source.id, target.id) ||
@@ -438,8 +482,9 @@ function connectWire() {
   }
   let number = 1
   while (props.layout.connections.some((connection) => connection.id === `wire-${number}`)) number++
-  props.layout.connections.push({ id: `wire-${number}`, sourceId: source.id, sourceParameter: wireOutput.value,
-    targetId: target.id, targetParameter: wireInput.value })
+  const connection = { ...pending, id: `wire-${number}` }
+  if (connection.mappingMode === 'mod') setConnectionMappingMode(props.layout, connection, 'mod')
+  props.layout.connections.push(connection)
   wirePair.value = null
   message.value = ''
 }
@@ -464,7 +509,7 @@ function selectWirePair(sourceId: string, targetId: string) {
     if (targets.length === 1) {
       wireOutput.value = output.id
       wireInput.value = targets[0]!.id
-      connectWire()
+      if (output.kind !== 'number') connectWire()
     }
   }
 }
@@ -525,34 +570,6 @@ function canSetModulationAmount(connection: Connection) {
   return source && target &&
     outputs(source).some((output) => output.id === connection.sourceParameter && output.kind === 'number') &&
     inputs(target).some((input) => input.id === connection.targetParameter && input.kind === 'number')
-}
-
-function modulationEndpoint(connection: Connection, endpoint: 'min' | 'max'): number | undefined {
-  const mapped = endpoint === 'min' ? connection.modulationMin : connection.modulationMax
-  if (mapped !== undefined || connection.modulationAmount === undefined) return mapped
-  if (endpoint === 'max') return connection.modulationAmount
-  const range = numericSourceRange(props.layout, connection)
-  return range && range.min < 0 && range.max > 0
-    ? -connection.modulationAmount : 0
-}
-
-function setModulationEndpoint(connection: Connection, endpoint: 'min' | 'max', event: Event) {
-  const input = event.target
-  if (!(input instanceof HTMLInputElement)) return
-  if (input.value !== '' && (!input.validity.valid || !Number.isFinite(input.valueAsNumber))) {
-    input.value = modulationEndpoint(connection, endpoint)?.toString() ?? ''
-    message.value = 'Modulation offsets must be between -100 and 100%.'
-    return
-  }
-  if (connection.modulationAmount !== undefined) {
-    connection.modulationMin = modulationEndpoint(connection, 'min')
-    connection.modulationMax = modulationEndpoint(connection, 'max')
-    delete connection.modulationAmount
-  }
-  const key = endpoint === 'min' ? 'modulationMin' : 'modulationMax'
-  if (input.value === '') delete connection[key]
-  else connection[key] = input.valueAsNumber
-  message.value = ''
 }
 
 function wireLine(connection: Connection) {
@@ -617,7 +634,7 @@ function endInteraction(event: PointerEvent, cancelled = false) {
   if (!cancelled) updateInteraction(event)
   interaction.value = null
   if (cancelled) return
-  if (!current.moved && current.mode === 'move') {
+  if (!current.moved) {
     openSettings(current.original)
   } else if (current.moved && current.mode === 'move') {
     if (!grid.value) return
@@ -708,6 +725,7 @@ function itemStyle(item: GridItem) {
       <div
         ref="grid"
         class="groove-grid"
+        :class="{ editing }"
         :style="{ gridTemplateColumns: `repeat(${layout.columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${layout.rows}, minmax(0, 1fr))` }"
       >
         <svg v-if="wiring && (layout.connections.length || wireDrag)" class="wires" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -727,13 +745,13 @@ function itemStyle(item: GridItem) {
         ><span v-if="editing && !wiring" aria-hidden="true">+</span></button>
 
         <div v-for="item in displayItems" :key="item.id" class="grid-item" :style="itemStyle(item)">
-          <div v-if="!editing" class="grid-item-component">
-            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :wired-active="padActive(item.id)" @output="handleOutput(item, $event)" />
-            <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" emit-initial @output="handleOutput(item, $event)" />
+          <div v-if="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
+            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event)" />
+            <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" @output="handleOutput(item, $event)" />
-            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
-            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" @output="handleOutput(item, $event)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" />
+            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event)" />
+            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
@@ -752,7 +770,7 @@ function itemStyle(item: GridItem) {
             @pointerup="endInteraction($event)"
             @pointercancel="endInteraction($event, true)"
             @click="editing && $event.detail === 0 && openSettings(item)"
-          >{{ item.label }}</button>
+          ><span :class="{ 'vertical-edit-label': item.orientation === 'vertical' }">{{ item.label }}</span></button>
           <span v-if="!editing && selectorFlash?.targetId === item.id" :key="selectorFlash.sequence"
             class="selector-receiver-flash" aria-hidden="true"></span>
           <button
@@ -772,7 +790,7 @@ function itemStyle(item: GridItem) {
             @pointerup="wirePointerEnd($event)" @pointercancel="wirePointerEnd($event, true)"
             @lostpointercapture="wirePointerEnd($event, true)"
             @click="$event.detail === 0 && keyboardWire(item)">
-            {{ item.label }}
+            <span :class="{ 'vertical-edit-label': item.orientation === 'vertical' }">{{ item.label }}</span>
           </button>
         </div>
       </div>
@@ -821,53 +839,20 @@ function itemStyle(item: GridItem) {
         <ControlIdentitySettings ref="controlIdentity" :draft="draft" :columns="layout.columns" :rows="layout.rows"
           :control-types="controlTypes" @change-type="changeType" />
 
-        <section v-if="draft.type !== 'pad'" class="control-parameters">
+        <section v-if="draft.type !== 'pad' && draft.type !== 'output-selector'" class="control-parameters">
         <template v-if="draft.type === 'instrument-pad'">
           <InstrumentPadSettingsPanel :draft="draft" @loading-change="sampleLoading = $event" />
         </template>
-        
-        
-        <template v-else-if="draft.type === 'knob'">
-          <div class="settings-section">
-            <h3>Knob Settings</h3>
-            <NumericSetting v-model="draft.settings.min" label="Minimum" :step="0.1" />
-            <NumericSetting v-model="draft.settings.max" label="Maximum" :step="0.1" />
-            <NumericSetting v-model="draft.settings.step" label="Step" :step="0.01" />
-            <NumericSetting :model-value="draft.settings.defaultValue" label="Default value" :step="0.1" @update:model-value="draft.settings.defaultValue = $event; if (!selectedId) draft.settings.value = $event" />
-            <NumericSetting v-model="draft.settings.value" label="Current value" :step="0.1" />
-            <label>Unit <input v-model="draft.settings.unit" type="text" maxlength="10" /></label>
-          </div>
-        </template>
-        <div v-else-if="draft.type === 'lfo'" class="settings-section">
-          <h3>LFO Settings</h3>
-          <label>Waveform <select v-model="draft.settings.waveform"><option value="sine">Sine</option><option value="saw">Saw</option><option value="square">Square</option><option value="random">Random</option></select></label>
-          <label>Rate mode <select v-model="draft.settings.rateMode"><option value="free">Hz</option><option value="sync">Cycles per beat</option></select></label>
-          <NumericSetting v-model="draft.settings.rate" label="Rate" :min="0.01" :max="20" :step="0.01" />
-          <NumericSetting v-model="draft.settings.depth" label="Depth" :min="0" :max="1" :step="0.01" />
-          <NumericSetting v-model="draft.settings.offset" label="Offset" :min="-1" :max="1" :step="0.01" />
-          <NumericSetting v-model="draft.settings.smoothness" label="Smoothness" :min="0" :max="0.99" :step="0.01" />
-        </div>
-        <div v-else-if="draft.type === 'mod-wheel'" class="settings-section">
-          <h3>Mod Wheel Settings</h3>
-          <NumericSetting v-model="draft.settings.depth" label="Depth" :min="0" :max="1" :step="0.01" />
-          <label class="inline-checkbox"><input v-model="draft.settings.autoCenter" type="checkbox" /> Auto-center</label>
-        </div>
-        <div v-else-if="draft.type === 'piano-roll'" class="settings-section">
-          <h3>Piano Roll Settings</h3>
-          <NumericSetting v-model="draft.settings.octaves" label="Octaves" :min="1" :max="3" />
-          <NumericSetting v-model="draft.settings.transpose" label="Transpose" :min="-36" :max="36" />
-          <label>Scale <select v-model="draft.settings.scale"><option value="chromatic">Chromatic</option><option value="major">Major</option><option value="minor">Minor</option><option value="pentatonic">Pentatonic</option></select></label>
-          <label>Orientation <select v-model="draft.settings.orientation"><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select></label>
-        </div>
-        <div v-else-if="draft.type === 'arpeggiator'" class="settings-section">
-          <h3>Arpeggiator Settings</h3>
-          <label>Style <select v-model="draft.settings.style"><option value="up">Up</option><option value="down">Down</option><option value="up-down">Up-down</option><option value="random">Random</option></select></label>
-          <label>Rate <select v-model="draft.settings.rate"><option value="1/1">1/1</option><option value="3/4">3/4</option><option value="1/2">1/2</option><option value="1/4">1/4</option><option value="1/8">1/8</option><option value="1/16">1/16</option><option value="1/32">1/32</option></select></label>
-          <NumericSetting v-model="draft.settings.distance" label="Distance (st)" :min="-24" :max="24" />
-          <NumericSetting v-model="draft.settings.steps" label="Steps" :min="1" :max="16" />
-          <NumericSetting v-model="draft.settings.gate" label="Gate" :min="0.05" :max="1" :step="0.05" />
-          <label>Scale <select v-model="draft.settings.scale"><option value="chromatic">Chromatic</option><option value="major">Major</option><option value="minor">Minor</option><option value="pentatonic">Pentatonic</option></select></label>
-        </div>
+        <KnobSettingsPanel v-else-if="draft.type === 'knob'" :draft="draft"
+          @default-value-change="draft.settings.defaultValue = $event; if (!selectedId) draft.settings.value = $event" />
+        <LFOSettingsPanel v-else-if="draft.type === 'lfo'" :draft="draft">
+          <template #preview>
+            <LFO label="Preview" :settings="draft.settings" :bpm="bpm" />
+          </template>
+        </LFOSettingsPanel>
+        <ModWheelSettingsPanel v-else-if="draft.type === 'mod-wheel'" :draft="draft" />
+        <PianoRollSettingsPanel v-else-if="draft.type === 'piano-roll'" :draft="draft" />
+        <ArpeggiatorSettingsPanel v-else-if="draft.type === 'arpeggiator'" :draft="draft" />
         </section>
 
         <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">
@@ -875,14 +860,8 @@ function itemStyle(item: GridItem) {
           <div v-for="connection in layout.connections.filter((entry) => entry.sourceId === selectedId || entry.targetId === selectedId)" :key="connection.id" class="wire-entry">
             <div class="wire-entry-heading">
               <span class="wire-entry-label">{{ connectionLabel(connection) }}</span>
-              <template v-if="canSetModulationAmount(connection)">
-                <input :value="modulationEndpoint(connection, 'min') ?? ''" class="wire-amount" type="number" min="-100" max="100" step="any"
-                  placeholder="Min %" title="Offset at source minimum; leave both blank for the original mapping"
-                  :aria-label="`Minimum modulation offset (%) for ${connectionLabel(connection)}`" @change="setModulationEndpoint(connection, 'min', $event)" />
-                <input :value="modulationEndpoint(connection, 'max') ?? ''" class="wire-amount" type="number" min="-100" max="100" step="any"
-                  placeholder="Max %" title="Offset at source maximum; leave both blank for the original mapping"
-                  :aria-label="`Maximum modulation offset (%) for ${connectionLabel(connection)}`" @change="setModulationEndpoint(connection, 'max', $event)" />
-              </template>
+              <ConnectionMapping v-if="canSetModulationAmount(connection)" :layout="layout" :connection="connection"
+                :label="connectionLabel(connection)" @error="message = $event" />
               <button type="button" class="wire-button" :aria-label="`Remove wire: ${connectionLabel(connection)}`"
                 title="Remove wire" @click="removeWire(connection)">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19" /></svg>
@@ -912,6 +891,13 @@ function itemStyle(item: GridItem) {
             <option v-for="parameter in availableTargets" :key="parameter.id" :value="parameter.id">{{ parameter.label }}</option>
           </select>
         </label>
+        <div v-if="wireDraft && canSetModulationAmount(wireDraft)" class="wire-entry">
+          <div class="wire-entry-heading">
+            <span class="wire-entry-label">Mapping</span>
+            <ConnectionMapping :layout="layout" :connection="wireDraft" :label="connectionLabel(wireDraft)"
+              draft @error="message = $event" />
+          </div>
+        </div>
         <p v-if="!availableOutputs.length" class="grid-message">No compatible connection is available between these controls.</p>
         <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
         <div class="settings-actions">

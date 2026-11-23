@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import type { GridItem, GridItemType } from '../grid'
 import NumericSetting from './NumericSetting.vue'
 
@@ -11,9 +11,19 @@ defineProps<{
 }>()
 defineEmits<{ 'change-type': [event: Event] }>()
 const details = ref<HTMLDetailsElement | null>(null)
+const inlineNameInput = ref<HTMLInputElement | null>(null)
+const editingName = ref(false)
 
 function open() {
   if (details.value) details.value.open = true
+}
+
+function editName() {
+  editingName.value = true
+  void nextTick(() => {
+    inlineNameInput.value?.focus()
+    inlineNameInput.value?.select()
+  })
 }
 
 defineExpose({ open })
@@ -22,10 +32,19 @@ defineExpose({ open })
 <template>
   <details ref="details" class="control-panel control-details" @invalid.capture="open">
     <summary>
-      <span class="color-swatch" :class="{ 'no-color': !('color' in draft.settings) }"
-        :style="{ backgroundColor: 'color' in draft.settings ? draft.settings.color : 'transparent' }"
-        :title="'color' in draft.settings ? 'Control color' : 'No configurable color'" aria-hidden="true"></span>
-      <strong class="control-name">{{ draft.label || 'Unnamed control' }}</strong>
+      <label v-if="'color' in draft.settings" class="color-picker">
+        <span class="color-swatch" :style="{ backgroundColor: draft.settings.color }" aria-hidden="true"></span>
+        <input v-model="draft.settings.color" type="color" aria-label="Choose control color" />
+      </label>
+      <span v-else class="color-swatch no-color" title="No configurable color" aria-hidden="true"></span>
+      <input v-if="editingName" ref="inlineNameInput" v-model="draft.label" class="control-name-input"
+        aria-label="Control name" maxlength="40" @click.stop
+        @keydown.enter.prevent.stop="editingName = false"
+        @keydown.esc.prevent.stop="editingName = false"
+        @blur="editingName = false" />
+      <button v-else type="button" class="control-name" @click.stop.prevent="editName">
+        {{ draft.label || 'Unnamed control' }}
+      </button>
       <span class="control-size">{{ draft.width }} × {{ draft.height }}</span>
     </summary>
     <div class="control-details-fields">
@@ -37,10 +56,13 @@ defineExpose({ open })
         </select>
       </label>
       <label>Name <input v-model="draft.label" maxlength="40" required /></label>
-      <label v-if="draft.type === 'pad' || draft.type === 'instrument-pad' || draft.type === 'knob' || draft.type === 'piano-roll'">
-        Color <input v-model="draft.settings.color" type="color" required />
-      </label>
       <h3 class="layout-heading">Layout</h3>
+      <label>Control orientation
+        <select v-model="draft.orientation">
+          <option value="horizontal">Horizontal</option>
+          <option value="vertical">Vertical (rotate clockwise)</option>
+        </select>
+      </label>
       <div class="settings-dimensions">
         <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="columns" @update:model-value="draft.x = $event - 1" />
         <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="rows" @update:model-value="draft.y = $event - 1" />
@@ -56,9 +78,13 @@ summary { display: flex; align-items: center; gap: 10px; min-height: 32px; curso
 summary::-webkit-details-marker { display: none; }
 summary::after { content: '▸'; margin-left: auto; color: var(--muted); }
 details[open] summary::after { content: '▾'; }
-.color-swatch { flex: 0 0 20px; height: 20px; border: 1px solid #777; border-radius: 2px; }
+.color-picker { position: relative; display: block; flex: 0 0 40px; width: 40px; height: 40px; margin: 0; cursor: pointer; }
+.color-picker input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+.color-picker:focus-within .color-swatch { outline: 2px solid var(--accent); outline-offset: 2px; }
+.color-swatch { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid #777; border-radius: 2px; }
 .color-swatch.no-color { background: linear-gradient(135deg, transparent 47%, #777 48%, #777 52%, transparent 53%); }
-.control-name { min-width: 0; overflow-wrap: anywhere; }
+.control-name { min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 700; text-align: left; overflow-wrap: anywhere; cursor: text; }
+.control-name-input { flex: 1 1 8rem; width: 100%; min-width: 0; padding: 2px 4px; border: 1px solid var(--accent); border-radius: 2px; background: #171816; color: #ecece8; font: inherit; font-weight: 700; }
 .control-size { color: var(--muted); white-space: nowrap; }
 .control-details-fields { padding-top: 12px; }
 .control-details-fields > label + label { margin-top: 8px; }

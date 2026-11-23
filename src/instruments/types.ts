@@ -19,6 +19,7 @@ export interface SampleHitParams {
   playback: SamplePlayback
   loopMode: 'once' | 'loop' | 'back-and-forth'
   reverse: boolean
+  polyphony: number
   volume: number
   pitch: number
   envelope: ADSREnvelope
@@ -62,6 +63,7 @@ export interface InstrumentInstance {
   type: InstrumentType
   params: AnyInstrumentParams
   trigger(velocity: number, note?: number): void | Promise<void>
+  setPitchBend?(semitones: number): void
   release(): void
   dispose(): void
 }
