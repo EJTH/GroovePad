@@ -215,7 +215,7 @@ onBeforeUnmount(releaseAll)
 .key-row { display: flex; flex: 1 0 24px; min-height: 24px; }
 .piano.vertical { flex-direction: row; }
 .vertical .key-row { flex-direction: column-reverse; min-width: 24px; }
-.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; border: 1px solid var(--piano-color); border-radius: 2px; background: color-mix(in srgb, var(--piano-color) 35%, #e2e8dd); color: #252820; touch-action: none; }
+.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; border: 1px solid var(--piano-color); border-radius: 2px; background: color-mix(in srgb, var(--piano-color) 35%, #e2e8dd); color: #252820; touch-action: none; -webkit-tap-highlight-color: transparent; }
 .key.active { background: color-mix(in srgb, var(--piano-color) 65%, #e2e8dd); }
 .key span { font-size: 9px; }
 .pads .key.black { background: color-mix(in srgb, var(--piano-color) 35%, #c8cec3); }

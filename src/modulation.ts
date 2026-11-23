@@ -250,6 +250,14 @@ function setInput(item: GridItem, input: ParameterMetadata, value: number) {
 export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<string, number>): GridItem[] {
   const resolved = new Map<string, GridItem>()
   const resolving = new Set<string>()
+  const incoming = new Map<string, Map<string, Connection[]>>()
+  for (const wire of layout.connections) {
+    let parameters = incoming.get(wire.targetId)
+    if (!parameters) { parameters = new Map(); incoming.set(wire.targetId, parameters) }
+    let wires = parameters.get(wire.targetParameter)
+    if (!wires) { wires = []; parameters.set(wire.targetParameter, wires) }
+    wires.push(wire)
+  }
 
   function resolve(id: string): GridItem | undefined {
     const cached = resolved.get(id)
@@ -257,20 +265,25 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
     const original = layout.items.find((item) => item.id === id)
     if (!original || resolving.has(id)) return undefined
     resolving.add(id)
-    const item = copyControl(original, original.id)
+    // Recorded events are not modified during modulation resolution.
+    const item = original.type === 'sequenced-loop'
+      ? { ...original, settings: { ...original.settings } }
+      : copyControl(original, original.id)
     if (item.type === 'knob') {
       const value = signals.get(`${item.id}:value`)
       if (value !== undefined) item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value))
     }
-    for (const input of inputs(item)) {
+    const targetWires = incoming.get(id)
+    for (const input of targetWires ? inputs(item) : []) {
       if (input.kind !== 'number' || input.min === undefined || input.max === undefined) continue
+      const wires = targetWires?.get(input.id)
+      if (!wires) continue
       const base = baseValue(item, input)
       if (base === undefined) continue
       let absolute: number | undefined
       let adjustment = 0
       let driven = false
-      for (const wire of layout.connections) {
-        if (wire.targetId !== id || wire.targetParameter !== input.id) continue
+      for (const wire of wires) {
         const signal = numericSignal(layout, wire, signals, resolve)
         if (!signal) continue
         driven = true

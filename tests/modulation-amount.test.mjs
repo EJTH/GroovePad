@@ -1,6 +1,45 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'vite'
+import { computed, reactive } from 'vue'
+
+test('recorded loop events do not invalidate modulation while clip selection remains reactive', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl, copyControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { effectiveControls } = await server.ssrLoadModule('/src/modulation.ts')
+    const pad = createControl('pad', 0, 0, 'pad')
+    const loop = createControl('loop', 1, 0, 'sequenced-loop')
+    let eventReads = 0
+    loop.settings.automation[0].push({
+      sourceId: 'pad', parameter: 'gate', position: 0,
+      get value() { eventReads++; return 1 },
+    })
+    const layout = reactive({ columns: 2, rows: 1, items: [pad, loop], connections: [
+      { id: 'wire', sourceId: 'pad', sourceParameter: 'velocity', targetId: 'loop', targetParameter: 'clipIndex' },
+    ] })
+    const signals = reactive(new Map([['pad:velocity', 0]]))
+    let resolutions = 0
+    const controls = computed(() => { resolutions++; return effectiveControls(layout, signals) })
+    assert.equal(controls.value[1].settings.clipIndex, 0)
+    assert.equal(eventReads, 0)
+
+    layout.items[1].settings.automation[0].push({ sourceId: 'pad', parameter: 'gate', position: 1, value: 0 })
+    layout.items[1].settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 })
+    assert.equal(controls.value[1].settings.automation[0].length, 2)
+    assert.equal(resolutions, 1)
+
+    signals.set('pad:velocity', 127)
+    assert.equal(controls.value[1].settings.clipIndex, 15)
+    assert.equal(layout.items[1].settings.clipIndex, 0)
+    assert.equal(resolutions, 2)
+    assert.equal(eventReads, 0)
+
+    const copy = copyControl(layout.items[1], 'copy')
+    copy.settings.automation[0].push({ sourceId: 'pad', parameter: 'gate', position: 2, value: 1 })
+    assert.equal(layout.items[1].settings.automation[0].length, 2)
+  } finally { await server.close() }
+})
 
 test('connection amounts scale signed and unipolar signals against the destination range', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })

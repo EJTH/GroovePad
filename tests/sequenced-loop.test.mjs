@@ -109,6 +109,100 @@ test('transport beat position remains continuous across tempo changes', async ()
   } finally { await server.close() }
 })
 
+test('one-bar count-in clicks before armed playback and recording, including clip changes', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    Object.assign(loop.settings, { armed: true, countIn: true, syncMode: 'immediate' })
+    loop.settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 })
+    loop.settings.clips[1] = [{ instrumentId: 'pad', note: 62, velocity: 100, position: 0, duration: 1 }]
+    let beat = 0
+    const clicks = []
+    const played = []
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, (_id, note, on) => played.push([note.note, on]),
+      () => {}, '', (item) => item.settings.clipIndex, (value) => clicks.push(value))
+    engine.toggle(loop)
+    engine.tick()
+    assert.equal(engine.isCounting('loop'), true)
+    beat = 0.5
+    engine.record('pad', 65, 100, undefined, true)
+    engine.recordAutomation('knob', 'value', 80)
+    loop.settings.clipIndex = 1
+    for (beat of [1, 2, 3]) { engine.tick(); engine.tick() }
+    assert.deepEqual(clicks, [0, 1, 2, 3])
+    assert.deepEqual(played, [])
+    assert.equal(loop.settings.automation[1]?.length ?? 0, 0)
+    beat = 4
+    engine.tick()
+    assert.equal(engine.isCounting('loop'), false)
+    assert.deepEqual(played, [[62, true]])
+    engine.record('pad', 65, 100, undefined, false)
+    assert.equal(loop.settings.clips[1].length, 1)
+    engine.record('pad', 67, 100, undefined, true)
+    beat = 4.5
+    engine.record('pad', 67, 100, undefined, false)
+    assert.equal(loop.settings.clips[1][1].position, 0)
+    assert.equal(loop.settings.clips[1][1].duration, 0.5)
+    engine.stop()
+  } finally { await server.close() }
+})
+
+test('count-in respects sync boundaries and cancels on stop or disarm', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    Object.assign(loop.settings, { armed: true, countIn: true, barLength: 2 })
+    let beat = 1.5
+    const clicks = []
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {}, () => {}, '',
+      (item) => item.settings.clipIndex, (value) => clicks.push(value))
+    engine.toggle(loop)
+    for (beat of [2, 3, 4, 5, 6, 7]) engine.tick()
+    assert.deepEqual(clicks, [4, 5, 6, 7])
+    assert.equal(engine.isCounting('loop'), true)
+    beat = 8
+    engine.tick()
+    assert.equal(engine.isCounting('loop'), false)
+    engine.stop()
+    beat = 9
+    engine.toggle(loop)
+    engine.stop()
+    beat = 16
+    engine.tick()
+    assert.deepEqual(clicks, [4, 5, 6, 7])
+    beat = 17
+    engine.toggle(loop)
+    loop.settings.armed = false
+    engine.tick()
+    assert.equal(engine.isCounting('loop'), false)
+  } finally { await server.close() }
+})
+
+test('metronome deduplicates simultaneous requests and skips missed beats', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { Metronome } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const clicks = []
+    const metronome = new Metronome((beat) => clicks.push(beat))
+    metronome.tick(0, true)
+    metronome.click(0)
+    metronome.tick(0.5, true)
+    metronome.click(1)
+    metronome.tick(1.1, true)
+    metronome.tick(2, false)
+    metronome.tick(2.5, true)
+    metronome.tick(5.2, true)
+    assert.deepEqual(clicks, [0, 1, 5])
+    metronome.reset()
+    metronome.tick(0, true)
+    assert.deepEqual(clicks, [0, 1, 5, 0])
+  } finally { await server.close() }
+})
+
 test('automation overdubs only armed clips, plays in time and clears on stop', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -148,6 +242,8 @@ test('legacy loops migrate automation and copied or saved events remain independ
     delete loop.settings.automation
     delete loop.settings.quantize
     delete loop.settings.recordScope
+    delete loop.settings.countIn
+    delete loop.settings.metronome
     const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
       id: 'A', title: 'A', icon: 'A', color: '#ffffff',
       layout: { columns: 1, rows: 1, items: [loop], connections: [] },
@@ -155,6 +251,8 @@ test('legacy loops migrate automation and copied or saved events remain independ
     migrateSavedProject(project)
     assert.equal(loop.settings.quantize, 'off')
     assert.equal(loop.settings.recordScope, 'bank')
+    assert.equal(loop.settings.countIn, false)
+    assert.equal(loop.settings.metronome, false)
     assert.equal(isSavedProject(project), true)
     loop.settings.automation[0] = [{ sourceId: 'knob', parameter: 'value', value: 42, position: 0.25 }]
     const copy = copyControl(loop, 'copy')

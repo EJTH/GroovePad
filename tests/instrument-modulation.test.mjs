@@ -20,6 +20,7 @@ test('all instruments expose sound settings to numeric sources and resolve witho
       ['sample-loop', ['volume', 'pitch', 'envelope.attack', 'envelope.decay', 'envelope.sustain', 'envelope.release', 'playback']],
       ['303', ['transpose', 'resonance', 'volume', 'slideTime', 'filterFrequency', 'filterAmount', 'envelope.attack', 'filterEnvelope.release']],
       ['808', ['drum', 'pitch', 'volume', 'tonality', 'tone', 'envelope.attack', 'envelope.release']],
+      ['909', ['drum', 'pitch', 'volume', 'tonality', 'tone', 'envelope.attack', 'envelope.release']],
     ]
     for (const [type, expected] of cases) {
       const pad = createControl('pad', 3, 0, 'instrument-pad', type)
@@ -43,7 +44,7 @@ test('all instruments expose sound settings to numeric sources and resolve witho
       wire.sourceId = lfo.id
       wire.targetParameter = 'envelope.attack'
       assert.equal(effective().settings.instrumentParams.envelope.attack, 1)
-      if (type === '808') {
+      if (type === '808' || type === '909') {
         wire.targetParameter = 'drum'
         assert.equal(effective().settings.instrumentParams.drum, 'tom')
       }
@@ -69,17 +70,22 @@ test('all instruments expose sound settings to numeric sources and resolve witho
   }
 })
 
-test('new instrument envelopes default to full sustain and half-second release without sharing state', async () => {
+test('new instrument envelopes isolate state and drum-kit defaults stay short', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { InstrumentFactory } = await server.ssrLoadModule('/src/instruments/index.ts')
-    for (const type of ['sample-hit', 'sample-loop', '303', '808']) {
+    for (const type of ['sample-hit', 'sample-loop', '303', '808', '909']) {
       const first = InstrumentFactory.getDefaultParams(type)
       const second = InstrumentFactory.getDefaultParams(type)
-      assert.equal(first.envelope.sustain, 1)
-      assert.equal(first.envelope.release, 0.5)
-      first.envelope.sustain = 0.25
-      assert.equal(second.envelope.sustain, 1)
+      if (type === '808' || type === '909') {
+        assert.deepEqual(first.envelope, { attack: 0.001, decay: 0.25, sustain: 0, release: 0.05 })
+        assert.deepEqual(second.envelope, { attack: 0.001, decay: 0.25, sustain: 0, release: 0.05 })
+      } else {
+        assert.equal(first.envelope.sustain, 1)
+        assert.equal(first.envelope.release, 0.5)
+        first.envelope.sustain = 0.25
+        assert.equal(second.envelope.sustain, 1)
+      }
       if (type === '303') {
         assert.equal(second.filterEnvelope.sustain, 1)
         assert.equal(second.filterEnvelope.release, 0.5)
@@ -92,27 +98,74 @@ test('new instrument envelopes default to full sustain and half-second release w
   }
 })
 
-test('808 initializes its synthesizer with the configured envelope', async () => {
-  const source = await readFile(new URL('../src/instruments/Drum808.ts', import.meta.url), 'utf8')
+test('808 and 909 use bounded, instrument-specific drum voices', async () => {
+  const source = await readFile(new URL('../src/instruments/DrumKit.ts', import.meta.url), 'utf8')
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
-  let synthOptions
+  const voices = []
   class Node {
-    connect() {}
+    constructor(options = {}) {
+      this.envelope = { ...(options.envelope || {}) }
+      this.calls = []
+      this.frequency = { setValueAtTime() {} }
+      this.gain = { rampTo() {} }
+      this.disposed = false
+      voices.push(this)
+    }
+    connect() { return this }
     toDestination() { return this }
-    start() {}
+    triggerAttackRelease(...args) { this.calls.push(args) }
+    dispose() { this.disposed = true }
+  }
+  const nodeType = (kind) => class extends Node {
+    constructor(options) { super(options); this.kind = kind }
   }
   const tone = {
-    Gain: Node, Filter: Node, Oscillator: Node,
-    Synth: class extends Node { constructor(options) { super(); synthOptions = options } },
+    now: () => 1,
+    Gain: nodeType('gain'),
+    Filter: nodeType('filter'),
+    MembraneSynth: nodeType('membrane'),
+    MetalSynth: nodeType('metal'),
+    NoiseSynth: nodeType('noise'),
+    Synth: nodeType('synth'),
   }
   const module = { exports: {} }
   vm.runInNewContext(outputText, { module, exports: module.exports,
-    require: (name) => name === 'tone' ? tone : { defaultEnvelope: () => ({ attack: 0.001, decay: 0.5, sustain: 1, release: 0.5 }) } })
-  const drum = new module.exports.Drum808({})
-  assert.equal(synthOptions.envelope.sustain, 1)
-  assert.equal(synthOptions.envelope.release, 0.5)
-  assert.equal(synthOptions.envelope, drum.params.envelope)
-  const custom = { attack: 0.1, decay: 0.2, sustain: 0.3, release: 0.4 }
-  new module.exports.Drum808({ envelope: custom })
-  assert.equal(synthOptions.envelope, custom)
+    require: (name) => name === 'tone' ? tone : { defaultEnvelope: () => ({ attack: 0.001, decay: 0.25, sustain: 0, release: 0.05 }) } })
+  const drum = new module.exports.DrumKit({}, '808')
+  assert.deepEqual(voices.map((voice) => voice.kind), ['gain', 'membrane'])
+  const initialVoice = drum.voice
+  drum.updateParameter('drum', 'kick')
+  assert.equal(drum.voice, initialVoice)
+  const kick = drum.voice.membrane
+  drum.trigger(127)
+  assert.deepEqual(kick.calls[0], [50, 0.45, 1, 1])
+  const kickNodeCount = voices.length
+  for (let index = 0; index < 1000; index++) drum.trigger(127)
+  assert.equal(voices.length, kickNodeCount)
+  drum.updateParameter('drum', 'snare')
+  assert.equal(kick.disposed, true)
+  drum.trigger(127)
+  assert.deepEqual(drum.voice.body.calls[0], [180, 0.16, 1, 1])
+  assert.deepEqual(drum.voice.noise.synth.calls[0], [0.2, 1, 0.5])
+  drum.updateParameter('drum', 'closed-hat')
+  drum.trigger(127)
+  assert.deepEqual(drum.voice.synth.calls[0], [250, 0.055, 1, 1])
+  const hat = drum.voice.synth
+  const hatNodeCount = voices.length
+  drum.updateParameter('drum', 'open-hat')
+  drum.trigger(127)
+  assert.equal(drum.voice.synth, hat)
+  assert.equal(voices.length, hatNodeCount)
+  assert.deepEqual(hat.calls[1], [250, 0.32, 1, 1])
+  drum.updateParameter('envelope.decay', 0.1)
+  drum.updateParameter('drum', 'kick')
+  drum.trigger(127)
+  assert.deepEqual(drum.voice.membrane.calls[0], [50, 0.2, 1, 1])
+  const drum909 = new module.exports.DrumKit({}, '909')
+  drum909.trigger(127)
+  assert.deepEqual(drum909.voice.click.synth.calls[0], [0.025, 1, 1])
+  drum909.updateParameter('drum', 'snare')
+  drum909.trigger(127)
+  assert.deepEqual(drum909.voice.body.calls[0], [198.00000000000003, 0.16, 1, 1])
+  assert.deepEqual(drum909.voice.noise.synth.calls[0], [0.2, 1, 0.625])
 })

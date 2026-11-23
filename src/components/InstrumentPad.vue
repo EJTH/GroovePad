@@ -2,7 +2,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import type { HeldNote, InstrumentPadSettings, ParameterOutput } from '../grid'
-import { Bass303, Drum808, InstrumentFactory, SampleHit, SampleLoop, type InstrumentInstance } from '../instruments'
+import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type InstrumentInstance } from '../instruments'
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
@@ -67,7 +67,7 @@ function syncParameters() {
     }
     return
   }
-  if (!(instrument instanceof Bass303) && !(instrument instanceof Drum808)) return
+  if (!(instrument instanceof Bass303) && !(instrument instanceof DrumKit)) return
   for (const [key, value] of Object.entries(props.settings.instrumentParams)) {
     const values = typeof value === 'object' && value !== null
       ? Object.entries(value).map(([field, entry]) => [`${key}.${field}`, entry] as const)
@@ -75,7 +75,7 @@ function syncParameters() {
     for (const [name, entry] of values) {
       if (appliedParameters.get(name) === entry) continue
       if (typeof entry === 'number' && Number.isFinite(entry)) instrument.updateParameter(name, entry)
-      else if (instrument instanceof Drum808 && name === 'drum' && typeof entry === 'string') instrument.updateParameter(name, entry)
+      else if (instrument instanceof DrumKit && name === 'drum' && typeof entry === 'string') instrument.updateParameter(name, entry)
       else continue
       appliedParameters.set(name, entry)
     }

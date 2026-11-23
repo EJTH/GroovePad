@@ -1,72 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import * as Tone from 'tone'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import { canResizeGrid, copyControl, createControl, type GridLayout } from './grid'
+import { canResizeGrid, copyControl, type GridLayout } from './grid'
+import { createDefaultProject } from './defaultProject'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
-import { BankEventBus, TransportClock } from './sequencedLoop'
+import { BankEventBus, Metronome, TransportClock } from './sequencedLoop'
+import { keepScreenAwake } from './screenWakeLock'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
-}
-
-function createDefaultProject(): Bank {
-  const layout: GridLayout = { columns: 4, rows: 4, items: [], connections: [] }
-
-  const drums = [
-    { label: 'Kick', drum: 'kick' as const, x: 0, y: 0 },
-    { label: 'Snare', drum: 'snare' as const, x: 1, y: 0 },
-    { label: 'Hi-Hat', drum: 'closed-hat' as const, x: 2, y: 0 },
-    { label: 'Open Hat', drum: 'open-hat' as const, x: 3, y: 0 },
-    { label: 'Tom', drum: 'tom' as const, x: 0, y: 1 },
-    { label: 'Rim', drum: 'rim' as const, x: 1, y: 1 },
-  ]
-
-  for (const drum of drums) {
-    const drumPad = createControl(`drum-${drum.drum}`, drum.x, drum.y, 'instrument-pad', '808')
-    drumPad.label = drum.label
-    if (drumPad.type === 'instrument-pad') {
-      drumPad.settings.instrumentParams.drum = drum.drum
-    }
-    layout.items.push(drumPad)
-  }
-
-  const pianoRoll = createControl('piano-roll-1', 0, 2, 'piano-roll')
-  pianoRoll.width = 4
-  pianoRoll.height = 1
-  pianoRoll.y = 3;
-  if (pianoRoll.type === 'piano-roll') {
-    pianoRoll.settings.octaves = 1
-    pianoRoll.settings.scale = 'chromatic'
-    pianoRoll.settings.orientation = 'horizontal'
-  }
-  layout.items.push(pianoRoll)
-
-  const bass303 = createControl('bass-303', 3, 2, 'instrument-pad', '303')
-  bass303.y = 2;
-  bass303.width = 1
-  bass303.height = 1
-  bass303.label = 'Bass 303'
-  layout.items.push(bass303)
-
-  layout.connections.push({
-    id: 'connection-piano-to-bass',
-    sourceId: 'piano-roll-1',
-    sourceParameter: 'note',
-    targetId: 'bass-303',
-    targetParameter: 'note',
-  })
-
-  return {
-    id: 'A',
-    title: 'Beat',
-    icon: '♫',
-    color: '#ff6b9d',
-    layout,
-  }
 }
 
 const banks = ref<Bank[]>([
@@ -138,10 +85,12 @@ async function toggleFullScreen() {
   }
 }
 
+let stopKeepingScreenAwake: (() => void) | undefined
 onMounted(() => {
   window.addEventListener('pagehide', saveLocalProject)
   document.addEventListener('fullscreenchange', syncFullScreen)
   syncFullScreen()
+  stopKeepingScreenAwake = keepScreenAwake(document, navigator)
 })
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
 const playing = ref(false)
@@ -170,6 +119,25 @@ let longPressTimer: number | undefined
 let longPressPosition: { x: number; y: number } | undefined
 let suppressBankClick = false
 let beatTimer: number | undefined
+let metronomeTimer: number | undefined
+let clickSynth: Tone.Synth | undefined
+let startingTransport = false
+const metronome = new Metronome((beat) => {
+  try {
+    clickSynth ??= new Tone.Synth({
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.001, decay: 0.025, sustain: 0, release: 0.01 },
+      volume: -14,
+    }).toDestination()
+    clickSynth.triggerAttackRelease(beat % 4 === 0 ? 'C6' : 'G5', 0.03)
+  } catch (error) {
+    projectError.value = `Metronome audio failed: ${error instanceof Error ? error.message : String(error)}`
+    console.error(projectError.value, error)
+  }
+})
+const unsubscribeClicks = bankEvents.subscribe((event) => {
+  if (event.kind === 'count-in-click' && playing.value) metronome.click(event.beat)
+})
 
 function addAsset(asset: SampleAsset) {
   if (!assets.value.some((entry) => entry.source === asset.source)) assets.value.push(asset)
@@ -201,10 +169,36 @@ function updateBeatTimer() {
   }
 }
 
-function togglePlayback() {
-  playing.value = !playing.value
-  if (playing.value) transportClock.start(bpm.value)
-  else transportClock.stop()
+function tickMetronome() {
+  const enabled = banks.value.some((bank) => bank.layout.items.some((item) =>
+    item.type === 'sequenced-loop' && item.settings.armed && item.settings.metronome))
+  metronome.tick(transportClock.position(), enabled)
+}
+
+async function togglePlayback() {
+  if (startingTransport) return
+  if (playing.value) {
+    playing.value = false
+    transportClock.stop()
+    if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
+    metronomeTimer = undefined
+  } else {
+    startingTransport = true
+    try {
+      await Tone.start()
+    } catch (error) {
+      projectError.value = `Audio could not be started: ${error instanceof Error ? error.message : String(error)}`
+      console.error(projectError.value, error)
+      return
+    } finally {
+      startingTransport = false
+    }
+    metronome.reset()
+    transportClock.start(bpm.value)
+    playing.value = true
+    tickMetronome()
+    metronomeTimer = window.setInterval(tickMetronome, 20)
+  }
   beat.value = 0
   updateBeatTimer()
 }
@@ -412,8 +406,8 @@ function newProject() {
   if (!window.confirm('Start a new project? The current project will be replaced.')) return
   gridSettingsOpen.value = false
   bankDraft.value = null
-  banks.value = [createDefaultProject()]
-  selectedBankId.value = 'A'
+  banks.value = createDefaultProject()
+  selectedBankId.value = 'B'
   bpm.value = 120
   assets.value = []
   workspaceRevision.value++
@@ -422,10 +416,14 @@ function newProject() {
 }
 
 onUnmounted(() => {
+  stopKeepingScreenAwake?.()
   window.removeEventListener('pagehide', saveLocalProject)
   document.removeEventListener('fullscreenchange', syncFullScreen)
   saveLocalProject()
   if (beatTimer !== undefined) window.clearInterval(beatTimer)
+  if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
+  unsubscribeClicks()
+  clickSynth?.dispose()
   cancelBankPress()
 })
 </script>

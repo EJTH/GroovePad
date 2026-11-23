@@ -15,6 +15,7 @@ const instrumentTypes: { type: InstrumentType; label: string; icon: string }[] =
   { type: 'sample-loop', label: 'Sample Loop', icon: 'M4 10a8 8 0 0 1 14-3l2 2 M20 4v5h-5 M20 14a8 8 0 0 1-14 3l-2-2 M4 20v-5h5' },
   { type: '303', label: '303 Bass Synth', icon: 'M3 6h18v12H3z M9 6v12 M15 6v12 M6 6v7 M12 6v7 M18 6v7' },
   { type: '808', label: '808 Drum Kit', icon: 'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z' },
+  { type: '909', label: '909 Drum Kit', icon: 'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z' },
 ]
 
 function changeInstrumentType(type: InstrumentType) {

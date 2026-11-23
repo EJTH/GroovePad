@@ -7,8 +7,8 @@ defineProps<{ draft: Extract<GridItem, { type: 'instrument-pad' }> }>()
 </script>
 
 <template>
-  <div v-if="draft.settings.instrumentType === '808'" class="settings-section">
-    <h3>808 Drum Kit Parameters</h3>
+  <div v-if="draft.settings.instrumentType === '808' || draft.settings.instrumentType === '909'" class="settings-section">
+    <h3>{{ draft.settings.instrumentType }} Drum Kit Parameters</h3>
     <label>Drum Type
       <select v-model="draft.settings.instrumentParams.drum" required>
         <option value="kick">Kick</option>

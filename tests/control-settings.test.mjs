@@ -176,11 +176,15 @@ test('instrument choices render icon buttons and mark the active type', async ()
     const html = await renderToString(createSSRApp({ render: () => h(Panel, { draft }) }))
     const choices = html.match(/<div class="instrument-types"[\s\S]*?<\/div>/)?.[0]
     assert.ok(choices)
-    assert.equal((choices.match(/<button/g) ?? []).length, 4)
-    assert.equal((choices.match(/<svg/g) ?? []).length, 4)
+    assert.equal((choices.match(/<button/g) ?? []).length, 5)
+    assert.equal((choices.match(/<svg/g) ?? []).length, 5)
     assert.equal((choices.match(/aria-pressed="true"/g) ?? []).length, 1)
     assert.match(choices, /aria-pressed="true"[^>]*>[\s\S]*?303 Bass Synth/)
+    assert.match(choices, /909 Drum Kit/)
     assert.doesNotMatch(choices, /<select/)
+    const drumDraft = createControl('drum', 0, 0, 'instrument-pad', '909')
+    const drumHtml = await renderToString(createSSRApp({ render: () => h(Panel, { draft: drumDraft }) }))
+    assert.match(drumHtml, /909 Drum Kit Parameters/)
   } finally {
     await server.close()
   }

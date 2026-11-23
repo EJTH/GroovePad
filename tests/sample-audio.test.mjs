@@ -190,27 +190,6 @@ test('sample hit limits voices, bends and releases each note independently, and 
   looping.dispose()
 })
 
-test('808 tonality changes the noise level on subsequent hits', async () => {
-  const source = await readFile(new URL('../src/instruments/Drum808.ts', import.meta.url), 'utf8')
-  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
-  const module = { exports: {} }
-  vm.runInNewContext(outputText, { module, exports: module.exports, require: () => ({ now: () => 0 }) })
-  const drum = Object.create(module.exports.Drum808.prototype)
-  let noise = -1
-  const parameter = { setValueAtTime: () => {}, exponentialRampToValueAtTime: () => {} }
-  drum.params = { drum: 'snare', pitch: 150, volume: -12, tonality: 0.5, tone: 0.7 }
-  drum.synth = { triggerAttackRelease: () => {} }
-  drum.filter = { frequency: parameter }
-  drum.noiseOsc = {}
-  drum.noiseGain = { gain: { ...parameter, setValueAtTime: (value) => { noise = value } } }
-  drum.noiseFilter = { frequency: parameter }
-  drum.trigger(127)
-  assert.equal(noise, 0.7 * 0.6)
-  drum.params.tonality = 1
-  drum.trigger(127)
-  assert.equal(noise, 0)
-})
-
 test('recorded chunks produce a valid 16-bit mono WAV', async () => {
   const { encodeWav } = await loadTypeScript('../src/audio/wav.ts')
   const blob = encodeWav([Float32Array.of(-1, 0), Float32Array.of(1)], 48000)

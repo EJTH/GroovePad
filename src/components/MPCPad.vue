@@ -103,6 +103,7 @@ onBeforeUnmount(() => {
   font-weight: 700;
   text-overflow: ellipsis;
   touch-action: none;
+  -webkit-tap-highlight-color: transparent;
   cursor: pointer;
 }
 

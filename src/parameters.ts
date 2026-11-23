@@ -46,7 +46,7 @@ function instrumentInputs(item: Extract<GridItem, { type: 'instrument-pad' }>): 
     ...envelope,
     ...envelopeInputs('filterEnvelope', 'Filter envelope'),
   ]
-  if (instrumentType === '808') return [
+  if (instrumentType === '808' || instrumentType === '909') return [
     select('drum', 'Drum type', ['kick', 'snare', 'closed-hat', 'open-hat', 'rim', 'tom']),
     { id: 'pitch', label: 'Pitch', kind: 'number', min: 50, max: 300 },
     volume,

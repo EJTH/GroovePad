@@ -1,4 +1,5 @@
-export type InstrumentType = 'sample-hit' | 'sample-loop' | '303' | '808'
+export type InstrumentType = 'sample-hit' | 'sample-loop' | '303' | '808' | '909'
+export type DrumKitType = '808' | '909'
 export type DrumType = 'kick' | 'snare' | 'closed-hat' | 'open-hat' | 'rim' | 'tom'
 
 export interface ADSREnvelope {
@@ -48,7 +49,7 @@ export interface Bass303Params {
   slideTime: number
 }
 
-export interface Drum808Params {
+export interface DrumKitParams {
   drum: DrumType
   pitch: number
   volume: number
@@ -57,7 +58,10 @@ export interface Drum808Params {
   tone: number
 }
 
-export type AnyInstrumentParams = SampleHitParams | SampleLoopParams | Bass303Params | Drum808Params
+export type Drum808Params = DrumKitParams
+export type Drum909Params = DrumKitParams
+
+export type AnyInstrumentParams = SampleHitParams | SampleLoopParams | Bass303Params | Drum808Params | Drum909Params
 
 export interface InstrumentInstance {
   type: InstrumentType

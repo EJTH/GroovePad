@@ -41,6 +41,8 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
     <SequenceEditor v-if="validIndex" :key="draft.settings.clipIndex" v-model="notes" v-model:automation="automation" v-model:quantize="draft.settings.quantize"
       :bar-length="draft.settings.barLength" :instruments="instruments" :sources="sources" :bank-id="bankId" />
     <label class="inline-checkbox"><input v-model="draft.settings.armed" type="checkbox"> Armed for record</label>
+    <label class="inline-checkbox"><input v-model="draft.settings.countIn" type="checkbox"> One-bar count-in before recording</label>
+    <label class="inline-checkbox"><input v-model="draft.settings.metronome" type="checkbox"> Metronome while armed</label>
     <label>Record from <select v-model="draft.settings.recordScope">
       <option value="bank">Current bank</option><option value="all">All banks</option>
     </select></label>

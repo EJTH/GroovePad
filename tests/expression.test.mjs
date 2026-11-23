@@ -70,6 +70,8 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
     let underPointer = first
     const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#ffffff' } }, dependencies)
     pad.api.press(pointer(1, first, 'mouse', 0.5, 0, 25))
+    assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
+      [['velocity', 32], ['pressure', 32], ['gate', 1]])
     pad.api.move(pointer(1, first, 'mouse', 0.5, 0, 75))
     pad.api.release(pointer(1, first, 'mouse', 0, 0, 75))
     assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
@@ -519,7 +521,7 @@ test('wired chords through a selector trigger and release independent hit voices
       setVoicePitchBend(id, bend) { calls.push(['bend', id, bend]) }
       dispose() {}
     }
-    const instruments = { SampleHit, SampleLoop: class {}, Bass303: class {}, Drum808: class {},
+    const instruments = { SampleHit, SampleLoop: class {}, Bass303: class {}, Drum808: class {}, DrumKit: class {},
       InstrumentFactory: { create: (_, params) => new SampleHit(params) } }
     dependencies['../instruments'] = instruments
     const { createControl } = dependencies['../grid']
@@ -566,7 +568,7 @@ test('toggle mode mutes incoming notes without changing trigger mode behavior', 
       setVoicePitchBend() {}
       dispose() {}
     }
-    const instruments = { SampleHit, SampleLoop: class {}, Bass303: class {}, Drum808: class {},
+    const instruments = { SampleHit, SampleLoop: class {}, Bass303: class {}, Drum808: class {}, DrumKit: class {},
       InstrumentFactory: { create: (_, params) => new SampleHit(params) } }
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const hit = createControl('hit', 0, 0, 'instrument-pad')
@@ -786,6 +788,74 @@ test('loop tap arms when stopped and controls playback when transport is running
   } finally { await server.close() }
 })
 
+test('loop swipes select clips without triggering taps, including while armed and playing', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const loop = dependencies['../grid'].createControl('loop', 0, 0, 'sequenced-loop')
+    const layout = vue.reactive({ columns: 1, rows: 1, items: [loop], connections: [] })
+    let beat = 0
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+      transportClock: { position: () => beat } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    const target = new Element(0)
+    const gesture = grid.api.loopGesture('loop')
+    const event = (id, x, y) => pointer(id, target, 'touch', 0.5, x, y)
+    function swipe(id, fromY, toY) {
+      gesture.down(event(id, 50, fromY))
+      gesture.move(event(id, 50, toY))
+      gesture.up(event(id, 50, toY))
+    }
+    try {
+      gesture.down(event(1, 50, 50))
+      gesture.up(event(1, 50, 50))
+      assert.equal(loop.settings.armed, true)
+      swipe(2, 70, 30)
+      assert.equal(loop.settings.clipIndex, 1)
+      assert.ok(Array.isArray(loop.settings.clips[1]))
+      assert.ok(Array.isArray(loop.settings.automation[1]))
+      assert.equal(loop.settings.armed, true)
+      swipe(3, 30, 70)
+      swipe(4, 30, 70)
+      assert.equal(loop.settings.clipIndex, 0)
+      gesture.down(event(5, 50, 50))
+      gesture.move(event(5, 80, 50))
+      gesture.up(event(5, 50, 50))
+      assert.equal(loop.settings.armed, true)
+      gesture.down(event(6, 50, 70))
+      gesture.cancel(event(6, 50, 30))
+      gesture.up(event(6, 50, 30))
+      assert.equal(loop.settings.clipIndex, 0)
+      gesture.down(pointer(9, target, 'mouse', 0.5, 50, 70))
+      gesture.up(pointer(9, target, 'mouse', 0, 50, 30))
+      assert.equal(loop.settings.clipIndex, 1)
+      swipe(10, 30, 70)
+      assert.equal(loop.settings.clipIndex, 0)
+      let prevented = false
+      grid.api.loopKeyDown({ key: 'ArrowUp', preventDefault() { prevented = true } }, 'loop')
+      assert.equal(prevented, true)
+      assert.equal(loop.settings.clipIndex, 1)
+      props.playing = true
+      beat = 1
+      swipe(7, 70, 30)
+      assert.equal(loop.settings.clipIndex, 2)
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.loopEngine.isPending('loop'), true)
+      beat = 4
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.loopEngine.isPending('loop'), false)
+      loop.settings.clipIndex = 15
+      swipe(8, 70, 30)
+      assert.equal(loop.settings.clipIndex, 15)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
 test('a wired clip index selects and creates clips without overwriting the saved base index', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -811,6 +881,10 @@ test('a wired clip index selects and creates clips without overwriting the saved
       assert.equal(grid.api.displayItems.value[1].settings.clipIndex, 15)
       assert.ok(Array.isArray(layout.items[1].settings.clips[15]))
       assert.equal(layout.items[1].settings.clipIndex, 0)
+      grid.api.changeLoopIndex('loop', 1)
+      assert.equal(layout.items[1].settings.clipIndex, 1)
+      assert.ok(Array.isArray(layout.items[1].settings.clips[1]))
+      assert.equal(grid.api.displayItems.value[1].settings.clipIndex, 15)
       beat = 0.25
       grid.api.loopEngine.tick()
       grid.api.captureNote('pad', 60, true, 100)
@@ -850,6 +924,42 @@ test('disabled automation recording skips knob and wheel gestures but leaves con
       layout.items[1].settings.recordAutomation = true
       grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 66, delta: 1, user: true })
       grid.api.handleOutput(layout.items[1], { parameter: 'value', value: 0.5, user: true })
+      assert.equal(loop.settings.automation[0].length, 2)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('unconnected touch pressure does not create loop automation', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const knob = createControl('knob', 1, 0, 'knob')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [piano, knob, loop], connections: [] })
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => 0 } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true })
+      assert.equal(grid.api.signals.has('piano:pressure'), false)
+      assert.equal(loop.settings.automation[0].length, 0)
+
+      layout.connections.push({
+        id: 'pressure-wire', sourceId: 'piano', sourceParameter: 'pressure',
+        targetId: 'knob', targetParameter: 'value',
+      })
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true })
+      assert.equal(grid.api.signals.get('piano:pressure'), 75)
+      assert.equal(loop.settings.automation[0].length, 1)
+
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 0, active: false, user: true })
+      assert.equal(grid.api.signals.has('piano:pressure'), false)
       assert.equal(loop.settings.automation[0].length, 2)
     } finally { grid.dispose() }
   } finally { await server.close() }

@@ -64,6 +64,7 @@ function validInstrument(settings: Record<string, unknown>): boolean {
         within(params.slideTime, 0, 0.5) && within(params.filterFrequency, 50, 5000) &&
         within(params.filterAmount, 0, 1) && validEnvelope(params.filterEnvelope)
     case '808':
+    case '909':
       return oneOf(params.drum, ['kick', 'snare', 'closed-hat', 'open-hat', 'rim', 'tom']) &&
         within(params.pitch, 50, 300) && within(params.tonality, 0, 1) && within(params.tone, 0, 1)
     default: return false
@@ -101,7 +102,7 @@ function isItem(value: unknown): value is GridItem {
     case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER) &&
       (s.baseIndex === undefined || integer(s.baseIndex, 0, Number.MAX_SAFE_INTEGER))
     case 'sequenced-loop': return color(s.color) && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
-      typeof s.armed === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
+      typeof s.armed === 'boolean' && typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
       oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
       Array.isArray(s.clips[String(s.clipIndex)]) &&
       object(s.automation) && Object.entries(s.automation).every(([index, events]) =>
@@ -173,6 +174,10 @@ export function migrateSavedProject(value: unknown): void {
         object(item.settings) && item.settings.recordAutomation === undefined) item.settings.recordAutomation = true
       if (object(item) && item.type === 'sequenced-loop' && object(item.settings) && item.settings.automation === undefined) {
         item.settings.automation = {}
+      }
+      if (object(item) && item.type === 'sequenced-loop' && object(item.settings)) {
+        if (item.settings.countIn === undefined) item.settings.countIn = false
+        if (item.settings.metronome === undefined) item.settings.metronome = false
       }
       if (object(item) && item.type === 'sequenced-loop' && object(item.settings) && item.settings.quantize === undefined) {
         item.settings.quantize = 'off'
