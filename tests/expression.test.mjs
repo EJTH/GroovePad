@@ -1306,7 +1306,8 @@ test('global metronome follows playback and can be toggled without an armed loop
       const loop = gridModule.createControl('loop', 0, 0, 'sequenced-loop')
       loop.settings.armed = true
       loop.settings.metronome = true
-      app.api.banks.value[0].layout.items.push(loop)
+      app.api.banks.value.push({ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+        layout: { columns: 1, rows: 1, items: [loop], connections: [] } })
       await app.api.togglePlayback()
       assert.deepEqual(clicks, [])
       loop.settings.armed = false
@@ -1373,7 +1374,8 @@ test('transport count-in precedes playback while input start bypasses it', async
       loop.settings.armed = true
       loop.settings.countIn = true
       loop.settings.metronome = false
-      app.api.banks.value[0].layout.items.push(loop)
+      app.api.banks.value.push({ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+        layout: { columns: 1, rows: 1, items: [loop], connections: [] } })
       assert.equal(await app.api.startFromInput('B'), false)
       assert.equal(await app.api.startFromInput('A'), true)
       assert.equal(app.api.playing.value, true)
