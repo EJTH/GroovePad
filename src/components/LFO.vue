@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { LfoSettings, ParameterOutput } from '../grid'
 import { lfoLevel, lfoWaveValue } from '../lfo'
 import { pointerTap } from '../pointerTap'
 import LFOWaveform from './LFOWaveform.vue'
 
-const props = defineProps<{ label: string; settings: LfoSettings; bpm: number }>()
-const emit = defineEmits<{ output: [output: ParameterOutput] }>()
+const props = defineProps<{ label: string; settings: LfoSettings; bpm: number; automationHold?: boolean }>()
+const emit = defineEmits<{ output: [output: ParameterOutput]; 'hold-change': [held: boolean] }>()
 const value = ref(0)
 const phase = ref(0)
 const randomValue = ref(0)
-const held = ref(false)
+const manualHold = ref(false)
+const held = computed(() => props.automationHold ?? manualHold.value)
 let frame = 0
 let previous = 0
 
@@ -30,7 +31,8 @@ function tick(time: number) {
 }
 
 function toggleHold() {
-  held.value = !held.value
+  manualHold.value = !held.value
+  emit('hold-change', manualHold.value)
 }
 const tap = pointerTap(toggleHold)
 

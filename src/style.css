@@ -864,6 +864,7 @@ button:focus-visible {
 .loop-preview-grid { fill: none; stroke: color-mix(in srgb, var(--loop-color) 20%, transparent); stroke-width: .6; }
 .loop-preview-curve { fill: none; stroke: var(--loop-color); stroke-width: 1.5; opacity: .8; }
 .loop-preview-note { fill: var(--loop-color); }
+.loop-preview-playhead { stroke: #fff; stroke-width: .8; vector-effect: non-scaling-stroke; }
 .loop-control strong, .loop-control .loop-status { max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .loop-actions { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .loop-action { box-sizing: border-box; width: 100%; min-width: 0; height: 36px; padding: 2px; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--loop-color) 55%, #555); border-radius: 4px; background: #20221f; color: #e2edd9; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; appearance: none; }

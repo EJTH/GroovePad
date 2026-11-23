@@ -64,10 +64,10 @@ const clock = props.transportClock ?? new TransportClock()
 const bankId = props.bankId ?? ''
 const bankEvents = props.bankEvents ?? new BankEventBus()
 const {
-  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayState, playbackAutomation, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
+  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, loopPlayState, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
   changeLoopIndex,
-  recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, loopPreviewCurves, armLoop,
-  setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride,
+  recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, previewColor, loopPreviewCurves, armLoop,
+  setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride, displayedAutomation,
 } = useGridPlayback({
   layout: () => props.layout,
   banks: () => props.banks,
@@ -415,7 +415,22 @@ function receivedNotes(id: string): HeldNote[] {
 
 function toggleArpeggiator(id: string) {
   const item = props.layout.items.find((entry) => entry.id === id)
-  if (item?.type === 'arpeggiator') item.settings.enabled = !item.settings.enabled
+  if (item?.type !== 'arpeggiator') return
+  const automated = effectiveSignals.value.get(`${id}:enabled`)
+  item.settings.enabled = !(automated === undefined ? item.settings.enabled : automated >= 0.5)
+  recordToggle(id, 'enabled', item.settings.enabled)
+}
+
+function recordToggle(id: string, parameter: 'enabled' | 'hold', value: boolean) {
+  if (props.playing && !props.editing) {
+    bankEvents.emit({ kind: 'live-automation', bankId, sourceId: id, parameter, value: Number(value) })
+    markManualOverride(id, parameter)
+  }
+}
+
+function lfoAutomationHold(id: string) {
+  const value = effectiveSignals.value.get(`${id}:hold`)
+  return value === undefined ? undefined : value >= 0.5
 }
 function connectWire() {
   const source = sourceItem.value
@@ -576,8 +591,8 @@ function removeItem() {
           <div v-show="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
             <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event, true)" />
             <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
-            <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" @output="handleOutput(item, $event)" />
-            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="!liveControls.has(item.id) ? playbackAutomation.get(`${item.id}:value`)?.value : undefined" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
+            <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :automation-hold="lfoAutomationHold(item.id)" @output="handleOutput(item, $event)" @hold-change="recordToggle(item.id, 'hold', $event)" />
+            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event, true)" />
             <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
@@ -597,10 +612,12 @@ function removeItem() {
               <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ loopStatus.get(item.id)?.counting ? 'Count-in' : loopStatus.get(item.id)?.pending ? 'Waiting' : loopStatus.get(item.id)?.enabled ? 'On' : loopWantsPlayback(item) ? 'Ready' : 'Off' }}</span>
               <svg class="loop-preview" viewBox="0 0 100 48" preserveAspectRatio="none" aria-hidden="true">
                 <path class="loop-preview-grid" d="M25 0v48 M50 0v48 M75 0v48 M0 12h100 M0 24h100 M0 36h100" />
-                <path v-for="curve in loopPreviewCurves(item)" :key="curve.key" class="loop-preview-curve" :d="curve.path" />
+                <path v-for="curve in loopPreviewCurves(item)" :key="curve.key" class="loop-preview-curve" :d="curve.path" :style="{ stroke: curve.color }" />
                 <circle v-for="(note, index) in selectedLoopNotes(item)" :key="index" class="loop-preview-note"
                   :cx="previewX(note.position, Math.max(1, item.settings.barLength * 4))"
-                  :cy="previewY(note.note, 36, 96)" r="1.5" />
+                  :cy="previewY(note.note, 36, 96)" r="1.5" :style="{ fill: previewColor(note.instrumentId, note.bankId) }" />
+                <line v-if="loopPlayheads.has(item.id)" class="loop-preview-playhead"
+                  :x1="loopPlayheads.get(item.id)" :x2="loopPlayheads.get(item.id)" y1="0" y2="48" />
               </svg>
               <div class="loop-actions">
                 <button type="button" class="loop-action loop-arm" :class="{ armed: item.settings.armed }"

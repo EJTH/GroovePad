@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'vite'
-import { createSSRApp, h } from 'vue'
+import { createSSRApp, h, reactive } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
 test('loop tiles preview the selected clip and expose separate arm and play controls', async () => {
@@ -32,6 +32,31 @@ test('loop tiles preview the selected clip and expose separate arm and play cont
     const secondClip = await render()
     assert.match(secondClip, /class="loop-preview-note"[^>]*cx="75"/)
     assert.match(secondClip, /class="loop-preview-curve"[^>]*d="M73\.5,24 Q75,22 76\.5,24"/)
+  } finally { await server.close() }
+})
+
+test('loop preview colors events by their source control and bank', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    const knob = createControl('knob', 1, 0, 'knob')
+    knob.settings.color = '#123456'
+    const remote = createControl('pad', 0, 0, 'piano-roll')
+    remote.settings.color = '#abcdef'
+    loop.settings.clips[0].push({ bankId: 'B', instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 })
+    loop.settings.automation[0].push({ sourceId: 'knob', parameter: 'value', value: 10, position: 0 })
+    const layout = { columns: 2, rows: 1, items: [loop, knob], connections: [] }
+    const banks = [
+      { id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout },
+      { id: 'B', title: 'B', icon: 'B', color: '#ffffff', layout: { columns: 1, rows: 1, items: [remote], connections: [] } },
+    ]
+    const html = await renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+      layout, banks, bankId: 'A', editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+    }) }))
+    assert.match(html, /class="loop-preview-curve"[^>]*style="stroke:#123456;"/)
+    assert.match(html, /class="loop-preview-note"[^>]*style="fill:#abcdef;"/)
   } finally { await server.close() }
 })
 
@@ -363,6 +388,66 @@ test('motion final values stay in their clip and clearing a clip does not restor
     engine.endAutomation('knob', 'value')
     assert.deepEqual(loop.settings.automation[1], [])
     engine.stop()
+  } finally { await server.close() }
+})
+
+test('motion punch-in replaces only the touched lane and interval across loop boundaries', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = reactive(createControl('loop', 0, 0, 'sequenced-loop'))
+    Object.assign(loop.settings, { armed: true, recordScope: 'all', syncMode: 'immediate' })
+    loop.settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 0.2, duration: 1 })
+    loop.settings.automation[0] = [
+      ...[0.2, 1, 2, 3.8].map((position) => ({ sourceId: 'knob', parameter: 'value', value: -1, position })),
+      { bankId: 'B', sourceId: 'knob', parameter: 'value', value: -2, position: 0.2 },
+      { sourceId: 'other', parameter: 'value', value: -3, position: 0.2 },
+    ]
+    let beat = 0
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {}, () => {}, 'A')
+    engine.toggle(loop)
+    beat = 3.5
+    engine.recordAutomation('knob', 'value', 10, undefined, 'A', true)
+    beat = 4.5
+    engine.recordAutomation('knob', 'value', 20, undefined, 'A', true)
+    beat = 5.2
+    engine.endAutomation('knob', 'value', 'A')
+    const events = loop.settings.automation[0]
+    assert.deepEqual(events.filter((event) => event.value < 0).map((event) => [event.sourceId, event.bankId, event.position]),
+      [['knob', undefined, 2], ['knob', 'B', 0.2], ['other', undefined, 0.2]])
+    assert.deepEqual(events.filter((event) => event.value > 0).map((event) => event.value), [10, 20])
+    assert.equal(loop.settings.clips[0].length, 1)
+
+    beat = 5.5
+    engine.recordAutomation('knob', 'value', 30, undefined, 'A', true)
+    beat = 10
+    engine.tick()
+    engine.recordAutomation('knob', 'value', 40, undefined, 'A', true)
+    engine.endAutomation('knob', 'value', 'A')
+    assert.deepEqual(events.filter((event) => event.sourceId === 'knob' && !event.bankId).map((event) => event.value), [30, 40])
+    assert.equal(events.filter((event) => event.bankId === 'B').length, 1)
+  } finally { await server.close() }
+})
+
+test('loop playhead follows the active clip origin and hides before start or for another clip', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    let beat = 1
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {})
+    engine.toggle(loop)
+    assert.equal(engine.playhead('loop', 0), undefined)
+    beat = 5
+    engine.tick()
+    assert.equal(engine.playhead('loop', 0), 0.25)
+    assert.equal(engine.playhead('loop', 1), undefined)
+    beat = 8.5
+    assert.equal(engine.playhead('loop', 0), 0.125)
+    engine.stop()
+    assert.equal(engine.playhead('loop', 0), undefined)
   } finally { await server.close() }
 })
 

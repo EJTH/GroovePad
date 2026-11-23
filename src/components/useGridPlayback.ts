@@ -28,6 +28,7 @@ export function useGridPlayback(options: {
   const manualOverrides = reactive(new Map<string, number>())
   let automationSequence = 0
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
+  const loopPlayheads = ref(new Map<string, number>())
   const loopPlayState = reactive(new Map<string, boolean>())
   const loopEngine = new SequencedLoopEngine(
     () => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop'),
@@ -48,9 +49,14 @@ export function useGridPlayback(options: {
 
   function updateLoopStatus() {
     const next = new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>()
+    const playheads = new Map<string, number>()
     for (const item of options.layout().items) if (item.type === 'sequenced-loop') {
       next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id), counting: loopEngine.isCounting(item.id) })
+      const displayed = displayItems.value.find((entry) => entry.id === item.id)
+      const position = loopEngine.playhead(item.id, displayed?.type === 'sequenced-loop' ? displayed.settings.clipIndex : item.settings.clipIndex)
+      if (position !== undefined) playheads.set(item.id, position * 100)
     }
+    loopPlayheads.value = playheads
     if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
       status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending ||
       status.counting !== loopStatus.value.get(id)?.counting)) loopStatus.value = next
@@ -171,6 +177,14 @@ export function useGridPlayback(options: {
     return max === min ? 24 : 44 - (value - min) / (max - min) * 36
   }
 
+  function previewColor(sourceId: string, bankId?: string) {
+    const layout = bankId && bankId !== options.bankId
+      ? options.banks()?.find((bank) => bank.id === bankId)?.layout
+      : options.layout()
+    const source = layout?.items.find((item) => item.id === sourceId)
+    return source && 'color' in source.settings ? source.settings.color : 'var(--accent)'
+  }
+
   function loopPreviewCurves(item: SequencedLoop) {
     const groups = new Map<string, LoopAutomation[]>()
     for (const event of item.settings.automation[String(item.settings.clipIndex)] ?? []) {
@@ -198,7 +212,7 @@ export function useGridPlayback(options: {
           path += ` Q${(previous.x + point.x) / 2},${previous.y} ${point.x},${point.y}`
         }
       }
-      return { key, path }
+      return { key, path, color: previewColor(events[0]!.sourceId, events[0]!.bankId) }
     })
   }
 
@@ -264,6 +278,8 @@ export function useGridPlayback(options: {
       }
     } else if (event.kind === 'live-automation') {
       if (options.playing()) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, event.active, event.bankId, event.motion)
+    } else if (event.kind === 'live-automation-start') {
+      if (options.playing()) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, undefined, event.bankId, true, true)
     } else if (event.kind === 'live-automation-end') {
       loopEngine.endAutomation(event.sourceId, event.parameter, event.bankId)
     } else if (event.kind === 'loop-note' && event.bankId === options.bankId) {
@@ -314,13 +330,25 @@ export function useGridPlayback(options: {
         item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value.value))
       }
       liveControls.add(id)
+      if (item?.type === 'knob' && item.settings.recordAutomation && options.playing() && !options.editing()) {
+        options.bankEvents.emit({ kind: 'live-automation-start', bankId: options.bankId, sourceId: id, parameter: 'value', value: item.settings.value })
+      }
     } else {
       liveControls.delete(id)
       const item = options.layout().items.find((entry) => entry.id === id)
       if (item && (item.type === 'knob' || item.type === 'mod-wheel')) {
         options.bankEvents.emit({ kind: 'live-automation-end', bankId: options.bankId, sourceId: id, parameter: 'value' })
       }
-      if (item) for (const output of outputs(item)) manualOverrides.delete(`${id}:${output.id}`)
+      const layouts = options.banks()?.map((bank) => ({ bankId: bank.id, layout: bank.layout })) ??
+        [{ bankId: options.bankId, layout: options.layout() }]
+      const recording = layouts.some(({ bankId, layout }) => layout.items.some((entry) => entry.type === 'sequenced-loop' &&
+        entry.settings.armed && (bankId === options.bankId || entry.settings.recordScope === 'all')))
+      if (item && (item.type === 'knob' || item.type === 'mod-wheel')) {
+        for (const output of outputs(item)) {
+          if (recording && item.settings.recordAutomation) markManualOverride(id, output.id)
+          else manualOverrides.delete(`${id}:${output.id}`)
+        }
+      }
     }
   }
 
@@ -328,7 +356,23 @@ export function useGridPlayback(options: {
     manualOverrides.set(`${itemId}:${parameter}`, automationSequence)
   }
 
-  const displayItems = computed(() => effectiveControls(options.layout(), effectiveSignals.value))
+  function displayedAutomation(id: string, parameter: string) {
+    const key = `${id}:${parameter}`
+    const event = playbackAutomation.value.get(key)
+    return event && event.active !== false && !liveControls.has(id) &&
+      (manualOverrides.get(key) ?? -1) < event.sequence ? event.value : undefined
+  }
+
+  const displayItems = computed(() => {
+    const layout = options.layout()
+    const items = layout.items.map((item) => {
+      const enabled = item.type === 'arpeggiator' ? effectiveSignals.value.get(`${item.id}:enabled`) : undefined
+      return item.type === 'arpeggiator' && enabled !== undefined
+        ? { ...item, settings: { ...item.settings, enabled: enabled >= 0.5 } }
+        : item
+    })
+    return effectiveControls({ ...layout, items }, effectiveSignals.value)
+  })
   watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
     ({ id: item.id, index: item.settings.clipIndex })), (selections) => {
     for (const selection of selections) {
@@ -373,6 +417,7 @@ export function useGridPlayback(options: {
     loopAutomation,
     liveControls,
     loopStatus,
+    loopPlayheads,
     loopPlayState,
     playbackAutomation,
     effectiveSignals,
@@ -388,6 +433,7 @@ export function useGridPlayback(options: {
     loopWantsPlayback,
     previewX,
     previewY,
+    previewColor,
     loopPreviewCurves,
     setLoopArmed,
     armLoop,
@@ -397,5 +443,6 @@ export function useGridPlayback(options: {
     captureNote,
     controlActivity,
     markManualOverride,
+    displayedAutomation,
   }
 }

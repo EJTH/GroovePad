@@ -3,6 +3,7 @@ import type { GridItem, LoopAutomation, LoopNote, LoopQuantize } from './grid'
 export type BankEvent =
   | { kind: 'live-note'; bankId: string; instrumentId: string; note: number; velocity: number; bend?: number; on: boolean }
   | { kind: 'live-automation'; bankId: string; sourceId: string; parameter: string; value: number; active?: boolean; motion?: boolean }
+  | { kind: 'live-automation-start'; bankId: string; sourceId: string; parameter: string; value: number }
   | { kind: 'live-automation-end'; bankId: string; sourceId: string; parameter: string }
   | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean }
   | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation }
@@ -75,7 +76,7 @@ type Loop = Extract<GridItem, { type: 'sequenced-loop' }>
 type Voice = { id: number; note: LoopNote; end: number }
 type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; countInUntil?: number; lastCountBeat?: number; voices: Voice[] }
 type Recording = { index: number; start: number; origin: number; quantize: LoopQuantize; note: Omit<LoopNote, 'position' | 'duration'> }
-type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; index: number; event: LoopAutomation; pending?: LoopAutomation }
+type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; event: LoopAutomation; pending?: LoopAutomation; last: number; recorded: Map<LoopAutomation, number> }
 
 export class SequencedLoopEngine {
   private states = new Map<string, State>()
@@ -103,6 +104,14 @@ export class SequencedLoopEngine {
   isEnabled(id: string) { return this.states.get(id)?.enabled ?? false }
   isPending(id: string) { return !!this.states.get(id)?.pending }
   isCounting(id: string) { return this.states.get(id)?.countInUntil !== undefined }
+  playhead(id: string, index: number) {
+    const state = this.states.get(id)
+    const loop = this.loops().find((item) => item.id === id)
+    const now = this.position()
+    if (!state || !loop || state.index !== index || state.countInUntil !== undefined || now < state.origin) return undefined
+    const length = loop.settings.barLength * 4
+    return ((now - state.origin) % length + length) % length / length
+  }
 
   private startTime(loop: Loop, now: number) {
     const length = loop.settings.barLength * 4
@@ -135,6 +144,19 @@ export class SequencedLoopEngine {
   tick() {
     const now = this.position()
     const loops = this.loops()
+    for (const [key, motion] of this.motions) {
+      const state = this.states.get(motion.loop.id)
+      const boundary = state?.pending && state.pending.index !== motion.clip && now >= state.pending.at
+        ? state.pending.at : undefined
+      if (!motion.loop.settings.armed || motion.loop.settings.automation[String(motion.clip)] !== motion.events ||
+        (state && state.index !== motion.clip) || boundary !== undefined) {
+        if (boundary !== undefined && motion.loop.settings.automation[String(motion.clip)] === motion.events) {
+          this.overwriteMotion(motion, boundary)
+        }
+        this.flushMotion(motion)
+        this.motions.delete(key)
+      } else this.overwriteMotion(motion, now)
+    }
     for (const [id, state] of this.states) {
       const loop = loops.find((item) => item.id === id)
       if (!loop) { this.release(state); this.states.delete(id); continue }
@@ -215,7 +237,7 @@ export class SequencedLoopEngine {
     state.last = now
   }
 
-  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId, motion = false) {
+  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId, motion = false, onlyExisting = false) {
     this.tick()
     const now = this.position()
     for (const loop of this.loops()) {
@@ -227,33 +249,82 @@ export class SequencedLoopEngine {
       const length = loop.settings.barLength * 4
       const position = ((now - origin) % length + length) % length
       const events = loop.settings.automation[String(index)] ??= []
+      if (onlyExisting && !events.some((event) => event.sourceId === sourceId && event.parameter === parameter &&
+        (event.bankId ?? this.bankId) === bankId)) continue
       const event: LoopAutomation = { sourceId, parameter, value, position, ...(bankId !== this.bankId ? { bankId } : {}), ...(active === undefined ? {} : { active }) }
       const key = JSON.stringify([loop.id, bankId, sourceId, parameter])
       const previous = this.motions.get(key)
       const bucket = Math.floor((now - origin) / 0.125)
       if (motion && active !== false && previous && previous.bucket === bucket && previous.origin === origin &&
-        previous.events === events && events[previous.index] === previous.event) {
+        previous.events === events && events.includes(previous.event)) {
         previous.pending = event
       } else {
-        if (previous && (active === false || previous.events !== events || previous.origin !== origin)) this.flushMotion(previous)
-        const eventIndex = events.length
+        if (previous && (active === false || previous.events !== events || previous.origin !== origin)) {
+          this.flushMotion(previous)
+          this.motions.delete(key)
+        }
         events.push(event)
-        if (motion && active !== false) this.motions.set(key, { bucket, origin, loop, clip: index, events, index: eventIndex, event: events[eventIndex]! })
+        const inserted = events[events.length - 1]!
+        if (motion && active !== false) {
+          const current = this.motions.get(key)
+          if (current) {
+            current.bucket = bucket
+            current.event = inserted
+            current.pending = undefined
+            current.recorded.set(inserted, now)
+          } else {
+            const recording: MotionRecording = { bucket, origin, loop, clip: index, events, event: inserted, last: now, recorded: new Map([[inserted, now]]) }
+            this.motions.set(key, recording)
+            this.overwriteMotion(recording, now, true)
+          }
+        }
         else this.motions.delete(key)
       }
     }
   }
 
+  private overwriteMotion(motion: MotionRecording, now: number, includeStart = false) {
+    const length = motion.loop.settings.barLength * 4
+    const from = motion.last
+    if (now < from) { motion.last = now; return }
+    for (let i = motion.events.length - 1; i >= 0; i--) {
+      const event = motion.events[i]!
+      if (event.sourceId !== motion.event.sourceId || event.parameter !== motion.event.parameter ||
+        (event.bankId ?? this.bankId) !== (motion.event.bankId ?? this.bankId)) continue
+      const recordedAt = motion.recorded.get(event)
+      const cycle = Math.ceil((from - motion.origin - event.position) / length)
+      let at = motion.origin + cycle * length + event.position
+      if (!includeStart && at <= from) at += length
+      if (at <= now && (recordedAt === undefined || recordedAt < at - 1e-8)) {
+        if (recordedAt !== undefined && event === motion.event) {
+          if (motion.pending) {
+            event.value = motion.pending.value
+            event.active = motion.pending.active
+            motion.pending = undefined
+          }
+          motion.recorded.set(event, at + Math.floor((now - at) / length) * length)
+        } else {
+          motion.events.splice(i, 1)
+          motion.recorded.delete(event)
+        }
+      }
+    }
+    motion.last = now
+  }
+
   private flushMotion(motion: MotionRecording) {
     const pending = motion.pending
     if (pending && motion.loop.settings.automation[String(motion.clip)] === motion.events &&
-      motion.events[motion.index] === motion.event &&
+      motion.events.includes(motion.event) &&
       (pending.value !== motion.event.value || pending.active !== motion.event.active)) {
       motion.events.push(pending)
+      motion.recorded.set(motion.events[motion.events.length - 1]!, motion.last)
     }
+    motion.pending = undefined
   }
 
   endAutomation(sourceId: string, parameter: string, bankId = this.bankId) {
+    this.tick()
     for (const loop of this.loops()) {
       const key = JSON.stringify([loop.id, bankId, sourceId, parameter])
       const motion = this.motions.get(key)
@@ -303,7 +374,10 @@ export class SequencedLoopEngine {
       if (loop) for (const recording of pending) this.finish(loop, recording, now)
     }
     this.recordings.clear()
-    for (const motion of this.motions.values()) this.flushMotion(motion)
+    for (const motion of this.motions.values()) {
+      if (motion.loop.settings.automation[String(motion.clip)] === motion.events) this.overwriteMotion(motion, now)
+      this.flushMotion(motion)
+    }
     this.motions.clear()
     for (const state of this.states.values()) this.release(state)
   }

@@ -752,6 +752,120 @@ test('copying an armed sequencer leaves the copy disarmed', async () => {
   } finally { await server.close() }
 })
 
+test('arpeggiator toggles and LFO holds record and replay as control state', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'lfo']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const { createControl } = dependencies['../grid']
+    const arp = createControl('arp', 0, 0, 'arpeggiator')
+    const lfo = createControl('lfo', 1, 0, 'lfo')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [arp, lfo, loop], connections: [] })
+    let beat = 0
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    const oscillatorProps = vue.reactive({ label: 'LFO', settings: lfo.settings, bpm: 120,
+      get automationHold() { return grid.api.lfoAutomationHold('lfo') } })
+    const oscillator = await setupComponent('LFO', oscillatorProps, dependencies,
+      { requestAnimationFrame: () => 1, cancelAnimationFrame() {} }, (event, value) => {
+        if (event === 'hold-change') grid.api.recordToggle('lfo', 'hold', value)
+      })
+    try {
+      oscillator.api.tick(1000)
+      oscillator.api.tick(1100)
+      beat = 0.5
+      grid.api.toggleArpeggiator('arp')
+      beat = 0.75
+      oscillator.api.toggleHold()
+      const phase = oscillator.api.phase.value
+      oscillator.api.tick(1200)
+      assert.equal(oscillator.api.phase.value, phase)
+      beat = 1.25
+      grid.api.toggleArpeggiator('arp')
+      beat = 1.5
+      oscillator.api.toggleHold()
+      assert.deepEqual(loop.settings.automation[0].map(({ sourceId, parameter, value, position }) =>
+        [sourceId, parameter, value, position]), [
+        ['arp', 'enabled', 0, 0.5], ['lfo', 'hold', 1, 0.75],
+        ['arp', 'enabled', 1, 1.25], ['lfo', 'hold', 0, 1.5],
+      ])
+      const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
+      assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
+      loop.settings.armed = false
+      beat = 4.5
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.displayItems.value[0].settings.enabled, false)
+      assert.equal(arp.settings.enabled, true)
+      beat = 4.75
+      grid.api.loopEngine.tick()
+      assert.equal(oscillator.api.held.value, true)
+      oscillator.api.tick(1300)
+      assert.equal(oscillator.api.phase.value, phase)
+      oscillator.api.toggleHold()
+      assert.equal(oscillator.api.held.value, false)
+      grid.api.toggleArpeggiator('arp')
+      assert.equal(grid.api.displayItems.value[0].settings.enabled, true)
+      beat = 5.25
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.displayItems.value[0].settings.enabled, true)
+      beat = 5.5
+      grid.api.loopEngine.tick()
+      assert.equal(oscillator.api.held.value, false)
+      beat = 8.5
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.displayItems.value[0].settings.enabled, false)
+      beat = 8.75
+      grid.api.loopEngine.tick()
+      assert.equal(oscillator.api.held.value, true)
+      assert.equal(loop.settings.automation[0].length, 4)
+      grid.api.loopEngine.stop()
+      assert.equal(grid.api.lfoAutomationHold('lfo'), undefined)
+    } finally { oscillator.dispose(); grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('recorded arpeggiator state remains subordinate to its on/off wire', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const pad = createControl('pad', 0, 0, 'pad')
+    const arp = createControl('arp', 1, 0, 'arpeggiator')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    loop.settings.automation[0].push({ sourceId: 'arp', parameter: 'enabled', value: 0, position: 0.5 })
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [pad, arp, loop], connections: [
+      { id: 'wire', sourceId: 'pad', sourceParameter: 'gate', targetId: 'arp', targetParameter: 'enabled', mappingMode: 'abs' },
+    ] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      loop.settings.armed = false
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 1 })
+      beat = 0.5
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.displayItems.value[1].settings.enabled, true)
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 0, active: false })
+      assert.equal(grid.api.displayItems.value[1].settings.enabled, false)
+      assert.equal(arp.settings.enabled, true)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
 test('recorded knob automation yields to a live drag and resumes afterward', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -958,8 +1072,12 @@ test('all-bank loops record and replay in the correct bank even when control IDs
     const firstKnob = createControl('control-1', 1, 0, 'knob')
     const secondKnob = createControl('control-1', 0, 0, 'knob')
     const pad = createControl('pad', 1, 0, 'instrument-pad', '808')
-    const layoutA = vue.reactive({ columns: 2, rows: 1, items: [loop, firstKnob], connections: [] })
-    const layoutB = vue.reactive({ columns: 2, rows: 1, items: [secondKnob, pad], connections: [] })
+    const firstArp = createControl('arp', 2, 0, 'arpeggiator')
+    const secondArp = createControl('arp', 2, 0, 'arpeggiator')
+    firstArp.settings.enabled = false
+    const lfo = createControl('lfo', 3, 0, 'lfo')
+    const layoutA = vue.reactive({ columns: 3, rows: 1, items: [loop, firstKnob, firstArp], connections: [] })
+    const layoutB = vue.reactive({ columns: 4, rows: 1, items: [secondKnob, pad, secondArp, lfo], connections: [] })
     const bus = new BankEventBus()
     let beat = 0
     const clock = { position: () => beat }
@@ -974,6 +1092,8 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       beat = 0.2
       gridB.api.captureNote('pad', 60, false, 100)
       assert.equal(loop.settings.clips[0].length, 0)
+      gridB.api.toggleArpeggiator('arp')
+      assert.equal(loop.settings.automation[0].length, 0)
       layoutA.items[0].settings.recordScope = 'all'
       beat = 0.5
       gridB.api.captureNote('pad', 60, true, 100)
@@ -984,6 +1104,12 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       gridB.api.controlActivity('control-1', false)
       assert.equal(loop.settings.clips[0][0].bankId, 'B')
       assert.equal(loop.settings.automation[0][0].bankId, 'B')
+      beat = 0.9
+      gridB.api.toggleArpeggiator('arp')
+      gridB.api.recordToggle('lfo', 'hold', true)
+      assert.deepEqual(loop.settings.automation[0].slice(1).map((event) => [event.bankId, event.parameter, event.value]),
+        [['B', 'enabled', 1], ['B', 'hold', 1]])
+      secondArp.settings.enabled = false
       beat = 4.5
       gridA.api.loopEngine.tick()
       assert.equal(gridA.api.recordedNotes('pad').length, 0)
@@ -994,6 +1120,12 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       assert.equal(gridB.api.recordedNotes('pad').length, 0)
       assert.equal(gridB.api.displayItems.value[0].settings.value, 65)
       assert.equal(gridA.api.displayItems.value[1].settings.value, 64)
+      beat = 4.9
+      gridA.api.loopEngine.tick()
+      assert.equal(gridB.api.displayItems.value[2].settings.enabled, true)
+      assert.equal(gridA.api.displayItems.value[2].settings.enabled, false)
+      assert.equal(gridA.api.lfoAutomationHold('lfo'), undefined)
+      assert.equal(gridB.api.lfoAutomationHold('lfo'), true)
       gridA.api.loopEngine.stop()
       assert.equal(gridB.api.loopAutomation.size, 0)
     } finally { gridA.dispose(); gridB.dispose() }
