@@ -1225,6 +1225,72 @@ test('edit mode preserves loop notes, automation, and transport timing', async (
   } finally { await server.close() }
 })
 
+test('global metronome follows playback and can be toggled without an armed loop', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const loopModule = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    let position = 0
+    class Clock {
+      start() { position = 0 }
+      stop() {}
+      setTempo() {}
+      position() { return position }
+    }
+    const clicks = []
+    class Synth {
+      toDestination() { return this }
+      triggerAttackRelease(note) { clicks.push(note) }
+      dispose() {}
+    }
+    const intervals = new Map()
+    let timerId = 0
+    const window = {
+      setInterval: (fn, delay) => { intervals.set(++timerId, { fn, delay }); return timerId },
+      clearInterval: (id) => intervals.delete(id),
+      clearTimeout: () => {},
+      setTimeout: () => 1,
+      removeEventListener: () => {},
+    }
+    const app = await setupComponent('App', {}, {
+      './grid': gridModule,
+      './sequencedLoop': { ...loopModule, TransportClock: Clock },
+      tone: { start: async () => {}, Synth },
+      './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
+    try {
+      const loop = gridModule.createControl('loop', 0, 0, 'sequenced-loop')
+      loop.settings.armed = true
+      loop.settings.metronome = true
+      app.api.banks.value[0].layout.items.push(loop)
+      await app.api.togglePlayback()
+      assert.deepEqual(clicks, [])
+      loop.settings.armed = false
+      app.api.metronomeEnabled.value = true
+      const tick = () => [...intervals.values()].filter((timer) => timer.delay === 20).forEach((timer) => timer.fn())
+      position = 1
+      tick()
+      assert.deepEqual(clicks, ['G5'])
+      app.api.selectedBankId.value = 'B'
+      position = 2
+      tick()
+      assert.deepEqual(clicks, ['G5', 'G5'])
+      app.api.metronomeEnabled.value = false
+      position = 3
+      tick()
+      assert.deepEqual(clicks, ['G5', 'G5'])
+      app.api.metronomeEnabled.value = true
+      position = 4
+      tick()
+      assert.deepEqual(clicks, ['G5', 'G5', 'C6'])
+      await app.api.togglePlayback()
+      assert.equal(intervals.size, 0)
+      await app.api.togglePlayback()
+      assert.deepEqual(clicks, ['G5', 'G5', 'C6', 'C6'])
+    } finally { app.dispose() }
+  } finally { await server.close() }
+})
+
 test('transport count-in precedes playback while input start bypasses it', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {

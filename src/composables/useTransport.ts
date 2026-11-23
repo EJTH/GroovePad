@@ -13,6 +13,7 @@ export function useTransport(options: {
   const playing = ref(false)
   const countingIn = ref(false)
   const triggeredByInput = ref(false)
+  const metronomeEnabled = ref(false)
   const transportClock = new TransportClock()
   const beat = ref(0)
   let beatTimer: number | undefined
@@ -52,9 +53,7 @@ export function useTransport(options: {
   }
 
   function tickMetronome() {
-    const enabled = options.banks.value.some((bank) => bank.layout.items.some((item) =>
-      item.type === 'sequenced-loop' && item.settings.armed && item.settings.metronome))
-    metronome.tick(transportClock.position(), enabled)
+    metronome.tick(transportClock.position(), metronomeEnabled.value)
   }
 
   function beginPlayback(fromInput: boolean) {
@@ -142,5 +141,5 @@ export function useTransport(options: {
     clickSynth?.dispose()
   })
 
-  return { playing, countingIn, triggeredByInput, transportClock, beat, togglePlayback, startFromInput }
+  return { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput }
 }

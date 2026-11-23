@@ -19,10 +19,7 @@ function createLayout(): GridLayout {
 }
 
 const banks = ref<Bank[]>([
-  { id: 'A', title: 'Drums', icon: '▦', color: '#b8d986', layout: createLayout() },
-  { id: 'B', title: 'Bass', icon: '≋', color: '#83c9bb', layout: createLayout() },
-  { id: 'C', title: 'Keys', icon: '▥', color: '#b5a4df', layout: createLayout() },
-  { id: 'D', title: 'Textures', icon: '✳', color: '#dfa88a', layout: createLayout() },
+  
 ])
 
 const selectedBankId = ref('A')
@@ -122,7 +119,7 @@ const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
 const assetsOpen = ref(false)
 const projectError = ref('')
-const { playing, countingIn, triggeredByInput, transportClock, beat, togglePlayback, startFromInput } = useTransport({
+const { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput } = useTransport({
   banks,
   bpm,
   editing,
@@ -414,12 +411,21 @@ onUnmounted(() => {
           <div class="display-bank" :title="selectedBank.title">{{ selectedBank.title }}</div>
         </div>
 
-        <div class="beats" aria-label="Beat indicator">
-          <span
-            v-for="index in 4"
-            :key="index"
-            :class="{ active: (playing || countingIn) && beat === index - 1 }"
-          ></span>
+        <div class="beat-controls">
+          <button class="metronome-toggle" type="button" aria-label="Metronome"
+            :aria-pressed="metronomeEnabled" title="Toggle metronome" @click="metronomeEnabled = !metronomeEnabled">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 3h6l5 18H4L9 3zM12 12l5-7M8 17h8" />
+              <circle cx="12" cy="12" r="1" />
+            </svg>
+          </button>
+          <div class="beats" aria-label="Beat indicator">
+            <span
+              v-for="index in 4"
+              :key="index"
+              :class="{ active: (playing || countingIn) && beat === index - 1 }"
+            ></span>
+          </div>
         </div>
       </section>
       <div class="header-actions">

@@ -265,6 +265,46 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+.beat-controls {
+  flex: 0 0 38px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.metronome-toggle {
+  width: 38px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: #ecece8;
+  cursor: pointer;
+}
+
+.metronome-toggle:hover {
+  border-color: #85877a;
+}
+
+.metronome-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.metronome-toggle svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .beats {
   display: flex;
   gap: 2px;
