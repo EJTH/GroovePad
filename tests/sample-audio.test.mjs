@@ -332,6 +332,38 @@ test('project archives preserve unused assets and reject invalid asset lists', a
   }
 })
 
+test('projects with samples exceeding 20 MB can be saved and loaded', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  const originalFetch = globalThis.fetch
+  try {
+    const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const bytes = Buffer.alloc(20 * 1024 * 1024 + 1)
+    const source = `data:audio/wav;base64,${bytes.toString('base64')}`
+    const project = {
+      version: 1, bpm: 120, selectedBankId: 'A', assets: [{ name: 'large.wav', source }],
+      banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+        layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+    }
+    globalThis.fetch = async () => new Response(new Blob([bytes], { type: 'audio/wav' }))
+    const archive = await saveProjectToFile(project)
+    assert.deepEqual((await loadProjectFromFile(archive)).assets, project.assets)
+
+    const writer = new ZipWriter(new BlobWriter())
+    await writer.add('manifest.json', new TextReader(JSON.stringify({
+      version: 1, bpm: 120, selectedBankId: 'A', bankFiles: ['banks/bank-1.json'],
+      assets: [{ name: 'large.wav', path: 'samples/large.wav', type: 'audio/wav' }],
+    })))
+    await writer.add('banks/bank-1.json', new TextReader(JSON.stringify(project.banks[0])))
+    await writer.add('samples/large.wav', new BlobReader(new Blob([bytes])), { level: 0 })
+    const largeArchive = await writer.close()
+    assert.ok(largeArchive.size > 20 * 1024 * 1024)
+    assert.deepEqual((await loadProjectFromFile(largeArchive)).assets, project.assets)
+  } finally {
+    globalThis.fetch = originalFetch
+    await server.close()
+  }
+})
+
 test('older ZIP projects with embedded pad samples still load', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {

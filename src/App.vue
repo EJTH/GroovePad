@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
@@ -8,6 +8,7 @@ import { canResizeGrid, copyControl, type GridLayout } from './grid'
 import { loadDefaultProject } from './defaultProject'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
+import { loadStoredProject, saveStoredProject } from './projectStorage'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
 import { BankEventBus } from './sequencedLoop'
 import { keepScreenAwake } from './screenWakeLock'
@@ -29,44 +30,61 @@ const bpm = ref(120)
 const assets = ref<SampleAsset[]>([])
 const storageKey = 'groovepad.project.v1'
 const storageError = ref('')
-let storageBlocked = false
+const storageBlocked = ref(false)
+const storageReady = ref(false)
 let saveTimer: number | undefined
+let saveQueue = Promise.resolve()
 
-try {
-  const saved = localStorage.getItem(storageKey)
-  if (saved !== null) {
-    const data: unknown = JSON.parse(saved)
-    migrateSavedProject(data)
-    if (!isSavedProject(data)) throw new Error('Saved project is invalid or unsupported.')
-    banks.value = data.banks
-    selectedBankId.value = data.selectedBankId
-    bpm.value = data.bpm
-    assets.value = data.assets ?? []
-    for (const asset of samplesInBanks(data.banks)) addAsset(asset)
+async function initializeStorage() {
+  try {
+    let data = await loadStoredProject()
+    if (!data) {
+      const saved = localStorage.getItem(storageKey)
+      if (saved !== null) {
+        const legacy: unknown = JSON.parse(saved)
+        migrateSavedProject(legacy)
+        if (!isSavedProject(legacy)) throw new Error('Saved project is invalid or unsupported.')
+        await saveStoredProject(legacy)
+        localStorage.removeItem(storageKey)
+        data = legacy
+      }
+    }
+    if (data) {
+      banks.value = data.banks
+      selectedBankId.value = data.selectedBankId
+      bpm.value = data.bpm
+      assets.value = data.assets ?? []
+      for (const asset of samplesInBanks(data.banks)) addAsset(asset)
+    }
+  } catch (error) {
+    storageBlocked.value = true
+    storageError.value = `Local project could not be loaded: ${error instanceof Error ? error.message : String(error)}. Saved data has not been overwritten.`
+  } finally {
+    await nextTick()
+    storageReady.value = true
   }
-} catch (error) {
-  storageBlocked = true
-  storageError.value = `Local project could not be loaded: ${error instanceof Error ? error.message : String(error)}. Saved data has not been overwritten.`
 }
 
 function saveLocalProject() {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = undefined
-  if (storageBlocked) return
-  try {
-    localStorage.setItem(storageKey, JSON.stringify({ version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }))
+  if (!storageReady.value || storageBlocked.value) return
+  const project = { version: 1 as const, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }
+  saveQueue = saveQueue.then(async () => {
+    await saveStoredProject(project)
     storageError.value = ''
-  } catch (error) {
+  }).catch((error: unknown) => {
     storageError.value = `Local project could not be saved: ${error instanceof Error ? error.message : String(error)}.`
-  }
+  })
 }
 
 function replaceInvalidProject() {
-  storageBlocked = false
+  storageBlocked.value = false
   saveLocalProject()
 }
 
 watch([banks, selectedBankId, bpm, assets], () => {
+  if (!storageReady.value || storageBlocked.value) return
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = window.setTimeout(saveLocalProject, 300)
 }, { deep: true })
@@ -88,6 +106,7 @@ async function toggleFullScreen() {
 
 let stopKeepingScreenAwake: (() => void) | undefined
 onMounted(() => {
+  void initializeStorage()
   window.addEventListener('pagehide', saveLocalProject)
   document.addEventListener('fullscreenchange', syncFullScreen)
   syncFullScreen()
@@ -264,7 +283,7 @@ async function loadProject(event: Event) {
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
-    storageBlocked = false
+    storageBlocked.value = false
     saveLocalProject()
   } catch (error) {
     projectError.value = `Project could not be loaded: ${error instanceof Error ? error.message : String(error)}`
@@ -349,7 +368,7 @@ async function newProject() {
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
-    storageBlocked = false
+    storageBlocked.value = false
     saveLocalProject()
   } catch (error) {
     projectError.value = `Default project could not be loaded: ${error instanceof Error ? error.message : String(error)}`
@@ -368,7 +387,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="app">
+  <p v-if="!storageReady" role="status">Loading project...</p>
+  <main v-else class="app">
     <header class="header">
       <section class="transport" aria-label="Transport">
         <button class="transport-button record" type="button" disabled aria-label="Record (not yet available)">

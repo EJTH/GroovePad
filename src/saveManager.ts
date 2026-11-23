@@ -2,9 +2,6 @@ import { BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter } 
 import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 import { samplesInBanks, type SampleAsset } from './sampleAssets'
 
-const maxArchiveSize = 20 * 1024 * 1024
-const maxJsonSize = maxArchiveSize
-
 export async function saveProjectToFile(project: SavedProject): Promise<Blob> {
   if (!isSavedProject(project)) throw new Error('Project is invalid.')
   const assets = [...(project.assets ?? [])]
@@ -49,30 +46,19 @@ export async function saveProjectToFile(project: SavedProject): Promise<Blob> {
     })),
   }, null, 2)
   const bankJson = banks.map((bank) => JSON.stringify(bank, null, 2))
-  const encoder = new TextEncoder()
-  if ([manifest, ...bankJson].reduce((total, json) => total + encoder.encode(json).length, 0) +
-    files.reduce((total, file) => total + file.blob.size, 0) > maxArchiveSize) {
-    throw new Error('Project is too large to save.')
-  }
   const writer = new ZipWriter(new BlobWriter('application/zip'))
   await writer.add('manifest.json', new TextReader(manifest))
   for (const [index, bank] of bankJson.entries()) await writer.add(bankFiles[index]!, new TextReader(bank))
   await writer.add('samples/', undefined, { directory: true })
   for (const file of files) await writer.add(file.path, new BlobReader(file.blob))
   await writer.add('loop_midi/', undefined, { directory: true })
-  const blob = await writer.close()
-  if (blob.size > maxArchiveSize) throw new Error('Project archive is too large to save.')
-  return blob
+  return writer.close()
 }
 
 export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
-  if (blob.size > maxArchiveSize) throw new Error('Project archive is too large.')
   const reader = new ZipReader(new BlobReader(blob))
   try {
     const entries = await reader.getEntries()
-    if (entries.reduce((total, entry) => total + entry.uncompressedSize, 0) > maxArchiveSize) {
-      throw new Error('Uncompressed project archive is too large.')
-    }
     const names = entries.map((entry) => entry.filename)
     if (new Set(names).size !== names.length) throw new Error('Project contains duplicate archive entries.')
     if (entries.some((entry) => !entry.directory && entry.filename.startsWith('loop_midi/'))) {
@@ -81,7 +67,6 @@ export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
     async function readJson(path: string): Promise<unknown> {
       const entry = entries.find((item) => item.filename === path)
       if (!entry || entry.directory) throw new Error(`Missing project file: ${path}`)
-      if (entry.uncompressedSize > maxJsonSize) throw new Error(`Project file is too large: ${path}`)
       return JSON.parse(await entry.getData(new TextWriter(), { checkSignature: true })) as unknown
     }
     const manifest = await readJson('manifest.json')

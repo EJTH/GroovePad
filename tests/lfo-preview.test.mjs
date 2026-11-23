@@ -53,7 +53,11 @@ test('LFO preview animation follows draft rate and tempo and can be held', async
     const props = vue.reactive({ label: 'Preview', bpm: 120,
       settings: { waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } })
     const output = []
-    const api = module.exports.default.setup(props, { expose() {}, emit: (_, value) => output.push(value) })
+    const holds = []
+    const api = module.exports.default.setup(props, { expose() {}, emit: (event, value) => {
+      if (event === 'output') output.push(value)
+      if (event === 'hold-change') holds.push(value)
+    } })
     mounted()
     frame(100)
     frame(200)
@@ -62,10 +66,13 @@ test('LFO preview animation follows draft rate and tempo and can be held', async
     api.toggleHold()
     frame(300)
     assert.equal(output.length, 1)
+    assert.deepEqual(holds, [true])
     api.toggleHold()
     props.settings.rateMode = 'sync'
     frame(400)
     assert.ok(Math.abs(api.phase.value - 0.3) < 1e-10)
+    assert.equal(output.length, 2)
+    assert.deepEqual(holds, [true, false])
     unmounted()
     assert.equal(cancelled, 42)
   } finally {

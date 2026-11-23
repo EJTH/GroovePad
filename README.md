@@ -10,6 +10,12 @@ Pads and piano keys react on pointer-down and disable browser touch gestures on 
 
 Run `npm run dev` to start the development server. Run `npm run build` to type-check and create a production build.
 
+## Install and offline use
+
+The production build can be installed from a supported browser. On iPhone and iPad, use the browser's Share menu and choose **Add to Home Screen**. Other browsers may offer an Install option; availability varies by browser. Visit the app online first and allow it to finish loading before using it offline. Updates are applied when the old app is no longer open and the new version is loaded.
+
+Projects and sample audio are saved in the browser's IndexedDB. Browser storage is device- and origin-specific and can be cleared or limited by the browser; use **Save project** to keep a separate backup. Existing locally saved projects are transferred to IndexedDB on first launch. The development server is not an offline PWA; test installation with a production build served over HTTPS or localhost.
+
 ## GitHub Pages
 
 Set the repository's **Settings > Pages > Build and deployment > Source** to **GitHub Actions**. The build workflow tests and builds the site on every push and pull request, and deploys `dist` to Pages after successful pushes to `main`. It can also be run manually on `main`. The Pages build uses relative asset paths so it works under a repository subpath.
@@ -64,7 +70,7 @@ Recording continuous motion replaces that control's existing automation over the
 
 Use the menu to add a bank, edit its title, icon, color and grid dimensions, or remove it after confirmation. A long press on a bank also opens its settings. **Add bank from file** accepts a project ZIP and lets you choose a bank, or accepts an individual bank JSON file. Project settings changes the tempo. The browser automatically saves the current project locally.
 
-Sample Hit and Sample Loop pads accept local audio files up to 2 MB, or record from a microphone with **Record** and **Stop**. Recording requires microphone permission and a secure browser context (HTTPS or localhost). Recordings are numbered mono 16-bit WAV files and have no fixed time limit, but large recordings may exceed browser storage or the project export limit. **Reset** removes the sample and its markers.
+Sample Hit and Sample Loop pads accept local audio files up to 2 MB, or record from a microphone with **Record** and **Stop**. Recording requires microphone permission and a secure browser context (HTTPS or localhost). Recordings are numbered mono 16-bit WAV files and have no fixed time limit, but large recordings may exceed browser storage or available memory. **Reset** removes the sample and its markers.
 
 Samples imported or recorded are kept in the project asset library, even after resetting or removing a pad. In Sample Hit settings, use the archive button to load a project sample. The menu's **Manage assets** opens the same library without selection and lets you swap a sample for a local audio file in every pad using it. Deleting a sample requires pressing Delete twice and unsets it from all pads using it; swapping or deleting resets their waveform markers. Existing projects' embedded pad samples are added to the library when loaded.
 
@@ -76,7 +82,7 @@ Hold **Play** in an instrument's settings header to preview the current settings
 
 New instruments default to 100% sustain and a 0.5-second release, including the 303 filter envelope. Existing saved settings are unchanged.
 
-Use **Save project** to download a ZIP and **Load project** to choose one. Loading validates the complete project before replacing the current one. The version 1 archive contains `manifest.json`, one JSON configuration per bank under `banks/`, audio files under `samples/`, and an empty `loop_midi/` directory. Sample names are made unique in the archive when necessary. Older projects with embedded samples remain supported. The project limit is 20 MB uncompressed. Archives containing separate MIDI files are not supported. Legacy sample URLs are cleared when loading; choose a local file instead. A bank whose loops target other banks must be loaded as part of its complete project, rather than imported alone.
+Use **Save project** to download a ZIP and **Load project** to choose one. Loading validates the complete project before replacing the current one. The version 1 archive contains `manifest.json`, one JSON configuration per bank under `banks/`, audio files under `samples/`, and an empty `loop_midi/` directory. Sample names are made unique in the archive when necessary. Older projects with embedded samples remain supported. Project size is limited by available browser storage and memory, rather than a fixed archive size. Archives containing separate MIDI files are not supported. Legacy sample URLs are cleared when loading; choose a local file instead. A bank whose loops target other banks must be loaded as part of its complete project, rather than imported alone.
 
 Pads and piano rolls expose velocity (0–127, set at note-on) and pressure (0–127, updated while held) as wireable outputs. Both support the same mapping modes as other numeric sources. Pressure-sensing pointers use pressure; other pointers use position from top to bottom, or left to right on a vertical piano roll. Keyboard presses use 100. The piano roll outputs the average pressure of all held contacts, rounded to the nearest integer. Once all contacts are released, pressure stops driving connected controls. Arpeggiators expose the velocity of each outgoing note, including in bypass mode. The header's separate recording button is not implemented yet.
 
