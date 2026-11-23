@@ -4,6 +4,54 @@ import { createServer } from 'vite'
 import { createSSRApp, h } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
+test('loop tiles preview the selected clip and expose separate arm and play controls', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.clips['0'] = [{ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 0.5 }]
+    loop.settings.automation['0'] = [
+      { sourceId: 'knob', parameter: 'value', value: 20, position: 0 },
+      { sourceId: 'knob', parameter: 'value', value: 80, position: 2 },
+    ]
+    const layout = { columns: 1, rows: 1, items: [loop], connections: [] }
+    const render = () => renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+      layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+    }) }))
+    const firstClip = await render()
+    assert.match(firstClip, /aria-label="Arm Loop sequencer for recording"/)
+    assert.match(firstClip, /aria-label="Play Loop sequencer when playback starts"/)
+    assert.match(firstClip, /aria-label="Clear clip 0 in Loop sequencer"/)
+    assert.match(firstClip, /class="loop-preview-note"[^>]*cx="0"/)
+    assert.match(firstClip, /class="loop-preview-curve"[^>]*d="M0,44 Q25,44 50,8"/)
+
+    loop.settings.clips['1'] = [{ instrumentId: 'pad', note: 80, velocity: 100, position: 3, duration: 0.5 }]
+    loop.settings.automation['1'] = [{ sourceId: 'knob', parameter: 'value', value: 45, position: 3 }]
+    loop.settings.clipIndex = 1
+    const secondClip = await render()
+    assert.match(secondClip, /class="loop-preview-note"[^>]*cx="75"/)
+    assert.match(secondClip, /class="loop-preview-curve"[^>]*d="M73\.5,24 Q75,22 76\.5,24"/)
+  } finally { await server.close() }
+})
+
+test('older projects with multiple armed loops retain only the first armed loop', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { migrateSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const loops = [createControl('one', 0, 0, 'sequenced-loop'), createControl('two', 0, 0, 'sequenced-loop')]
+    loops.forEach((loop) => { loop.settings.armed = true })
+    const project = { version: 1, banks: loops.map((loop) => ({ layout: { items: [loop] } })) }
+    migrateSavedProject(project)
+    assert.equal(loops[0].settings.armed, true)
+    assert.equal(loops[1].settings.armed, false)
+    migrateSavedProject(project)
+    assert.equal(loops[0].settings.armed, true)
+    assert.equal(loops[1].settings.armed, false)
+  } finally { await server.close() }
+})
+
 test('sequenced loops overdub live notes, play original instruments and release at boundaries', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -230,6 +278,91 @@ test('automation overdubs only armed clips, plays in time and clears on stop', a
     assert.deepEqual(played, [['loop', 75, undefined], ['loop', 0, false]])
     engine.stop()
     assert.deepEqual(played.at(-1), ['loop', undefined, undefined])
+  } finally { await server.close() }
+})
+
+test('motion records at 1/32 intervals and preserves final values and separate gestures', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.recordScope = 'all'
+    loop.settings.syncMode = 'immediate'
+    loop.settings.automation[0] = [{ sourceId: 'knob', parameter: 'value', value: -1, position: 0 }]
+    let beat = 0
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {}, () => {}, 'A')
+    engine.toggle(loop)
+    for (let i = 0; i < 320; i++) {
+      beat = i / 80
+      engine.recordAutomation('knob', 'value', i, undefined, 'B', true)
+    }
+    const events = loop.settings.automation[0]
+    assert.equal(events.length, 33)
+    assert.equal(events[0].value, -1)
+    assert.equal(events[1].value, 0)
+    assert.equal(events.at(-1).value, 310)
+    engine.endAutomation('knob', 'value', 'B')
+    assert.equal(events.length, 34)
+    assert.equal(events.at(-1).value, 319)
+    assert.equal(events.at(-1).bankId, 'B')
+    assert.ok(Math.abs(events.at(-1).position - 319 / 80) < 1e-10)
+
+    beat = 4.01
+    engine.recordAutomation('knob', 'value', 20, undefined, 'B', true)
+    engine.endAutomation('knob', 'value', 'B')
+    beat = 4.02
+    engine.recordAutomation('knob', 'value', 21, undefined, 'B', true)
+    assert.deepEqual(events.slice(-2).map((event) => event.value), [20, 21])
+    engine.recordAutomation('piano', 'pressure', 50, true, 'B', true)
+    engine.recordAutomation('piano', 'pressure', 60, true, 'B', true)
+    engine.recordAutomation('piano', 'pressure', 0, false, 'B', true)
+    assert.deepEqual(events.slice(-3).map((event) => [event.value, event.active]), [[50, true], [60, true], [0, false]])
+    engine.recordAutomation('pad', 'gate', 1, undefined, 'B')
+    engine.recordAutomation('pad', 'gate', 0, undefined, 'B')
+    assert.deepEqual(events.slice(-2).map((event) => event.value), [1, 0])
+    engine.recordAutomation('shared', 'value', 10, undefined, 'A', true)
+    engine.recordAutomation('shared', 'value', 20, undefined, 'B', true)
+    engine.recordAutomation('shared', 'value', 11, undefined, 'A', true)
+    engine.recordAutomation('shared', 'value', 21, undefined, 'B', true)
+    engine.endAutomation('shared', 'value', 'A')
+    engine.endAutomation('shared', 'value', 'B')
+    assert.deepEqual(events.slice(-4).map((event) => [event.bankId ?? 'A', event.value]),
+      [['A', 10], ['B', 20], ['A', 11], ['B', 21]])
+    engine.recordAutomation('wheel', 'value', 0.1, undefined, 'B', true)
+    engine.recordAutomation('wheel', 'value', 0.9, undefined, 'B', true)
+    engine.stop()
+    assert.deepEqual(events.slice(-2).map((event) => event.value), [0.1, 0.9])
+  } finally { await server.close() }
+})
+
+test('motion final values stay in their clip and clearing a clip does not restore them', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    let beat = 0
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {})
+    engine.toggle(loop)
+    beat = 0.01
+    engine.recordAutomation('knob', 'value', 10, undefined, '', true)
+    beat = 0.02
+    engine.recordAutomation('knob', 'value', 20, undefined, '', true)
+    loop.settings.clipIndex = 1
+    beat = 0.03
+    engine.recordAutomation('knob', 'value', 30, undefined, '', true)
+    assert.deepEqual(loop.settings.automation[0].map((event) => event.value), [10, 20])
+    assert.deepEqual(loop.settings.automation[1].map((event) => event.value), [30])
+    beat = 0.04
+    engine.recordAutomation('knob', 'value', 40, undefined, '', true)
+    loop.settings.automation[1] = []
+    engine.endAutomation('knob', 'value')
+    assert.deepEqual(loop.settings.automation[1], [])
+    engine.stop()
   } finally { await server.close() }
 })
 

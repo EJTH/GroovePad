@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, MAX_LOOP_CLIP_INDEX, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
+import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
 import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
-import { effectiveControls, modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
+import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
 import MPCPad from './MPCPad.vue'
@@ -19,9 +19,9 @@ import ConnectionMapping from './ConnectionMapping.vue'
 import GridControlSettingsDialog from './GridControlSettingsDialog.vue'
 import { controlTypes } from './gridControlTypes'
 import { useGridInteraction } from './useGridInteraction'
-import { BankEventBus, SequencedLoopEngine, TransportClock, type BankEvent } from '../sequencedLoop'
+import { BankEventBus, TransportClock } from '../sequencedLoop'
 import type { Bank } from '../project'
-import { pointerTap } from '../pointerTap'
+import { useGridPlayback } from './useGridPlayback'
 
 const props = defineProps<{
   layout: GridLayout
@@ -34,6 +34,9 @@ const props = defineProps<{
   bankId?: string
   banks?: Bank[]
   bankEvents?: BankEventBus
+  startOnInput?: (bankId: string) => Promise<boolean>
+  transportStartImmediate?: boolean
+  triggeredByInput?: boolean
 }>()
 const emit = defineEmits<{ closeSettings: []; output: [itemId: string, output: ParameterOutput] }>()
 
@@ -60,188 +63,31 @@ onBeforeUnmount(() => clearTimeout(selectorFlashTimer))
 const clock = props.transportClock ?? new TransportClock()
 const bankId = props.bankId ?? ''
 const bankEvents = props.bankEvents ?? new BankEventBus()
-const loopVoices = reactive(new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>())
-const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
-const liveControls = reactive(new Set<string>())
-const manualOverrides = reactive(new Map<string, number>())
-let automationSequence = 0
-const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
-const loopEngine = new SequencedLoopEngine(
-  () => props.layout.items.filter((item): item is Extract<GridItem, { type: 'sequenced-loop' }> => item.type === 'sequenced-loop'),
-  () => clock.position(),
-  (id, note, on) => {
-    bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? bankId, voiceId: JSON.stringify([bankId, id]), note, on })
-  },
-  (id, event) => {
-    bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([bankId, id]), bankId: event ? (event.bankId ?? bankId) : undefined, event })
-  },
+const {
+  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayState, playbackAutomation, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
+  changeLoopIndex,
+  recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, loopPreviewCurves, armLoop,
+  setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride,
+} = useGridPlayback({
+  layout: () => props.layout,
+  banks: () => props.banks,
   bankId,
-  (loop) => {
-    const effective = displayItems.value.find((item) => item.id === loop.id)
-    return effective?.type === 'sequenced-loop' ? effective.settings.clipIndex : loop.settings.clipIndex
-  },
-  (beat) => bankEvents.emit({ kind: 'count-in-click', beat }),
-)
-function receiveBankEvent(event: BankEvent) {
-  if (event.kind === 'live-note') {
-    if (props.playing && !props.editing) loopEngine.record(event.instrumentId, event.note, event.velocity, event.bend, event.on, event.bankId)
-  } else if (event.kind === 'live-automation') {
-    if (props.playing && !props.editing) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, event.active, event.bankId)
-  } else if (event.kind === 'loop-note' && event.bankId === bankId) {
-    if (event.on) loopVoices.set(event.voiceId, { instrumentId: event.note.instrumentId, note: event.note.note, velocity: event.note.velocity, bend: event.note.bend })
-    else loopVoices.delete(event.voiceId)
-  } else if (event.kind === 'loop-automation') {
-    if (!event.event) { loopAutomation.delete(event.owner); return }
-    if (event.bankId !== bankId) return
-    let values = loopAutomation.get(event.owner)
-    if (!values) { loopAutomation.set(event.owner, new Map()); values = loopAutomation.get(event.owner)! }
-    values.set(`${event.event.sourceId}:${event.event.parameter}`, {
-      sourceId: event.event.sourceId, value: event.event.value, active: event.event.active, sequence: ++automationSequence,
-    })
-  }
-}
-const unsubscribeBankEvents = bankEvents.subscribe(receiveBankEvent)
-let loopTimer: ReturnType<typeof setInterval> | undefined
-function updateLoopStatus() {
-  const next = new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>()
-  for (const item of props.layout.items) if (item.type === 'sequenced-loop') {
-    next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id), counting: loopEngine.isCounting(item.id) })
-  }
-  if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
-    status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending ||
-    status.counting !== loopStatus.value.get(id)?.counting)) loopStatus.value = next
-}
-function toggleLoop(id: string) {
-  const item = props.layout.items.find((entry) => entry.id === id)
-  if (item?.type !== 'sequenced-loop') return
-  if (!props.playing) item.settings.armed = !item.settings.armed
-  else if (!item.settings.armed) { loopEngine.toggle(item, clock.position()); loopEngine.tick() }
-  updateLoopStatus()
-}
-function changeLoopIndex(id: string, delta: number) {
-  const loop = props.layout.items.find((item) => item.id === id)
-  if (loop?.type !== 'sequenced-loop') return
-  const index = Math.max(0, Math.min(MAX_LOOP_CLIP_INDEX, loop.settings.clipIndex + delta))
-  loop.settings.clips[String(index)] ??= []
-  loop.settings.automation[String(index)] ??= []
-  loop.settings.clipIndex = index
-}
-function loopKeyDown(event: KeyboardEvent, id: string) {
-  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
-  event.preventDefault()
-  changeLoopIndex(id, event.key === 'ArrowUp' ? 1 : -1)
-}
-function createLoopGesture(id: string) {
-  const tap = pointerTap(() => toggleLoop(id))
-  const pointers = new Map<number, { x: number; y: number; moved: boolean }>()
-  function down(event: PointerEvent) {
-    if ((event.pointerType !== 'touch' && event.button !== 0) || pointers.has(event.pointerId) ||
-      !(event.currentTarget instanceof HTMLElement)) return
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, moved: false })
-    tap.down(event)
-  }
-  function move(event: PointerEvent) {
-    const pointer = pointers.get(event.pointerId)
-    if (pointer && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) >= 10) pointer.moved = true
-  }
-  function up(event: PointerEvent) {
-    const pointer = pointers.get(event.pointerId)
-    if (!pointer) return
-    move(event)
-    pointers.delete(event.pointerId)
-    const dx = event.clientX - pointer.x
-    const dy = event.clientY - pointer.y
-    if (Math.abs(dy) >= 24 && Math.abs(dy) > Math.abs(dx)) {
-      tap.cancel(event)
-      changeLoopIndex(id, dy < 0 ? 1 : -1)
-    } else if (pointer.moved) tap.cancel(event)
-    else tap.up(event)
-  }
-  function cancel(event: PointerEvent) {
-    pointers.delete(event.pointerId)
-    tap.cancel(event)
-  }
-  return { down, move, up, cancel, click: tap.click }
-}
-const loopGestures = new Map<string, ReturnType<typeof createLoopGesture>>()
-function loopGesture(id: string) {
-  let gesture = loopGestures.get(id)
-  if (!gesture) { gesture = createLoopGesture(id); loopGestures.set(id, gesture) }
-  return gesture
-}
-function recordedNotes(id: string): HeldNote[] {
-  const notes = new Map<number, HeldNote>()
-  for (const voice of loopVoices.values()) if (voice.instrumentId === id) {
-    const previous = notes.get(voice.note)
-    notes.set(voice.note, { note: voice.note, velocity: voice.velocity, bend: voice.bend, count: (previous?.count ?? 0) + 1 })
-  }
-  return [...notes.values()]
-}
-function captureNote(id: string, note: number, on: boolean, velocity: number, bend?: number) {
-  if (props.playing && !props.editing) bankEvents.emit({ kind: 'live-note', bankId, instrumentId: id, note, on, velocity, bend })
-}
-onBeforeUnmount(() => {
-  if (loopTimer !== undefined) clearInterval(loopTimer)
-  loopEngine.stop()
-  unsubscribeBankEvents()
+  bankEvents,
+  clock,
+  playing: () => props.playing,
+  editing: () => props.editing,
+  transportStartImmediate: () => props.transportStartImmediate,
+  triggeredByInput: () => props.triggeredByInput,
+  startOnInput: () => props.startOnInput,
+  signals,
+  routeNote,
 })
-const playbackAutomation = computed(() => {
-  const selected = new Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>()
-  for (const values of loopAutomation.values()) for (const [key, event] of values) {
-    if (!selected.has(key) || selected.get(key)!.sequence < event.sequence) selected.set(key, event)
-  }
-  return selected
-})
-const effectiveSignals = computed(() => {
-  const result = new Map(signals)
-  for (const [key, event] of playbackAutomation.value) {
-    const source = props.layout.items.find((item) => item.id === event.sourceId)
-    if (!source || liveControls.has(source.id) || (manualOverrides.get(key) ?? -1) >= event.sequence) continue
-    if (event.active === false) result.delete(key)
-    else result.set(key, event.value)
-  }
-  return result
-})
-function controlActivity(id: string, active: boolean) {
-  if (active) {
-    const item = props.layout.items.find((entry) => entry.id === id)
-    const value = playbackAutomation.value.get(`${id}:value`)
-    if (item?.type === 'knob' && value && value.active !== false) {
-      item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value.value))
-    }
-    liveControls.add(id)
-  } else {
-    liveControls.delete(id)
-    const item = props.layout.items.find((entry) => entry.id === id)
-    if (item) for (const output of outputs(item)) manualOverrides.delete(`${id}:${output.id}`)
-  }
-}
-const displayItems = computed(() => props.editing ? props.layout.items : effectiveControls(props.layout, effectiveSignals.value))
-watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
-  ({ id: item.id, index: item.settings.clipIndex })), (selections) => {
-  for (const selection of selections) {
-    const loop = props.layout.items.find((item) => item.id === selection.id)
-    if (loop?.type !== 'sequenced-loop') continue
-    loop.settings.clips[String(selection.index)] ??= []
-    loop.settings.automation[String(selection.index)] ??= []
-  }
-}, { immediate: true, flush: 'sync' })
-watch([() => props.playing, () => props.editing], ([playing, editing], previous) => {
-  if (loopTimer !== undefined) clearInterval(loopTimer)
-  loopTimer = undefined
-  if (!playing) loopEngine.stop()
-  else if (editing) loopEngine.suspend()
-  else {
-    if (previous?.[1]) loopEngine.resume()
-    for (const loop of props.layout.items) if (loop.type === 'sequenced-loop' && loop.settings.armed && !loopEngine.isEnabled(loop.id)) {
-      loopEngine.toggle(loop)
-    }
-    loopEngine.tick()
-    loopTimer = setInterval(() => { loopEngine.tick(); updateLoopStatus() }, 20)
-  }
-  if (!playing || editing) { liveControls.clear(); manualOverrides.clear() }
-  updateLoopStatus()
-}, { immediate: true, flush: 'sync' })
+void loopEngine
+void loopAutomation
+void loopPlayState
+void toggleLoop
+void changeLoopIndex
+const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
 const sourceItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.sourceId))
 const targetItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.targetId))
 const availableOutputs = computed(() => sourceItem.value && targetItem.value
@@ -263,7 +109,6 @@ const cells = computed(() => Array.from({ length: props.layout.columns * props.l
 })))
 
 watch(() => props.editing, (editing) => {
-  if (editing) { signals.clear(); selectorNotes.clear() }
   if (!editing) {
     selectedId.value = null
     draft.value = null
@@ -271,7 +116,6 @@ watch(() => props.editing, (editing) => {
     interaction.value = null
     dropAction.value = null
     message.value = ''
-    activeNotes.clear()
   }
 })
 
@@ -367,6 +211,7 @@ function saveItem(item: GridItem) {
   const index = props.layout.items.findIndex((entry) => entry.id === selectedId.value)
   if (index !== -1) props.layout.items[index] = item
   else props.layout.items.push(item)
+  if (item.type === 'sequenced-loop' && item.settings.armed) setLoopArmed(item, true)
   selectedId.value = null
   draft.value = null
   message.value = ''
@@ -375,6 +220,14 @@ function saveItem(item: GridItem) {
 function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   const original = props.layout.items.find((entry) => entry.id === item.id)
   if (!original) return
+  const inputAttack = user && ((original.type === 'pad' || original.type === 'instrument-pad') &&
+    output.parameter === 'gate' && output.value > 0 ||
+    original.type === 'piano-roll' && output.parameter === 'note' && output.on === true)
+  if (inputAttack) {
+    if (!props.playing) beginInput()
+    else startArmedLoops()
+  }
+  const wasActive = liveControls.has(item.id)
   if (user && (original.type === 'pad' || original.type === 'instrument-pad') && output.parameter === 'gate') {
     controlActivity(item.id, output.value > 0)
   } else if (user && original.type === 'piano-roll' && output.parameter === 'pressure') {
@@ -387,21 +240,32 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
   const trackPressure = output.parameter !== 'pressure' ||
     props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'pressure')
+  const recordVelocity = output.parameter !== 'velocity' ||
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'velocity')
+  const recordGate = output.parameter !== 'gate' ||
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'gate')
   if (output.on === undefined && output.parameter !== 'note' && trackPressure) {
     if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
     else signals.set(`${item.id}:${output.parameter}`, output.value)
   }
   const recordable = (original.type !== 'knob' && original.type !== 'mod-wheel') || original.settings.recordAutomation
-  if (props.playing && !props.editing && recordable && trackPressure && (user || output.user) && sourceParameter?.kind === 'number') {
+  const touched = wasActive || liveControls.has(item.id) ||
+    (user && output.parameter === 'velocity' && (original.type === 'pad' || original.type === 'instrument-pad' || original.type === 'piano-roll'))
+  if (props.playing && !props.editing && recordable && trackPressure && recordVelocity && recordGate && touched &&
+    (user || output.user) && (original.type !== 'knob' || output.pointer === true) && sourceParameter?.kind === 'number') {
     bankEvents.emit({ kind: 'live-automation', bankId, sourceId: item.id, parameter: output.parameter,
-      value: original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value, active: output.active })
+      value: original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value, active: output.active,
+      motion: output.parameter === 'pressure' || ((original.type === 'knob' || original.type === 'mod-wheel') && output.parameter === 'value') })
   }
   if (props.playing && trackPressure && (user || output.user) && sourceParameter?.kind === 'number' && !liveControls.has(item.id)) {
-    manualOverrides.set(`${item.id}:${output.parameter}`, automationSequence)
+    markManualOverride(item.id, output.parameter)
   }
   emit('output', item.id, output)
   if (!sourceParameter || sourceParameter.kind !== 'note') return
   if (output.on) void Tone.start().catch((error: unknown) => console.error('Could not start audio:', error))
+  if (user && original.type === 'piano-roll' && output.on !== undefined) {
+    captureNote(original.id, output.value, output.on, output.velocity ?? 100, output.bend)
+  }
   routeNote(item.id, output)
 }
 
@@ -505,7 +369,7 @@ function advanceSelector(item: GridItem) {
   setSelectorIndex(original, (original.settings.index + 1) % count, true)
 }
 
-watch(() => props.editing ? [] : props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
+watch(() => props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
   const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection')
   const origin = wire && signalSource(props.layout, wire)
   return { id: item.id, wireId: wire?.id, originId: origin?.id, value: wire && selectorInputValue(wire) }
@@ -708,8 +572,8 @@ function removeItem() {
           @click="addItem(cell.x, cell.y)"
         ><span v-if="editing && !wiring" aria-hidden="true">+</span></button>
 
-        <div v-for="item in displayItems" :key="item.id" class="grid-item" :style="itemStyle(item)">
-          <div v-if="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
+        <div v-for="{ item, original } in renderedItems" :key="item.id" class="grid-item" :style="itemStyle(original)">
+          <div v-show="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
             <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event, true)" />
             <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" @output="handleOutput(item, $event)" />
@@ -720,34 +584,62 @@ function removeItem() {
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
               @advance="advanceSelector(item)" />
-            <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
-            <button v-else-if="item.type === 'sequenced-loop'" type="button" class="loop-control"
+            <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
+            <div v-else-if="item.type === 'sequenced-loop'" class="loop-control"
+              role="group" :aria-label="`${item.label} controls`" tabindex="0"
               :style="{ '--loop-color': item.settings.color }"
-              :aria-label="playing && item.settings.armed ? `${item.label}, armed for recording` : playing ? `${loopStatus.get(item.id)?.enabled ? 'Stop' : 'Start'} ${item.label}` : `${item.settings.armed ? 'Disarm' : 'Arm'} ${item.label} for recording`"
-              :aria-pressed="playing ? (loopStatus.get(item.id)?.enabled ?? false) : item.settings.armed"
               aria-keyshortcuts="ArrowUp ArrowDown"
-              :title="playing && item.settings.armed ? 'Armed loops stay on while the transport plays; swipe up or down to change clips' : 'Swipe up or down to change clips'"
+              title="Use the buttons to arm or play; swipe up or down to change clips"
               @pointerdown="loopGesture(item.id).down" @pointermove="loopGesture(item.id).move" @pointerup="loopGesture(item.id).up"
               @pointercancel="loopGesture(item.id).cancel" @lostpointercapture="loopGesture(item.id).cancel"
               @click="loopGesture(item.id).click" @keydown="loopKeyDown($event, item.id)">
               <strong>{{ item.label }}</strong>
-              <span>Clip {{ item.settings.clipIndex }} · {{ loopStatus.get(item.id)?.counting ? 'Count-in' : loopStatus.get(item.id)?.pending ? 'Waiting' : loopStatus.get(item.id)?.enabled ? 'On' : 'Off' }}</span>
-              <span v-if="item.settings.armed" class="loop-record-indicator"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" /></svg>Record armed</span>
-            </button>
+              <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ loopStatus.get(item.id)?.counting ? 'Count-in' : loopStatus.get(item.id)?.pending ? 'Waiting' : loopStatus.get(item.id)?.enabled ? 'On' : loopWantsPlayback(item) ? 'Ready' : 'Off' }}</span>
+              <svg class="loop-preview" viewBox="0 0 100 48" preserveAspectRatio="none" aria-hidden="true">
+                <path class="loop-preview-grid" d="M25 0v48 M50 0v48 M75 0v48 M0 12h100 M0 24h100 M0 36h100" />
+                <path v-for="curve in loopPreviewCurves(item)" :key="curve.key" class="loop-preview-curve" :d="curve.path" />
+                <circle v-for="(note, index) in selectedLoopNotes(item)" :key="index" class="loop-preview-note"
+                  :cx="previewX(note.position, Math.max(1, item.settings.barLength * 4))"
+                  :cy="previewY(note.note, 36, 96)" r="1.5" />
+              </svg>
+              <div class="loop-actions">
+                <button type="button" class="loop-action loop-arm" :class="{ armed: item.settings.armed }"
+                  :aria-label="`${item.settings.armed ? 'Disarm' : 'Arm'} ${item.label} for recording`"
+                  :aria-pressed="item.settings.armed" :title="item.settings.armed ? 'Disarm recording' : 'Arm for recording'"
+                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="armLoop(item.id)">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6" /></svg>
+                </button>
+                <button type="button" class="loop-action loop-play" :aria-label="`${loopWantsPlayback(item) ? 'Pause' : 'Play'} ${item.label}${playing ? '' : ' when playback starts'}`"
+                  :aria-pressed="loopWantsPlayback(item)"
+                  :title="playing ? (loopWantsPlayback(item) ? 'Pause loop' : 'Play loop') : (loopWantsPlayback(item) ? 'Do not start this loop when playback starts' : 'Start this loop when playback starts')"
+                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="toggleLoopPlayback(item.id)">
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path v-if="loopWantsPlayback(item)" d="M5 4h4v12H5z M11 4h4v12h-4z" />
+                    <path v-else d="M6 3.5 17 10 6 16.5z" />
+                  </svg>
+                </button>
+                <button type="button" class="loop-action loop-clear"
+                  :aria-label="`Clear clip ${item.settings.clipIndex} in ${item.label}`"
+                  :title="`Clear clip ${item.settings.clipIndex}`"
+                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="clearLoopClip(item.id)">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 6h10l-.8 11H5.8L5 6Zm2-3h6l1 2H6l1-2Zm1 5v6m4-6v6" /></svg>
+                </button>
+              </div>
+            </div>
           </div>
           <button
-            v-else
+            v-if="editing"
             type="button"
             class="grid-item-main editing"
-            :class="{ 'has-color': 'color' in item.settings }"
-            :style="'color' in item.settings ? { '--item-color': item.settings.color } : undefined"
-            :aria-label="`Edit or move ${item.label}`"
-            @pointerdown="startInteraction($event, item, 'move')"
+            :class="{ 'has-color': 'color' in original.settings }"
+            :style="'color' in original.settings ? { '--item-color': original.settings.color } : undefined"
+            :aria-label="`Edit or move ${original.label}`"
+            @pointerdown="startInteraction($event, original, 'move')"
             @pointermove="updateInteraction"
             @pointerup="endInteraction($event)"
             @pointercancel="endInteraction($event, true)"
-            @click="editing && $event.detail === 0 && openSettings(item)"
-          ><span :class="{ 'vertical-edit-label': item.orientation === 'vertical' }">{{ item.label }}</span></button>
+            @click="editing && $event.detail === 0 && openSettings(original)"
+          ><span :class="{ 'vertical-edit-label': original.orientation === 'vertical' }">{{ original.label }}</span></button>
           <span v-if="!editing && selectorFlash?.targetId === item.id" :key="selectorFlash.sequence"
             class="selector-receiver-flash" aria-hidden="true"></span>
           <button
@@ -755,18 +647,18 @@ function removeItem() {
             type="button"
             class="resize-handle"
             :aria-label="`Resize ${item.label}; or use control settings`"
-            @pointerdown.stop="startInteraction($event, item, 'resize')"
+            @pointerdown.stop="startInteraction($event, original, 'resize')"
             @pointermove="updateInteraction"
             @pointerup="endInteraction($event)"
             @pointercancel="endInteraction($event, true)"
-            @click="$event.detail === 0 && openSettings(item)"
+            @click="$event.detail === 0 && openSettings(original)"
           ><span aria-hidden="true">◢</span></button>
           <button v-if="wiring" type="button" class="wire-control" :class="{ selected: wireFirst === item.id }"
             :data-wire-id="item.id" :aria-label="`Wire ${item.label}`"
-            @pointerdown="wirePointerDown($event, item)" @pointermove="wirePointerMove"
+            @pointerdown="wirePointerDown($event, original)" @pointermove="wirePointerMove"
             @pointerup="wirePointerEnd($event)" @pointercancel="wirePointerEnd($event, true)"
             @lostpointercapture="wirePointerEnd($event, true)"
-            @click="$event.detail === 0 && keyboardWire(item)">
+            @click="$event.detail === 0 && keyboardWire(original)">
             <span :class="{ 'vertical-edit-label': item.orientation === 'vertical' }">{{ item.label }}</span>
           </button>
         </div>

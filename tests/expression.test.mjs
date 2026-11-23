@@ -15,7 +15,9 @@ class Element {
   contains() { return true }
 }
 
-async function setupComponent(name, props, dependencies, environment = {}) {
+async function setupComponent(name, props, dependencies, environment = {}, onEmit = () => {}) {
+  const cleanup = []
+  const vueMock = { ...vue, provide: () => {}, onMounted: () => {}, onBeforeUnmount: (callback) => cleanup.push(callback), onUnmounted: (callback) => cleanup.push(callback) }
   if (name === 'GrooveGrid' && !dependencies['../sequencedLoop']) {
     const source = await readFile(new URL('../src/sequencedLoop.ts', import.meta.url), 'utf8')
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
@@ -30,26 +32,62 @@ async function setupComponent(name, props, dependencies, environment = {}) {
     vm.runInNewContext(code, { module: tapModule, exports: tapModule.exports, HTMLElement: Element })
     dependencies['../pointerTap'] = tapModule.exports
   }
+  if (name === 'GrooveGrid') {
+    const sources = [
+      ['../grid', '/src/grid.ts'],
+      ['../modulation', '/src/modulation.ts'],
+      ['../parameters', '/src/parameters.ts'],
+      ['../music', '/src/music.ts'],
+    ]
+    const missing = sources.filter(([key]) => !dependencies[key])
+    if (missing.length) {
+      const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+      try {
+        for (const [key, path] of missing) dependencies[key] = await server.ssrLoadModule(path)
+      } finally { await server.close() }
+    }
+    if (!dependencies['./useGridPlayback']) {
+      const source = await readFile(new URL('../src/components/useGridPlayback.ts', import.meta.url), 'utf8')
+      const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+      const playbackModule = { exports: {} }
+      vm.runInNewContext(code, { module: playbackModule, exports: playbackModule.exports, HTMLElement: Element, ...environment,
+        setInterval: environment.setInterval ?? setInterval, clearInterval: environment.clearInterval ?? clearInterval,
+        setTimeout: environment.setTimeout ?? setTimeout, clearTimeout: environment.clearTimeout ?? clearTimeout,
+        require: (path) => path === 'vue' ? vueMock : dependencies[path] ?? { default: {} } })
+      dependencies['./useGridPlayback'] = playbackModule.exports
+    }
+  }
   if (name === 'GrooveGrid' && !dependencies['./useGridInteraction']) {
     const source = await readFile(new URL('../src/components/useGridInteraction.ts', import.meta.url), 'utf8')
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
     const interactionModule = { exports: {} }
     vm.runInNewContext(code, { module: interactionModule, exports: interactionModule.exports, HTMLElement: Element, ...environment,
-      require: (path) => path === 'vue' ? vue : dependencies[path] })
+      require: (path) => path === 'vue' ? vueMock : dependencies[path] })
     dependencies['./useGridInteraction'] = interactionModule.exports
   }
-  const source = await readFile(new URL(`../src/components/${name}.vue`, import.meta.url), 'utf8')
+  if (name === 'App' && !dependencies['./composables/useTransport']) {
+    const source = await readFile(new URL('../src/composables/useTransport.ts', import.meta.url), 'utf8')
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const transportModule = { exports: {} }
+    vm.runInNewContext(code, { module: transportModule, exports: transportModule.exports, ...environment,
+      setInterval: environment.setInterval ?? setInterval, clearInterval: environment.clearInterval ?? clearInterval,
+      setTimeout: environment.setTimeout ?? setTimeout, clearTimeout: environment.clearTimeout ?? clearTimeout,
+      require: (path) => path === 'vue' ? vueMock
+        : path === 'tone' ? dependencies.tone
+          : path === '../sequencedLoop' ? dependencies['./sequencedLoop'] ?? { default: {} }
+            : dependencies[path] ?? { default: {} } })
+    dependencies['./composables/useTransport'] = transportModule.exports
+  }
+  const source = await readFile(new URL(name === 'App' ? '../src/App.vue' : `../src/components/${name}.vue`, import.meta.url), 'utf8')
   const script = compileScript(parse(source).descriptor, { id: name }).content
   const { outputText } = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
-  const cleanup = []
   const module = { exports: {} }
-  const vueMock = { ...vue, onMounted: () => {}, onBeforeUnmount: (callback) => cleanup.push(callback) }
   vm.runInNewContext(outputText, { module, exports: module.exports, HTMLElement: Element,
     require: (path) => path === 'vue' ? vueMock : dependencies[path] ?? { default: {} }, ...environment })
   const emitted = []
   const scope = vue.effectScope()
   const api = scope.run(() => module.exports.default.setup(props, {
-    emit: (_, output) => emitted.push(output), expose: () => {},
+    emit: (event, output) => { emitted.push(output); onEmit(event, output) }, expose: () => {},
   }))
   return { api, emitted, dispose: () => { cleanup.forEach((callback) => callback()); scope.stop() } }
 }
@@ -372,6 +410,68 @@ test('arpeggiator emits the outgoing note velocity when playing and bypassed', a
   }
 })
 
+test('arpeggiator follows transport subdivisions without restarting on note changes', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const music = await server.ssrLoadModule('/src/music.ts')
+    let now = 100
+    let nextId = 0
+    const timers = new Map()
+    const window = {
+      setTimeout: (callback, delay) => { const id = ++nextId; timers.set(id, { callback, at: now + delay }); return id },
+      clearTimeout: (id) => timers.delete(id),
+      setInterval: (callback, delay) => { const id = ++nextId; timers.set(id, { callback, at: now + delay, delay }); return id },
+      clearInterval: (id) => timers.delete(id),
+    }
+    function advance(target) {
+      while (true) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!due) break
+        const [id, timer] = due
+        now = Math.max(now, timer.at)
+        if (timer.delay === undefined) timers.delete(id)
+        else timer.at += timer.delay
+        timer.callback()
+      }
+      now = target
+    }
+    const props = vue.reactive({ label: 'Arp', bpm: 120, playing: true, transportClock: { position: () => now / 500 },
+      notes: [], settings: { enabled: true, rate: '1/8', style: 'up', steps: 0, distance: 12, scale: 'chromatic', gate: 0.5 } })
+    const arp = await setupComponent('Arpeggiator', props, { '../music': music }, { window })
+    const attacks = () => arp.emitted.filter((event) => event.parameter === 'note' && event.on).map((event) => event.value)
+    try {
+      props.notes.push({ note: 60, count: 1, velocity: 80 })
+      advance(150)
+      props.notes.push({ note: 64, count: 1, velocity: 90 })
+      advance(249)
+      assert.deepEqual(attacks(), [])
+      advance(250)
+      assert.deepEqual(attacks(), [60])
+      advance(300)
+      props.notes.push({ note: 67, count: 1, velocity: 100 })
+      assert.deepEqual(attacks(), [60])
+      advance(500)
+      assert.deepEqual(attacks(), [60, 64])
+
+      advance(550)
+      props.settings.rate = '1/4'
+      advance(999)
+      assert.deepEqual(attacks(), [60, 64])
+      advance(1000)
+      assert.deepEqual(attacks(), [60, 64, 60])
+      props.playing = false
+      assert.deepEqual(attacks(), [60, 64, 60, 60])
+      advance(1100)
+      props.notes.pop()
+      assert.deepEqual(attacks(), [60, 64, 60, 60])
+      advance(1500)
+      assert.deepEqual(attacks(), [60, 64, 60, 60, 64])
+      props.notes.splice(0)
+      assert.equal(timers.size, 0)
+    } finally { arp.dispose() }
+  } finally { await server.close() }
+})
+
 test('arpeggiator traverses every held note at each distance level', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -528,6 +628,7 @@ test('wired chords through a selector trigger and release independent hit voices
     const piano = createControl('piano', 0, 0, 'piano-roll')
     const selector = createControl('selector', 1, 0, 'output-selector')
     const hit = createControl('hit', 2, 0, 'instrument-pad')
+    assert.equal(hit.settings.mode, 'trigger')
     hit.settings.instrumentParams.polyphony = 4
     const layout = vue.reactive({ columns: 3, rows: 1, items: [piano, selector, hit], connections: [
       { id: 'one', sourceId: 'piano', sourceParameter: 'note', targetId: 'selector', targetParameter: 'note' },
@@ -544,11 +645,15 @@ test('wired chords through a selector trigger and release independent hit voices
     send(64, true)
     await new Promise((resolve) => setImmediate(resolve))
     assert.deepEqual(calls, [['on', 'note:60', 60, 90, 0], ['on', 'note:64', 64, 90, 0]])
+    assert.deepEqual(pad.emitted, [])
     send(60, undefined, 0.5)
     send(64, false)
     assert.deepEqual(calls.slice(2), [['bend', 'note:60', 0.5], ['off', 'note:64']])
     send(60, false)
     assert.deepEqual(calls.at(-1), ['off', 'note:60'])
+    pad.api.handlePadOutput({ parameter: 'gate', value: 1 })
+    pad.api.handlePadOutput({ parameter: 'gate', value: 0 })
+    assert.deepEqual(pad.emitted.filter((event) => typeof event === 'number'), [60, 60])
     pad.dispose()
     grid.dispose()
   } finally {
@@ -625,6 +730,28 @@ test('tapping a resize handle opens settings without preventing resize drags', a
   }
 })
 
+test('copying an armed sequencer leaves the copy disarmed', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const loop = dependencies['../grid'].createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [loop], connections: [] })
+    const grid = await setupComponent('GrooveGrid', { layout, editing: true, wiring: false, settingsOpen: false, bpm: 120 },
+      dependencies, { setTimeout, clearTimeout })
+    try {
+      grid.api.dropAction.value = { original: layout.items[0], candidate: { ...layout.items[0], x: 1 } }
+      grid.api.completeDrop('copy')
+      assert.equal(layout.items.length, 2)
+      assert.equal(layout.items[0].settings.armed, true)
+      assert.equal(layout.items[1].settings.armed, false)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
 test('recorded knob automation yields to a live drag and resumes afterward', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -644,17 +771,22 @@ test('recorded knob automation yields to a live drag and resumes afterward', asy
     try {
       grid.api.toggleLoop('loop')
       beat = 0.5
-      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 65, delta: 1, user: true })
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 65, delta: 1, user: true, pointer: true })
+      assert.equal(loop.settings.automation[0].length, 0)
+      layout.items[0].settings.value = 64
+      grid.api.controlActivity('knob', true)
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 65, delta: 1, user: true, pointer: true })
       beat = 0.75
-      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 70, delta: 5, user: true })
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 70, delta: 5, user: true, pointer: true })
       assert.deepEqual(loop.settings.automation[0].map((event) => event.value), [65, 70])
+      grid.api.controlActivity('knob', false)
       layout.items[1].settings.armed = false
       layout.items[0].settings.value = 10
       beat = 4.5
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[0].settings.value, 65)
       grid.api.controlActivity('knob', true)
-      grid.api.handleOutput(grid.api.displayItems.value[0], { parameter: 'value', value: 75, delta: 10, user: true })
+      grid.api.handleOutput(grid.api.displayItems.value[0], { parameter: 'value', value: 75, delta: 10, user: true, pointer: true })
       beat = 4.75
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[0].settings.value, 75)
@@ -662,6 +794,114 @@ test('recorded knob automation yields to a live drag and resumes afterward', asy
       assert.equal(grid.api.displayItems.value[0].settings.value, 70)
       grid.api.loopEngine.stop()
       assert.equal(grid.api.displayItems.value[0].settings.value, 75)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('only active pointer drags record while an LFO moves knobs', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'lfo']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const lfo = createControl('lfo', 0, 0, 'lfo')
+    const knob = createControl('knob', 1, 0, 'knob')
+    const other = createControl('other', 2, 0, 'knob')
+    const loop = createControl('loop', 3, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 4, rows: 1, items: [lfo, knob, other, loop], connections: [
+      { id: 'wire', sourceId: 'lfo', sourceParameter: 'value', targetId: 'knob', targetParameter: 'value' },
+      { id: 'wire2', sourceId: 'lfo', sourceParameter: 'value', targetId: 'other', targetParameter: 'value' },
+    ] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    const knobProps = vue.reactive({ label: 'Knob', settings: grid.api.displayItems.value[1].settings })
+    const knobComponent = await setupComponent('Knob', knobProps, {}, {}, (event, output) => {
+      if (event === 'activity') grid.api.controlActivity('knob', output)
+      else if (event === 'output') grid.api.handleOutput(grid.api.displayItems.value[1], output)
+    })
+    const oscillator = await setupComponent('LFO', { label: 'LFO', settings: lfo.settings, bpm: 120 }, dependencies,
+      { requestAnimationFrame: () => 1, cancelAnimationFrame: () => {} }, (event, output) => {
+        if (event === 'output') grid.api.handleOutput(grid.api.displayItems.value[0], output)
+      })
+    try {
+      grid.api.toggleLoop('loop')
+      oscillator.api.tick(1000)
+      oscillator.api.tick(1100)
+      assert.notEqual(grid.api.displayItems.value[1].settings.value, knob.settings.value)
+      assert.notEqual(grid.api.displayItems.value[2].settings.value, other.settings.value)
+      assert.equal(loop.settings.automation[0].length, 0)
+
+      knobProps.settings = grid.api.displayItems.value[1].settings
+      const target = new Element(0)
+      knobComponent.api.start(pointer(1, target, 'touch', 0.5, 50, 50))
+      oscillator.api.tick(1200)
+      knobComponent.api.move(pointer(2, target, 'touch', 0.5, 60, 50))
+      grid.api.handleOutput(grid.api.displayItems.value[2],
+        { parameter: 'value', value: 70, delta: 1, user: true, pointer: true })
+      knobComponent.api.wheel({ deltaX: 0, deltaY: -10 })
+      knobComponent.api.keyDown({ key: 'ArrowUp', preventDefault() {} })
+      assert.equal(loop.settings.automation[0].length, 0)
+
+      beat = 0.5
+      knobComponent.api.move(pointer(1, target, 'touch', 0.5, 60, 50))
+      assert.deepEqual(loop.settings.automation[0].map((event) => event.sourceId), ['knob'])
+      knobComponent.api.end(pointer(1, target, 'touch', 0, 60, 50))
+      knobComponent.api.move(pointer(1, target, 'touch', 0.5, 70, 50))
+      oscillator.api.tick(1300)
+      assert.equal(loop.settings.automation[0].length, 1)
+
+      knobComponent.api.start(pointer(3, target, 'touch', 0.5, 50, 50))
+      knobComponent.api.end(pointer(3, target, 'touch', 0, 50, 50))
+      knobComponent.api.move(pointer(3, target, 'touch', 0.5, 60, 50))
+      beat = 4.5
+      grid.api.loopEngine.tick()
+      assert.equal(loop.settings.automation[0].length, 1)
+    } finally { oscillator.dispose(); knobComponent.dispose(); grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('separate knob and wheel gestures retain their final recorded values', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const knob = createControl('knob', 0, 0, 'knob')
+    const wheel = createControl('wheel', 1, 0, 'mod-wheel')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [knob, wheel, loop], connections: [] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.controlActivity('knob', true)
+      for (const value of [65, 66, 67]) {
+        beat += 0.01
+        grid.api.handleOutput(layout.items[0], { parameter: 'value', value, delta: 1, user: true, pointer: true })
+      }
+      grid.api.controlActivity('knob', false)
+      grid.api.controlActivity('knob', true)
+      beat += 0.01
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 68, delta: 1, user: true, pointer: true })
+      grid.api.controlActivity('knob', false)
+      grid.api.controlActivity('wheel', true)
+      grid.api.handleOutput(layout.items[1], { parameter: 'value', value: 0.8, user: true })
+      beat += 0.01
+      grid.api.handleOutput(layout.items[1], { parameter: 'value', value: 0.5, user: true })
+      grid.api.controlActivity('wheel', false)
+      assert.deepEqual(loop.settings.automation[0].map((event) => [event.sourceId, event.value]),
+        [['knob', 65], ['knob', 67], ['knob', 68], ['wheel', 0.8], ['wheel', 0.5]])
     } finally { grid.dispose() }
   } finally { await server.close() }
 })
@@ -739,7 +979,9 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       gridB.api.captureNote('pad', 60, true, 100)
       beat = 0.75
       gridB.api.captureNote('pad', 60, false, 100)
-      gridB.api.handleOutput(layoutB.items[0], { parameter: 'value', value: 65, delta: 1, user: true })
+      gridB.api.controlActivity('control-1', true)
+      gridB.api.handleOutput(layoutB.items[0], { parameter: 'value', value: 65, delta: 1, user: true, pointer: true })
+      gridB.api.controlActivity('control-1', false)
       assert.equal(loop.settings.clips[0][0].bankId, 'B')
       assert.equal(loop.settings.automation[0][0].bankId, 'B')
       beat = 4.5
@@ -777,6 +1019,10 @@ test('loop tap arms when stopped and controls playback when transport is running
       assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
       props.playing = true
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      props.editing = true
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      props.editing = false
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
       grid.api.toggleLoop('loop')
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
       assert.equal(layout.items[0].settings.armed, true)
@@ -784,6 +1030,434 @@ test('loop tap arms when stopped and controls playback when transport is running
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
       props.playing = false
       assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('edit mode preserves loop notes, automation, and transport timing', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const pad = createControl('pad', 0, 0, 'instrument-pad', '808')
+    const knob = createControl('knob', 1, 0, 'knob')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    loop.settings.clips[0] = [
+      { instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1.5 },
+      { instrumentId: 'pad', note: 62, velocity: 100, position: 2, duration: 0.5 },
+    ]
+    loop.settings.automation[0] = [
+      { sourceId: 'knob', parameter: 'value', value: 20, position: 0 },
+      { sourceId: 'knob', parameter: 'value', value: 90, position: 1 },
+    ]
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [pad, knob, loop], connections: [] })
+    let beat = 0
+    let tick
+    let timerStarts = 0
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: true,
+      transportClock: { position: () => beat } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: (callback) => { tick = callback; return ++timerStarts }, clearInterval: () => {} })
+    try {
+      assert.equal(grid.api.recordedNotes('pad')[0].note, 60)
+      assert.equal(grid.api.displayItems.value[1].settings.value, 20)
+      props.editing = true
+      assert.equal(grid.api.recordedNotes('pad')[0].note, 60)
+      assert.equal(timerStarts, 1)
+      beat = 1
+      tick()
+      assert.equal(grid.api.displayItems.value[1].settings.value, 90)
+      beat = 1.5
+      tick()
+      assert.equal(grid.api.recordedNotes('pad').length, 0)
+      beat = 2
+      tick()
+      assert.equal(grid.api.recordedNotes('pad')[0].note, 62)
+      props.editing = false
+      assert.equal(grid.api.recordedNotes('pad')[0].note, 62)
+      assert.equal(timerStarts, 1)
+      beat = 2.5
+      tick()
+      assert.equal(grid.api.recordedNotes('pad').length, 0)
+      props.editing = true
+      props.playing = false
+      props.playing = true
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      assert.equal(timerStarts, 2)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('transport count-in precedes playback while input start bypasses it', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const loopModule = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    let position = 0
+    class Clock {
+      start() { position = 0 }
+      stop() {}
+      setTempo() {}
+      position() { return position }
+    }
+    const clicks = []
+    class Synth {
+      toDestination() { return this }
+      triggerAttackRelease(note) { clicks.push(note) }
+      dispose() {}
+    }
+    const intervals = new Map()
+    let timerId = 0
+    const window = {
+      setInterval: (fn) => { intervals.set(++timerId, fn); return timerId },
+      clearInterval: (id) => intervals.delete(id),
+      clearTimeout: () => {},
+      setTimeout: () => 1,
+      removeEventListener: () => {},
+    }
+    const app = await setupComponent('App', {}, {
+      './grid': gridModule,
+      './sequencedLoop': { ...loopModule, TransportClock: Clock },
+      tone: { start: async () => {}, Synth },
+      './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
+    try {
+      const loop = gridModule.createControl('loop', 0, 0, 'sequenced-loop')
+      loop.settings.armed = true
+      loop.settings.countIn = true
+      loop.settings.metronome = false
+      app.api.banks.value[0].layout.items.push(loop)
+      assert.equal(await app.api.startFromInput('B'), false)
+      assert.equal(await app.api.startFromInput('A'), true)
+      assert.equal(app.api.playing.value, true)
+      assert.equal(app.api.triggeredByInput.value, true)
+      assert.deepEqual(clicks, [])
+      await app.api.togglePlayback()
+      await app.api.togglePlayback()
+      assert.equal(app.api.playing.value, false)
+      assert.equal(app.api.countingIn.value, true)
+      for (position = 1; position <= 4; position++) [...intervals.values()].forEach((tick) => tick())
+      assert.equal(app.api.playing.value, true)
+      assert.equal(app.api.countingIn.value, false)
+      assert.deepEqual(clicks, ['C6', 'G5', 'G5', 'G5'])
+      await app.api.togglePlayback()
+      await app.api.togglePlayback()
+      assert.equal(app.api.countingIn.value, true)
+      await app.api.togglePlayback()
+      assert.equal(app.api.countingIn.value, false)
+      assert.equal(intervals.size, 0)
+      const importedLoop = gridModule.createControl('imported', 0, 0, 'sequenced-loop')
+      importedLoop.settings.armed = true
+      app.api.addImportedBank({ id: 'X', title: 'Imported', icon: 'X', color: '#ffffff',
+        layout: { columns: 1, rows: 1, items: [importedLoop], connections: [] } })
+      assert.equal(loop.settings.armed, true)
+      assert.equal(app.api.banks.value.at(-1).layout.items[0].settings.armed, false)
+    } finally { app.dispose() }
+  } finally { await server.close() }
+})
+
+test('transport start aligns armed and playback loops across banks', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const { createControl } = dependencies['../grid']
+    for (const triggeredByInput of [false, true]) {
+      const armed = createControl('armed', 0, 0, 'sequenced-loop')
+      const playing = createControl('playing', 0, 0, 'sequenced-loop')
+      const stopped = createControl('stopped', 2, 0, 'sequenced-loop')
+      const padA = createControl('pad-a', 1, 0, 'instrument-pad')
+      const padB = createControl('pad-b', 1, 0, 'instrument-pad')
+      armed.settings.armed = true
+      armed.settings.countIn = true
+      armed.settings.syncMode = 'sync'
+      playing.settings.syncMode = 'sync'
+      stopped.settings.syncMode = 'sync'
+      armed.settings.clips[0] = [{ instrumentId: 'pad-a', note: 60, velocity: 100, position: 0, duration: 0.2 }]
+      playing.settings.clips[0] = [{ instrumentId: 'pad-b', note: 62, velocity: 100, position: 0, duration: 0.2 }]
+      const layoutA = vue.reactive({ columns: 2, rows: 1, items: [armed, padA], connections: [] })
+      const layoutB = vue.reactive({ columns: 3, rows: 1, items: [playing, padB, stopped], connections: [] })
+      let beat = 0.1
+      const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+        triggeredByInput, transportStartImmediate: true, transportClock: { position: () => beat }, bankEvents: new BankEventBus() }
+      const propsA = vue.reactive({ ...common, bankId: 'A', layout: layoutA })
+      const propsB = vue.reactive({ ...common, bankId: 'B', layout: layoutB })
+      const environment = { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} }
+      const gridA = await setupComponent('GrooveGrid', propsA, dependencies, environment)
+      const gridB = await setupComponent('GrooveGrid', propsB, dependencies, environment)
+      try {
+        gridB.api.toggleLoopPlayback('playing')
+        propsA.playing = true
+        propsB.playing = true
+        assert.equal(gridA.api.loopEngine.isCounting('armed'), false)
+        assert.equal(gridB.api.loopEngine.isPending('playing'), false)
+        assert.equal(gridB.api.loopEngine.isEnabled('stopped'), false)
+        assert.equal(gridA.api.recordedNotes('pad-a')[0].note, 60)
+        assert.equal(gridB.api.recordedNotes('pad-b')[0].note, 62)
+
+        beat = 0.21
+        gridA.api.loopEngine.tick()
+        gridB.api.loopEngine.tick()
+        assert.equal(gridA.api.recordedNotes('pad-a').length, 0)
+        assert.equal(gridB.api.recordedNotes('pad-b').length, 0)
+        gridB.api.toggleLoopPlayback('playing')
+        gridB.api.toggleLoopPlayback('playing')
+        assert.equal(gridB.api.loopEngine.isPending('playing'), true)
+      } finally { gridA.dispose(); gridB.dispose() }
+    }
+    const mountedLoop = createControl('mounted', 0, 0, 'sequenced-loop')
+    const mountedPad = createControl('mounted-pad', 1, 0, 'instrument-pad')
+    mountedLoop.settings.armed = true
+    mountedLoop.settings.clips[0] = [{ instrumentId: 'mounted-pad', note: 65, velocity: 100, position: 0, duration: 0.2 }]
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [mountedLoop, mountedPad], connections: [] })
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportStartImmediate: true, transportClock: { position: () => 1 } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try { assert.equal(grid.api.recordedNotes('mounted-pad')[0].note, 65) } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('armed loops start on a piano hit and capture the first routed note', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    dependencies.tone = { start: async () => {} }
+    const { createControl } = dependencies['../grid']
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const selector = createControl('selector', 1, 0, 'output-selector')
+    const pad = createControl('pad', 2, 0, 'instrument-pad', '808')
+    const loop = createControl('loop', 3, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.countIn = true
+    const layout = vue.reactive({ columns: 4, rows: 1, items: [piano, selector, pad, loop], connections: [
+      { id: 'one', sourceId: 'piano', sourceParameter: 'note', targetId: 'selector', targetParameter: 'note' },
+      { id: 'two', sourceId: 'selector', sourceParameter: 'note', targetId: 'pad', targetParameter: 'note' },
+    ] })
+    let beat = 0
+    let starts = 0
+    let finishStart
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+      transportStartImmediate: true, triggeredByInput: true, transportClock: { position: () => beat },
+      startOnInput: () => { starts++; return new Promise((resolve) => { finishStart = resolve }) } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: true, velocity: 90 }, true)
+      assert.equal(starts, 1)
+      props.playing = true
+      finishStart(true)
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
+      beat = 0.5
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: false, velocity: 90 }, true)
+      assert.equal(loop.settings.clips[0].length, 1)
+      assert.equal(loop.settings.clips[0][0].instrumentId, 'piano')
+      assert.equal(loop.settings.clips[0][0].note, 64)
+      assert.equal(loop.settings.clips[0][0].duration, 0.5)
+      grid.api.toggleLoopPlayback('loop')
+      beat = 1
+      grid.api.handleOutput(piano, { parameter: 'note', value: 65, on: true, velocity: 90 }, true)
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
+      grid.api.handleOutput(piano, { parameter: 'note', value: 65, on: false, velocity: 90 }, true)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('piano notes record their source and replay through its arpeggiator', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    dependencies.tone = { start: async () => {} }
+    const { createControl } = dependencies['../grid']
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const selector = createControl('selector', 1, 0, 'output-selector')
+    const arp = createControl('arp', 2, 0, 'arpeggiator')
+    const pad = createControl('pad', 3, 0, 'instrument-pad')
+    const loop = createControl('loop', 4, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 5, rows: 1, items: [piano, selector, arp, pad, loop], connections: [
+      { id: 'one', sourceId: 'piano', sourceParameter: 'note', targetId: 'selector', targetParameter: 'note' },
+      { id: 'two', sourceId: 'selector', sourceParameter: 'note', targetId: 'arp', targetParameter: 'note' },
+      { id: 'three', sourceId: 'arp', sourceParameter: 'note', targetId: 'pad', targetParameter: 'note' },
+    ] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    const arpProps = vue.reactive({ label: 'Arp', settings: arp.settings, bpm: 120,
+      notes: vue.computed(() => grid.api.receivedNotes('arp')) })
+    const window = { setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} }
+    const arpeggiator = await setupComponent('Arpeggiator', arpProps, dependencies, { window }, (event, output) => {
+      if (event === 'output') grid.api.handleOutput(arp, output)
+    })
+    try {
+      grid.api.toggleLoop('loop')
+      beat = 0.25
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: true, velocity: 90 }, true)
+      assert.equal(grid.api.receivedNotes('pad')[0].note, 64)
+      beat = 0.75
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: false, velocity: 90 }, true)
+      assert.equal(loop.settings.clips[0].length, 1)
+      assert.equal(loop.settings.clips[0][0].instrumentId, 'piano')
+      assert.equal(loop.settings.clips[0][0].duration, 0.5)
+
+      beat = 4.25
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.receivedNotes('arp')[0].note, 64)
+      assert.equal(grid.api.receivedNotes('pad')[0].note, 64)
+      grid.api.routeNote('piano', { parameter: 'note', value: 64, on: true, velocity: 90 })
+      assert.equal(grid.api.receivedNotes('arp')[0].count, 2)
+      grid.api.routeNote('piano', { parameter: 'note', value: 64, on: false, velocity: 90 })
+      assert.equal(grid.api.receivedNotes('arp')[0].count, 1)
+      beat = 4.75
+      grid.api.loopEngine.tick()
+      assert.equal(grid.api.receivedNotes('arp').length, 0)
+      assert.equal(grid.api.receivedNotes('pad').length, 0)
+      assert.equal(loop.settings.clips[0].length, 1)
+    } finally { arpeggiator.dispose(); grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('a drum hit released during transport startup is still recorded', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const pad = createControl('pad', 0, 0, 'instrument-pad', '808')
+    const loop = createControl('loop', 1, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.countIn = true
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [pad, loop], connections: [] })
+    let finishStart
+    let starts = 0
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+      transportStartImmediate: true, triggeredByInput: true, transportClock: { position: () => 0 },
+      startOnInput: () => { starts++; return new Promise((resolve) => { finishStart = resolve }) } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 1 }, true)
+      grid.api.captureNote('pad', 60, true, 100)
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 0 }, true)
+      grid.api.captureNote('pad', 60, false, 100)
+      assert.equal(starts, 1)
+      props.playing = true
+      finishStart(true)
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(loop.settings.clips[0].length, 1)
+      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('arming a sequencer disarms other banks without stopping their playback', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl, copyControl } = dependencies['../grid']
+    const first = createControl('loop', 0, 0, 'sequenced-loop')
+    const second = createControl('other', 1, 0, 'sequenced-loop')
+    const remote = createControl('loop', 0, 0, 'sequenced-loop')
+    const layoutA = { columns: 2, rows: 1, items: [first, second], connections: [] }
+    const layoutB = { columns: 1, rows: 1, items: [remote], connections: [] }
+    const banks = vue.reactive([{ id: 'A', layout: layoutA }, { id: 'B', layout: layoutB }])
+    const common = { banks, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: true,
+      transportClock: { position: () => 0 } }
+    const environment = { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} }
+    const gridA = await setupComponent('GrooveGrid', { ...common, bankId: 'A', layout: banks[0].layout }, dependencies, environment)
+    const gridB = await setupComponent('GrooveGrid', { ...common, bankId: 'B', layout: banks[1].layout }, dependencies, environment)
+    try {
+      gridA.api.armLoop('loop')
+      assert.equal(first.settings.armed, true)
+      assert.equal(gridA.api.loopEngine.isEnabled('loop'), true)
+      gridB.api.armLoop('loop')
+      assert.equal(first.settings.armed, false)
+      assert.equal(remote.settings.armed, true)
+      assert.equal(gridA.api.loopEngine.isEnabled('loop'), true)
+
+      const draft = copyControl(second, second.id)
+      draft.settings.armed = true
+      gridA.api.selectedId.value = second.id
+      gridA.api.saveItem(draft)
+      assert.equal(banks[0].layout.items[1].settings.armed, true)
+      assert.equal(remote.settings.armed, false)
+      gridA.api.armLoop('loop')
+      assert.equal(first.settings.armed, true)
+      assert.equal(banks[0].layout.items[1].settings.armed, false)
+      gridA.api.armLoop('loop')
+      assert.equal(first.settings.armed, false)
+      gridA.api.armLoop('other')
+      assert.equal(banks[0].layout.items[1].settings.armed, true)
+    } finally { gridA.dispose(); gridB.dispose() }
+  } finally { await server.close() }
+})
+
+test('loop arm and play controls operate independently while the transport runs', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const loop = dependencies['../grid'].createControl('loop', 0, 0, 'sequenced-loop')
+    const layout = vue.reactive({ columns: 1, rows: 1, items: [loop], connections: [] })
+    const props = vue.reactive({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+      transportClock: { position: () => 0 } })
+    const grid = await setupComponent('GrooveGrid', props, dependencies,
+      { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.toggleLoopPlayback('loop')
+      assert.equal(grid.api.loopPlayState.get('loop'), true)
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
+
+      props.playing = true
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      grid.api.toggleLoopPlayback('loop')
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
+      grid.api.toggleLoopPlayback('loop')
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+
+      grid.api.armLoop('loop')
+      assert.equal(loop.settings.armed, true)
+      grid.api.armLoop('loop')
+      assert.equal(loop.settings.armed, false)
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
+      props.playing = false
+      assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
+      assert.equal(grid.api.loopPlayState.get('loop'), true)
+      grid.api.toggleLoopPlayback('loop')
+      assert.equal(grid.api.loopPlayState.get('loop'), false)
+
+      loop.settings.clips['0'] = [{ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 }]
+      loop.settings.automation['0'] = [{ sourceId: 'knob', parameter: 'value', value: 64, position: 0 }]
+      loop.settings.clips['1'] = [{ instrumentId: 'pad', note: 62, velocity: 90, position: 1, duration: 1 }]
+      grid.api.clearLoopClip('loop')
+      assert.equal(loop.settings.clips['0'].length, 0)
+      assert.equal(loop.settings.automation['0'].length, 0)
+      assert.equal(loop.settings.clips['1'].length, 1)
     } finally { grid.dispose() }
   } finally { await server.close() }
 })
@@ -922,9 +1596,105 @@ test('disabled automation recording skips knob and wheel gestures but leaves con
       assert.equal(loop.settings.automation[0].length, 0)
       layout.items[0].settings.recordAutomation = true
       layout.items[1].settings.recordAutomation = true
-      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 66, delta: 1, user: true })
+      grid.api.controlActivity('knob', true)
+      grid.api.controlActivity('wheel', true)
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 66, delta: 1, user: true, pointer: true })
       grid.api.handleOutput(layout.items[1], { parameter: 'value', value: 0.5, user: true })
+      grid.api.controlActivity('knob', false)
+      grid.api.controlActivity('wheel', false)
       assert.equal(loop.settings.automation[0].length, 2)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('instrument hits do not record unconnected gates, but wired gates remain recordable', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    const { createControl } = dependencies['../grid']
+    const drum = createControl('drum', 0, 0, 'instrument-pad', '808')
+    const knob = createControl('knob', 1, 0, 'knob')
+    const loop = createControl('loop', 2, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [drum, knob, loop], connections: [] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 1 }, true)
+      grid.api.captureNote('drum', 60, true, 100)
+      beat = 0.5
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 0 }, true)
+      grid.api.captureNote('drum', 60, false, 100)
+      assert.equal(loop.settings.clips[0].length, 1)
+      assert.equal(loop.settings.automation[0].length, 0)
+
+      layout.connections.push({ id: 'gate-wire', sourceId: 'drum', sourceParameter: 'gate',
+        targetId: 'knob', targetParameter: 'value' })
+      beat = 1
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 1 }, true)
+      beat = 1.5
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 0 }, true)
+      assert.deepEqual(loop.settings.automation[0].map((event) => [event.parameter, event.value]), [['gate', 1], ['gate', 0]])
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('note velocity is retained but velocity automation requires a connection', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
+    }
+    dependencies.tone = { start: async () => {} }
+    const { createControl } = dependencies['../grid']
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const drum = createControl('drum', 1, 0, 'instrument-pad')
+    const pad = createControl('pad', 2, 0, 'pad')
+    const knob = createControl('knob', 3, 0, 'knob')
+    const loop = createControl('loop', 4, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    const layout = vue.reactive({ columns: 5, rows: 1, items: [piano, drum, pad, knob, loop], connections: [] })
+    let beat = 0
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false,
+      bpm: 120, playing: true, transportClock: { position: () => beat } }, dependencies,
+    { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
+    try {
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 83, active: true }, true)
+      grid.api.handleOutput(piano, { parameter: 'velocity', value: 83 }, true)
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: true, velocity: 83 }, true)
+      grid.api.handleOutput(drum, { parameter: 'velocity', value: 97 }, true)
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 1 }, true)
+      grid.api.captureNote('drum', 60, true, 97)
+      grid.api.handleOutput(pad, { parameter: 'velocity', value: 75 }, true)
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 1 }, true)
+      beat = 0.5
+      grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: false, velocity: 83 }, true)
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 0, active: false }, true)
+      grid.api.handleOutput(drum, { parameter: 'gate', value: 0 }, true)
+      grid.api.captureNote('drum', 60, false, 97)
+      grid.api.handleOutput(pad, { parameter: 'gate', value: 0 }, true)
+      assert.deepEqual(loop.settings.clips[0].map((note) => [note.instrumentId, note.velocity]),
+        [['piano', 83], ['drum', 97]])
+      assert.equal(loop.settings.automation[0].length, 0)
+      assert.equal(grid.api.signals.get('piano:velocity'), 83)
+
+      for (const sourceId of ['piano', 'drum', 'pad']) layout.connections.push({
+        id: `${sourceId}-velocity`, sourceId, sourceParameter: 'velocity', targetId: 'knob', targetParameter: 'value',
+      })
+      grid.api.handleOutput(piano, { parameter: 'velocity', value: 81 }, true)
+      grid.api.handleOutput(drum, { parameter: 'velocity', value: 91 }, true)
+      grid.api.handleOutput(pad, { parameter: 'velocity', value: 71 }, true)
+      grid.api.handleOutput(drum, { parameter: 'velocity', value: 55 })
+      assert.deepEqual(loop.settings.automation[0].map((event) => [event.sourceId, event.value]),
+        [['piano', 81], ['drum', 91], ['pad', 71]])
     } finally { grid.dispose() }
   } finally { await server.close() }
 })
@@ -946,7 +1716,7 @@ test('unconnected touch pressure does not create loop automation', async () => {
       bpm: 120, playing: true, transportClock: { position: () => 0 } }, dependencies,
     { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
     try {
-      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true })
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true }, true)
       assert.equal(grid.api.signals.has('piano:pressure'), false)
       assert.equal(loop.settings.automation[0].length, 0)
 
@@ -954,11 +1724,11 @@ test('unconnected touch pressure does not create loop automation', async () => {
         id: 'pressure-wire', sourceId: 'piano', sourceParameter: 'pressure',
         targetId: 'knob', targetParameter: 'value',
       })
-      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true })
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 75, active: true, user: true }, true)
       assert.equal(grid.api.signals.get('piano:pressure'), 75)
       assert.equal(loop.settings.automation[0].length, 1)
 
-      grid.api.handleOutput(piano, { parameter: 'pressure', value: 0, active: false, user: true })
+      grid.api.handleOutput(piano, { parameter: 'pressure', value: 0, active: false, user: true }, true)
       assert.equal(grid.api.signals.has('piano:pressure'), false)
       assert.equal(loop.settings.automation[0].length, 2)
     } finally { grid.dispose() }

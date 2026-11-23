@@ -164,10 +164,12 @@ function isLayout(value: unknown): value is GridLayout {
 export function migrateSavedProject(value: unknown): void {
   if (!object(value) || value.version !== 1 || !Array.isArray(value.banks)) return
   if (value.bpm === undefined) value.bpm = 120
+  let armedLoopFound = false
   for (const bank of value.banks) {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
     for (const item of bank.layout.items) {
       if (object(item) && item.orientation === undefined) item.orientation = 'horizontal'
+      if (object(item) && item.type === 'sequenced-loop' && item.label === 'Sequenced Loop') item.label = 'Loop sequencer'
       if (object(item) && (item.type === 'lfo' || item.type === 'arpeggiator' || item.type === 'sequenced-loop') &&
         object(item.settings) && item.settings.color === undefined) item.settings.color = DEFAULT_GRID_COLOR
       if (object(item) && (item.type === 'knob' || item.type === 'mod-wheel') &&
@@ -176,6 +178,10 @@ export function migrateSavedProject(value: unknown): void {
         item.settings.automation = {}
       }
       if (object(item) && item.type === 'sequenced-loop' && object(item.settings)) {
+        if (item.settings.armed === true) {
+          if (armedLoopFound) item.settings.armed = false
+          else armedLoopFound = true
+        }
         if (item.settings.countIn === undefined) item.settings.countIn = false
         if (item.settings.metronome === undefined) item.settings.metronome = false
       }

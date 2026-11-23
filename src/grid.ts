@@ -115,6 +115,7 @@ export interface ParameterOutput {
   velocity?: number
   bend?: number
   user?: boolean
+  pointer?: boolean
 }
 
 export const DEFAULT_GRID_COLOR = '#b8d986'
@@ -130,7 +131,7 @@ export function createControl(id: string, x: number, y: number, type: GridItemTy
     case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, rootNote: 'C', octaveTranspose: 0, scale: 'chromatic', orientation: 'horizontal', numRows: 1, style: 'pads', pressureMode: 'position' } }
     case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { color: DEFAULT_GRID_COLOR, enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 0, gate: 0.5, scale: 'chromatic' } }
     case 'output-selector': return { ...base, type, label: 'Output Selector', settings: { index: 0 } }
-    case 'sequenced-loop': return { ...base, type, label: 'Sequenced Loop', settings: { color: DEFAULT_GRID_COLOR, barLength: 1, clipIndex: 0, armed: false, countIn: false, metronome: false, syncMode: 'sync', quantize: 'off', recordScope: 'bank', clips: { 0: [] }, automation: { 0: [] } } }
+    case 'sequenced-loop': return { ...base, type, label: 'Loop sequencer', settings: { color: DEFAULT_GRID_COLOR, barLength: 1, clipIndex: 0, armed: false, countIn: false, metronome: false, syncMode: 'sync', quantize: 'off', recordScope: 'bank', clips: { 0: [] }, automation: { 0: [] } } }
     case 'instrument-pad':
       const iType = instrumentType || 'sample-hit'
       return {

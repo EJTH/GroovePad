@@ -54,7 +54,7 @@ function sourceKey(bankId: string | undefined, id: string) { return JSON.stringi
 function source(id: string, bankId?: string) { return props.sources.find((item) => item.id === id && sameBank(item.bankId, bankId)) }
 function rowLabel(row: Row) {
   return row.kind === 'note'
-    ? `${source(row.instrumentId, row.bankId)?.label ?? `Missing instrument (${effectiveBank(row.bankId)} / ${row.instrumentId})`} · ${noteName(row.note)}`
+    ? `${source(row.instrumentId, row.bankId)?.label ?? `Missing source (${effectiveBank(row.bankId)} / ${row.instrumentId})`} · ${noteName(row.note)}`
     : `${source(row.sourceId, row.bankId)?.label ?? `Missing control (${effectiveBank(row.bankId)} / ${row.sourceId})`} · ${row.parameter}`
 }
 function rowColor(row: Row) {
@@ -158,7 +158,7 @@ function chooseCell(row: Row, step: number) {
       <option value="1/16">1/16</option><option value="1/32">1/32</option>
     </select></label>
     <div class="sequence-tools">
-      <label>Instrument <select v-model="instrumentId" :disabled="!instruments.length">
+      <label>Source <select v-model="instrumentId" :disabled="!instruments.length">
         <option v-for="item in instruments" :key="sourceKey(item.bankId, item.id)" :value="sourceKey(item.bankId, item.id)">{{ item.label }}</option>
       </select></label>
       <label>Note <input v-model.number="pitch" type="number" min="0" max="127" step="1"></label>
@@ -199,8 +199,8 @@ function chooseCell(row: Row, step: number) {
       </select>
     </label>
     <div v-if="selectedNote" class="sequence-details">
-      <label>Instrument <select :value="sourceKey(selectedNote.bankId, selectedNote.instrumentId)" @change="changeNote('instrumentId', $event)">
-        <option v-if="!instruments.some((item) => item.id === selectedNote!.instrumentId && sameBank(item.bankId, selectedNote!.bankId))" :value="sourceKey(selectedNote.bankId, selectedNote.instrumentId)">Missing instrument</option>
+      <label>Source <select :value="sourceKey(selectedNote.bankId, selectedNote.instrumentId)" @change="changeNote('instrumentId', $event)">
+        <option v-if="!instruments.some((item) => item.id === selectedNote!.instrumentId && sameBank(item.bankId, selectedNote!.bankId))" :value="sourceKey(selectedNote.bankId, selectedNote.instrumentId)">Missing source</option>
         <option v-for="item in instruments" :key="sourceKey(item.bankId, item.id)" :value="sourceKey(item.bankId, item.id)">{{ item.label }}</option>
       </select></label>
       <label>Note <input :value="selectedNote.note" type="number" min="0" max="127" @change="changeNote('note', $event)"></label>

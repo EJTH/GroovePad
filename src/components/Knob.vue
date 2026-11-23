@@ -14,11 +14,11 @@ const rotation = computed(() => props.settings.max === props.settings.min
   : (props.settings.value - props.settings.min) / (props.settings.max - props.settings.min) * 270 - 135)
 const displayedValue = computed(() => Number(props.settings.value.toPrecision(10)).toString())
 
-function setValue(value: number, previous = props.settings.value): number {
+function setValue(value: number, previous = props.settings.value, pointer = false): number {
   const { min, max, step } = props.settings
   const snapped = min + Math.round((value - min) / step) * step
   const next = Number(Math.max(min, Math.min(max, snapped)).toPrecision(12))
-  if (next !== previous) emit('output', { parameter: 'value', value: next, delta: next - previous, user: true })
+  if (next !== previous) emit('output', { parameter: 'value', value: next, delta: next - previous, user: true, ...(pointer ? { pointer: true } : {}) })
   return next
 }
 
@@ -45,7 +45,7 @@ function move(event: PointerEvent) {
   lastY = event.clientY
   const { min, max } = props.settings
   dragValue = Math.max(min, Math.min(max, dragValue + distance / 100 * (max - min)))
-  lastDragValue = setValue(dragValue, lastDragValue)
+  lastDragValue = setValue(dragValue, lastDragValue, true)
 }
 
 function wheel(event: WheelEvent) {

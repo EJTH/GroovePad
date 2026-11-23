@@ -39,14 +39,22 @@ test('LFOs, arpeggiators and sequenced loops migrate and display their configura
     const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
     const { default: ControlIdentitySettings } = await server.ssrLoadModule('/src/components/ControlIdentitySettings.vue')
     const { createControl, copyControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { controlTypes } = await server.ssrLoadModule('/src/components/gridControlTypes.ts')
     const { migrateSavedProject, isSavedProject } = await server.ssrLoadModule('/src/project.ts')
     const items = ['lfo', 'arpeggiator', 'sequenced-loop'].map((type, x) => createControl(type, x, 0, type))
-    const layout = { columns: 3, rows: 1, items, connections: [] }
+    assert.equal(controlTypes.find(({ type }) => type === 'sequenced-loop').label, 'Loop sequencer')
+    assert.equal(items[2].label, 'Loop sequencer')
+    items[2].label = 'Sequenced Loop'
+    const customLoop = createControl('custom-loop', 3, 0, 'sequenced-loop')
+    customLoop.label = 'My loop'
+    const layout = { columns: 4, rows: 1, items: [...items, customLoop], connections: [] }
     const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
       id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout,
     }] }
     for (const item of items) delete item.settings.color
     migrateSavedProject(project)
+    assert.equal(items[2].label, 'Loop sequencer')
+    assert.equal(customLoop.label, 'My loop')
     assert.ok(items.every((item) => /^#[0-9a-f]{6}$/i.test(item.settings.color)))
     assert.equal(isSavedProject(project), true)
     for (const [index, item] of items.entries()) {
@@ -63,7 +71,7 @@ test('LFOs, arpeggiators and sequenced loops migrate and display their configura
     migrateSavedProject(project)
     assert.equal(isSavedProject(project), true)
     const restored = JSON.parse(JSON.stringify(project))
-    assert.deepEqual(restored.banks[0].layout.items.map((item) => item.settings.color), ['#ff1234', '#12ff34', '#1234ff'])
+    assert.deepEqual(restored.banks[0].layout.items.slice(0, 3).map((item) => item.settings.color), ['#ff1234', '#12ff34', '#1234ff'])
     const html = await renderToString(createSSRApp({ render: () => h(GrooveGrid,
       { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false }) }))
     assert.match(html, /--lfo-color:#ff1234/)

@@ -18,7 +18,6 @@ let generation = 0
 let unmounted = false
 const appliedParameters = new Map<string, number | string>()
 const hitNotes = new Map<string, { note: number; velocity: number; bend: number }>()
-const liveNotes = new Map<number, HeldNote>()
 
 function incomingNotes() {
   const merged = new Map<number, HeldNote>()
@@ -27,23 +26,6 @@ function incomingNotes() {
     merged.set(note.note, { ...note, count: note.count + (previous?.count ?? 0) })
   }
   return [...merged.values()].sort((a, b) => a.note - b.note)
-}
-
-function syncLiveNotes() {
-  const next = new Map<number, HeldNote>()
-  if (!inputsMuted.value) for (const note of props.notes) next.set(note.note, { ...note })
-  if (localPressed && props.settings.mode === 'trigger') {
-    const previous = next.get(60)
-    next.set(60, { note: 60, velocity: localVelocity, count: (previous?.count ?? 0) + 1 })
-  }
-  for (const [pitch, old] of liveNotes) {
-    for (let count = next.get(pitch)?.count ?? 0; count < old.count; count++) emit('liveNote', pitch, false, old.velocity, old.bend)
-  }
-  for (const [pitch, note] of next) {
-    for (let count = liveNotes.get(pitch)?.count ?? 0; count < note.count; count++) emit('liveNote', pitch, true, note.velocity, note.bend)
-  }
-  liveNotes.clear()
-  for (const [pitch, note] of next) liveNotes.set(pitch, note)
 }
 
 function incomingBend() {
@@ -161,25 +143,28 @@ function handlePadOutput(output: ParameterOutput) {
     if (props.settings.mode === 'toggle') {
       if (output.value > 0) {
         inputsMuted.value = !inputsMuted.value
-        syncLiveNotes()
         syncNote()
       }
       return
     }
-    localPressed = output.value > 0
-    syncLiveNotes()
+    const pressed = output.value > 0
+    if (pressed !== localPressed) emit('liveNote', 60, pressed, localVelocity)
+    localPressed = pressed
     syncNote()
   }
 }
 
 watch(() => props.settings.mode, (mode, previous) => {
   if (previous === undefined || mode === previous) return
+  if (previous === 'trigger' && localPressed) {
+    localPressed = false
+    emit('liveNote', 60, false, localVelocity)
+  }
   inputsMuted.value = false
-  syncLiveNotes()
   syncNote()
 })
 watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
-  () => { syncLiveNotes(); syncNote() }, { immediate: true, flush: 'sync' })
+  syncNote, { immediate: true, flush: 'sync' })
 watch(() => (props.loopNotes ?? []).map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
   syncNote, { flush: 'sync' })
 watch(() => localPressed ? 0 : incomingBend(),
@@ -188,8 +173,7 @@ watch(() => localPressed ? 0 : incomingBend(),
   })
 watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
 onBeforeUnmount(() => {
-  for (const [pitch, note] of liveNotes) for (let count = 0; count < note.count; count++) emit('liveNote', pitch, false, note.velocity, note.bend)
-  liveNotes.clear()
+  if (localPressed && props.settings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
   unmounted = true
   generation++
   instrument?.dispose()

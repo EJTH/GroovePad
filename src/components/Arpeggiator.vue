@@ -3,8 +3,9 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import { noteName, scales } from '../music'
 import { pointerTap } from '../pointerTap'
 import type { ArpeggiatorSettings, HeldNote, ParameterOutput } from '../grid'
+import type { TransportClock } from '../sequencedLoop'
 
-const props = defineProps<{ label: string; settings: ArpeggiatorSettings; bpm: number; notes: HeldNote[] }>()
+const props = defineProps<{ label: string; settings: ArpeggiatorSettings; bpm: number; notes: HeldNote[]; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; toggle: [] }>()
 const tap = pointerTap(() => emit('toggle'))
 const activeNote = ref<number | null>(null)
@@ -12,12 +13,16 @@ let activeSource: number | null = null
 const forwarded = new Map<number, HeldNote>()
 let step = 0
 let interval: number | undefined
+let syncTimer: number | undefined
 let releaseTimer: number | undefined
+let generation = 0
 
-function stepDuration() {
+function stepBeats() {
   const [numerator, denominator] = props.settings.rate.split('/').map(Number)
-  return 60000 / props.bpm * 4 * numerator! / denominator!
+  return 4 * numerator! / denominator!
 }
+
+function stepDuration() { return 60000 / props.bpm * stepBeats() }
 
 function release() {
   if (releaseTimer !== undefined) window.clearTimeout(releaseTimer)
@@ -56,17 +61,41 @@ function tick() {
 }
 
 function stop() {
+  generation++
   if (interval !== undefined) window.clearInterval(interval)
+  if (syncTimer !== undefined) window.clearTimeout(syncTimer)
   interval = undefined
+  syncTimer = undefined
   release()
+}
+
+function scheduleStep(beat: number) {
+  const clock = props.transportClock
+  if (!clock || !props.playing) return
+  const scheduledGeneration = generation
+  const delay = Math.max(0, (beat - clock.position()) * 60000 / props.bpm)
+  syncTimer = window.setTimeout(() => {
+    syncTimer = undefined
+    const now = clock.position()
+    if (now < beat) { scheduleStep(beat); return }
+    tick()
+    if (generation !== scheduledGeneration) return
+    const duration = stepBeats()
+    scheduleStep(beat + (Math.floor((now - beat) / duration) + 1) * duration)
+  }, delay)
 }
 
 function restart() {
   stop()
   if (!props.settings.enabled || !props.notes.length) return
   step = 0
-  tick()
-  interval = window.setInterval(tick, stepDuration())
+  if (props.playing && props.transportClock) {
+    const duration = stepBeats()
+    scheduleStep(Math.ceil(props.transportClock.position() / duration) * duration)
+  } else {
+    tick()
+    interval = window.setInterval(tick, stepDuration())
+  }
 }
 
 function syncForwarded(notes: HeldNote[]) {
@@ -96,11 +125,14 @@ watch(
     () => props.settings.enabled,
     () => props.settings.rate,
     () => props.bpm,
+    () => props.playing,
+    () => props.transportClock,
   ],
-  () => {
+  (current, previous) => {
     if (props.settings.enabled) {
       syncForwarded([])
-      restart()
+      if (!props.notes.length) { stop(); step = 0 }
+      else if (!previous?.[0] || current.slice(1).some((value, index) => value !== previous[index + 1])) restart()
     } else {
       stop()
       syncForwarded(props.notes)

@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import * as Tone from 'tone'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import TempoDialog from './components/TempoDialog.vue'
 import { canResizeGrid, copyControl, type GridLayout } from './grid'
 import { loadDefaultProject } from './defaultProject'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
-import { BankEventBus, Metronome, TransportClock } from './sequencedLoop'
+import { BankEventBus } from './sequencedLoop'
 import { keepScreenAwake } from './screenWakeLock'
+import { useTransport } from './composables/useTransport'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -93,10 +94,7 @@ onMounted(() => {
   stopKeepingScreenAwake = keepScreenAwake(document, navigator)
 })
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
-const playing = ref(false)
-const transportClock = new TransportClock()
 const bankEvents = new BankEventBus()
-const beat = ref(0)
 const menuOpen = ref(false)
 const editing = ref(false)
 const wiring = ref(false)
@@ -104,9 +102,14 @@ watch(editing, (value) => { if (!value) wiring.value = false })
 const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
 const assetsOpen = ref(false)
-const bpmDraft = ref(120)
-const tempoError = ref('')
 const projectError = ref('')
+const { playing, countingIn, triggeredByInput, transportClock, beat, togglePlayback, startFromInput } = useTransport({
+  banks,
+  bpm,
+  editing,
+  projectError,
+  bankEvents,
+})
 const busy = ref(false)
 const projectInput = ref<HTMLInputElement | null>(null)
 const bankInput = ref<HTMLInputElement | null>(null)
@@ -118,26 +121,6 @@ const workspaceRevision = ref(0)
 let longPressTimer: number | undefined
 let longPressPosition: { x: number; y: number } | undefined
 let suppressBankClick = false
-let beatTimer: number | undefined
-let metronomeTimer: number | undefined
-let clickSynth: Tone.Synth | undefined
-let startingTransport = false
-const metronome = new Metronome((beat) => {
-  try {
-    clickSynth ??= new Tone.Synth({
-      oscillator: { type: 'sine' },
-      envelope: { attack: 0.001, decay: 0.025, sustain: 0, release: 0.01 },
-      volume: -14,
-    }).toDestination()
-    clickSynth.triggerAttackRelease(beat % 4 === 0 ? 'C6' : 'G5', 0.03)
-  } catch (error) {
-    projectError.value = `Metronome audio failed: ${error instanceof Error ? error.message : String(error)}`
-    console.error(projectError.value, error)
-  }
-})
-const unsubscribeClicks = bankEvents.subscribe((event) => {
-  if (event.kind === 'count-in-click' && playing.value) metronome.click(event.beat)
-})
 
 function addAsset(asset: SampleAsset) {
   if (!assets.value.some((entry) => entry.source === asset.source)) assets.value.push(asset)
@@ -156,53 +139,6 @@ provide(sampleAssetKey, {
     addAsset(replacement)
   },
 })
-
-function updateBeatTimer() {
-  if (beatTimer !== undefined) window.clearInterval(beatTimer)
-  if (playing.value) {
-    beatTimer = window.setInterval(() => {
-      beat.value = (beat.value + 1) % 4
-    }, 60000 / bpm.value)
-  } else {
-    beatTimer = undefined
-    beat.value = 0
-  }
-}
-
-function tickMetronome() {
-  const enabled = banks.value.some((bank) => bank.layout.items.some((item) =>
-    item.type === 'sequenced-loop' && item.settings.armed && item.settings.metronome))
-  metronome.tick(transportClock.position(), enabled)
-}
-
-async function togglePlayback() {
-  if (startingTransport) return
-  if (playing.value) {
-    playing.value = false
-    transportClock.stop()
-    if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
-    metronomeTimer = undefined
-  } else {
-    startingTransport = true
-    try {
-      await Tone.start()
-    } catch (error) {
-      projectError.value = `Audio could not be started: ${error instanceof Error ? error.message : String(error)}`
-      console.error(projectError.value, error)
-      return
-    } finally {
-      startingTransport = false
-    }
-    metronome.reset()
-    transportClock.start(bpm.value)
-    playing.value = true
-    tickMetronome()
-    metronomeTimer = window.setInterval(tickMetronome, 20)
-  }
-  beat.value = 0
-  updateBeatTimer()
-}
-watch(bpm, () => { transportClock.setTempo(bpm.value); updateBeatTimer() }, { flush: 'sync' })
 
 function nextBankId() {
   const reserved = new Set(banks.value.map((bank) => bank.id))
@@ -380,6 +316,8 @@ function addImportedBank(bank: Bank) {
     if (item.type !== 'sequenced-loop') return item
     const copy = copyControl(item, item.id)
     if (copy.type === 'sequenced-loop') {
+      if (banks.value.some((entry) => entry.layout.items.some((existing) =>
+        existing.type === 'sequenced-loop' && existing.settings.armed))) copy.settings.armed = false
       for (const notes of Object.values(copy.settings.clips)) for (const note of notes) if (note.bankId === bank.id) delete note.bankId
       for (const events of Object.values(copy.settings.automation)) for (const event of events) if (event.bankId === bank.id) delete event.bankId
     }
@@ -392,13 +330,8 @@ function addImportedBank(bank: Bank) {
   importedBanks.value = null
 }
 
-function saveTempo() {
-  if (!Number.isFinite(bpmDraft.value) || bpmDraft.value < 1 || bpmDraft.value > 300) {
-    tempoError.value = 'Tempo must be between 1 and 300 BPM.'
-    return
-  }
-  bpm.value = bpmDraft.value
-  tempoError.value = ''
+function saveTempo(value: number) {
+  bpm.value = value
   projectSettingsOpen.value = false
 }
 
@@ -430,10 +363,6 @@ onUnmounted(() => {
   window.removeEventListener('pagehide', saveLocalProject)
   document.removeEventListener('fullscreenchange', syncFullScreen)
   saveLocalProject()
-  if (beatTimer !== undefined) window.clearInterval(beatTimer)
-  if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
-  unsubscribeClicks()
-  clickSynth?.dispose()
   cancelBankPress()
 })
 </script>
@@ -448,11 +377,11 @@ onUnmounted(() => {
         <button
           class="transport-button"
           type="button"
-          :aria-label="playing ? 'Pause' : 'Play'"
-          :aria-pressed="playing"
+          :aria-label="playing || countingIn ? 'Pause' : 'Play'"
+          :aria-pressed="playing || countingIn"
           @click="togglePlayback"
         >
-          <svg v-if="playing" viewBox="0 0 24 24" aria-hidden="true">
+          <svg v-if="playing || countingIn" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M8 5h3v14H8zM14 5h3v14h-3z" />
           </svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true">
@@ -461,7 +390,7 @@ onUnmounted(() => {
         </button>
 
         <div class="display" aria-label="Tempo and current bank">
-          <div><strong>{{ bpm }}</strong><span>BPM</span></div>
+          <button class="display-tempo" type="button" aria-label="Change tempo" @click="projectSettingsOpen = true"><strong>{{ bpm }}</strong><span>BPM</span></button>
           <div class="display-bank" :title="selectedBank.title">{{ selectedBank.title }}</div>
         </div>
 
@@ -469,7 +398,7 @@ onUnmounted(() => {
           <span
             v-for="index in 4"
             :key="index"
-            :class="{ active: playing && beat === index - 1 }"
+            :class="{ active: (playing || countingIn) && beat === index - 1 }"
           ></span>
         </div>
       </section>
@@ -509,7 +438,7 @@ onUnmounted(() => {
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>
             <button type="button" :disabled="busy" @click="saveProject(); menuOpen = false">Save project</button>
             <button type="button" @click="assetsOpen = true; menuOpen = false">Manage assets</button>
-            <button type="button" @click="bpmDraft = bpm; tempoError = ''; projectSettingsOpen = true; menuOpen = false">Project settings</button>
+            <button type="button" @click="projectSettingsOpen = true; menuOpen = false">Project settings</button>
             <p>View</p>
             <button type="button" :aria-pressed="fullScreen" @click="toggleFullScreen(); menuOpen = false">
               {{ fullScreen ? 'Exit full screen' : 'Enter full screen' }}
@@ -574,6 +503,9 @@ onUnmounted(() => {
         :bpm="bpm"
         :playing="playing"
         :transport-clock="transportClock"
+        :start-on-input="startFromInput"
+        :transport-start-immediate="true"
+        :triggered-by-input="triggeredByInput"
         @close-settings="gridSettingsOpen = false"
       />
     </section>
@@ -604,12 +536,6 @@ onUnmounted(() => {
         </button>
       </div>
     </SettingsDialog>
-    <SettingsDialog v-if="projectSettingsOpen" title="Project settings" @close="projectSettingsOpen = false">
-      <form class="settings-form bank-form" @submit.prevent="saveTempo">
-        <label>Tempo (BPM) <input v-model.number="bpmDraft" type="number" min="1" max="300" step="any" required></label>
-        <p v-if="tempoError" class="grid-message" role="alert">{{ tempoError }}</p>
-        <div class="settings-actions"><button type="submit">Save tempo</button></div>
-      </form>
-    </SettingsDialog>
+    <TempoDialog v-if="projectSettingsOpen" :bpm="bpm" @close="projectSettingsOpen = false" @save="saveTempo" />
   </main>
 </template>

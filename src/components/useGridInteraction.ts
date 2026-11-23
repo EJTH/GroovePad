@@ -137,6 +137,7 @@ export function useGridInteraction(options: {
       if (!isValidPlacement(layout, candidate)) {
         options.message.value = 'The control must fit inside the grid without overlapping another control.'
       } else if (action === 'copy') {
+        if (candidate.type === 'sequenced-loop') candidate.settings.armed = false
         layout.items.push(candidate)
         options.message.value = ''
       } else {

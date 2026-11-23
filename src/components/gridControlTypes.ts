@@ -8,6 +8,6 @@ export const controlTypes: { type: GridItemType; label: string; description: str
   { type: 'mod-wheel', label: 'Mod Wheel', description: 'Control modulation', icon: 'M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M7 11h10 M7 14h10' },
   { type: 'piano-roll', label: 'Piano Roll', description: 'Play notes', icon: 'M3 5h18v14H3z M9 5v14 M15 5v14 M6 5v7 M12 5v7 M18 5v7' },
   { type: 'arpeggiator', label: 'Arpeggiator', description: 'Sequence held notes', icon: 'M4 19h3v-4H4z M10 19h3V9h-3z M16 19h3V4h-3z' },
-  { type: 'sequenced-loop', label: 'Sequenced Loop', description: 'Record and loop notes', icon: 'M4 8a8 8 0 0 1 14-2l2 2 M20 4v4h-4 M20 16a8 8 0 0 1-14 2l-2-2 M4 20v-4h4' },
+  { type: 'sequenced-loop', label: 'Loop sequencer', description: 'Record and loop notes', icon: 'M4 8a8 8 0 0 1 14-2l2 2 M20 4v4h-4 M20 16a8 8 0 0 1-14 2l-2-2 M4 20v-4h4' },
   { type: 'output-selector', label: 'Output Selector', description: 'Route a signal', icon: 'M3 12h7 M10 12l5-6h6 M10 12l5 6h6 M18 3l3 3-3 3 M18 15l3 3-3 3' },
 ]

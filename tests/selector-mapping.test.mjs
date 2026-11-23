@@ -8,6 +8,15 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
 
+async function loadGridPlayback(dependencies) {
+  const source = await readFile(new URL('../src/components/useGridPlayback.ts', import.meta.url), 'utf8')
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+  const module = { exports: {} }
+  vm.runInNewContext(code, { module, exports: module.exports,
+    require: (path) => path === 'vue' ? { ...vue, onBeforeUnmount() {} } : dependencies[path] ?? { default: {} } })
+  return module.exports
+}
+
 test('selector MOD uses the user-selected baseline without accumulating on updates', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -16,6 +25,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
+    dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
     const pad = createControl('pad', 0, 0, 'pad')
     const selector = createControl('selector', 1, 0, 'output-selector')
@@ -117,6 +127,7 @@ test('connection dialog drafts mappings until connect and resets them when ports
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
+    dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
     const knob = createControl('knob', 0, 0, 'knob')
     const lfo = createControl('lfo', 1, 0, 'lfo')

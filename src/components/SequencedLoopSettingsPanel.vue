@@ -25,7 +25,8 @@ const sources = computed(() => {
   const banks = props.banks ?? [{ id: props.bankId ?? '', title: '', layout: props.layout }]
   return banks.flatMap((bank) => bank.layout.items.map((item) => ({
     id: item.id, bankId: bank.id, label: banks.length > 1 ? `${bank.title} / ${item.label}` : item.label,
-    color: 'color' in item.settings ? item.settings.color : undefined, instrument: item.type === 'instrument-pad',
+    color: 'color' in item.settings ? item.settings.color : undefined,
+    instrument: item.type === 'instrument-pad' || item.type === 'piano-roll',
   })))
 })
 const instruments = computed(() => sources.value.filter((source) => source.instrument))
@@ -33,7 +34,7 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
 
 <template>
   <div class="settings-section">
-    <h3>Sequenced Loop Settings</h3>
+    <h3>Loop sequencer settings</h3>
     <div class="loop-settings-row">
       <NumericSetting v-model="draft.settings.barLength" label="Bar length" :min="1" :max="64" />
       <NumericSetting v-model="draft.settings.clipIndex" label="Clip index" :min="0" :max="MAX_LOOP_CLIP_INDEX" />

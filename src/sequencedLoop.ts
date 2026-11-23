@@ -2,7 +2,8 @@ import type { GridItem, LoopAutomation, LoopNote, LoopQuantize } from './grid'
 
 export type BankEvent =
   | { kind: 'live-note'; bankId: string; instrumentId: string; note: number; velocity: number; bend?: number; on: boolean }
-  | { kind: 'live-automation'; bankId: string; sourceId: string; parameter: string; value: number; active?: boolean }
+  | { kind: 'live-automation'; bankId: string; sourceId: string; parameter: string; value: number; active?: boolean; motion?: boolean }
+  | { kind: 'live-automation-end'; bankId: string; sourceId: string; parameter: string }
   | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean }
   | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation }
   | { kind: 'count-in-click'; beat: number }
@@ -74,10 +75,12 @@ type Loop = Extract<GridItem, { type: 'sequenced-loop' }>
 type Voice = { id: number; note: LoopNote; end: number }
 type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; countInUntil?: number; lastCountBeat?: number; voices: Voice[] }
 type Recording = { index: number; start: number; origin: number; quantize: LoopQuantize; note: Omit<LoopNote, 'position' | 'duration'> }
+type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; index: number; event: LoopAutomation; pending?: LoopAutomation }
 
 export class SequencedLoopEngine {
   private states = new Map<string, State>()
   private recordings = new Map<string, Recording[]>()
+  private motions = new Map<string, MotionRecording>()
   private voiceId = 0
   private loops: () => Loop[]
   private position: () => number
@@ -109,14 +112,14 @@ export class SequencedLoopEngine {
     return { at, counting }
   }
 
-  toggle(loop: Loop, now = this.position()) {
+  toggle(loop: Loop, now = this.position(), immediate = false) {
     const state = this.states.get(loop.id)
     if (state?.enabled) {
       this.release(state)
       this.states.delete(loop.id)
       return
     }
-    const { at, counting } = this.startTime(loop, now)
+    const { at, counting } = immediate ? { at: now, counting: false } : this.startTime(loop, now)
     const index = this.clipIndex(loop)
     this.states.set(loop.id, { id: loop.id, enabled: true, index, origin: at,
       last: at - 1e-8, pending: at > now ? { index, at } : undefined,
@@ -212,7 +215,7 @@ export class SequencedLoopEngine {
     state.last = now
   }
 
-  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId) {
+  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId, motion = false) {
     this.tick()
     const now = this.position()
     for (const loop of this.loops()) {
@@ -224,7 +227,38 @@ export class SequencedLoopEngine {
       const length = loop.settings.barLength * 4
       const position = ((now - origin) % length + length) % length
       const events = loop.settings.automation[String(index)] ??= []
-      events.push({ sourceId, parameter, value, position, ...(bankId !== this.bankId ? { bankId } : {}), ...(active === undefined ? {} : { active }) })
+      const event: LoopAutomation = { sourceId, parameter, value, position, ...(bankId !== this.bankId ? { bankId } : {}), ...(active === undefined ? {} : { active }) }
+      const key = JSON.stringify([loop.id, bankId, sourceId, parameter])
+      const previous = this.motions.get(key)
+      const bucket = Math.floor((now - origin) / 0.125)
+      if (motion && active !== false && previous && previous.bucket === bucket && previous.origin === origin &&
+        previous.events === events && events[previous.index] === previous.event) {
+        previous.pending = event
+      } else {
+        if (previous && (active === false || previous.events !== events || previous.origin !== origin)) this.flushMotion(previous)
+        const eventIndex = events.length
+        events.push(event)
+        if (motion && active !== false) this.motions.set(key, { bucket, origin, loop, clip: index, events, index: eventIndex, event: events[eventIndex]! })
+        else this.motions.delete(key)
+      }
+    }
+  }
+
+  private flushMotion(motion: MotionRecording) {
+    const pending = motion.pending
+    if (pending && motion.loop.settings.automation[String(motion.clip)] === motion.events &&
+      motion.events[motion.index] === motion.event &&
+      (pending.value !== motion.event.value || pending.active !== motion.event.active)) {
+      motion.events.push(pending)
+    }
+  }
+
+  endAutomation(sourceId: string, parameter: string, bankId = this.bankId) {
+    for (const loop of this.loops()) {
+      const key = JSON.stringify([loop.id, bankId, sourceId, parameter])
+      const motion = this.motions.get(key)
+      if (motion) this.flushMotion(motion)
+      this.motions.delete(key)
     }
   }
 
@@ -269,6 +303,8 @@ export class SequencedLoopEngine {
       if (loop) for (const recording of pending) this.finish(loop, recording, now)
     }
     this.recordings.clear()
+    for (const motion of this.motions.values()) this.flushMotion(motion)
+    this.motions.clear()
     for (const state of this.states.values()) this.release(state)
   }
 
