@@ -1,8 +1,134 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createServer } from 'vite'
-import { createSSRApp, h, reactive } from 'vue'
+import { createRenderer, createSSRApp, h, reactive, ref } from 'vue'
 import { renderToString } from '@vue/server-renderer'
+
+function testRenderer() {
+  return createRenderer({
+    createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null,
+    insert() {}, remove() {}, patchProp() {},
+  })
+}
+
+test('held repeats follow the transport and division changes and record separate notes', async (t) => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { useNoteRepeat } = await server.ssrLoadModule('/src/components/useNoteRepeat.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.armed = true
+    loop.settings.syncMode = 'immediate'
+    let beat = 0
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {})
+    engine.toggle(loop, 0, true)
+    const division = ref('1/16')
+    const sent = []
+    let repeat
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] })
+    const app = testRenderer().createApp({
+      setup() {
+        repeat = useNoteRepeat({
+          division: () => division.value, bpm: () => 120, playing: () => true,
+          clock: () => ({ repeatPosition: () => beat }),
+          send: (note, on) => { sent.push([beat, on]); engine.record('piano', note, 100, undefined, on) },
+        })
+        return () => h('div')
+      },
+    })
+    app.mount({})
+    repeat.change(60, 60, true)
+    const tick = (position) => { beat = position; t.mock.timers.tick(8) }
+    tick(0.1)
+    repeat.change(60, 60, false)
+    assert.deepEqual(sent, [])
+    repeat.change(60, 60, true)
+    tick(0.21)
+    assert.deepEqual(sent, [])
+    tick(0.25)
+    assert.deepEqual(sent, [[0.25, true]])
+    tick(0.46); tick(0.5)
+    division.value = '1/8'
+    tick(0.91); tick(1)
+    beat = 1.1
+    repeat.change(60, 60, false)
+    const notes = loop.settings.clips[0]
+    assert.equal(notes.length, 3)
+    for (const [index, position] of [0.25, 0.5, 1].entries()) {
+      assert.ok(Math.abs(notes[index].position - position) < 1e-8)
+      assert.ok(Math.abs(notes[index].duration - [0.21, 0.41, 0.1][index]) < 1e-8)
+    }
+    app.unmount()
+  } finally { t.mock.timers.reset(); await server.close() }
+})
+
+test('loop volume scales notes, mute releases them, and automation remains active', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { useGridPlayback } = await server.ssrLoadModule('/src/components/useGridPlayback.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.syncMode = 'immediate'
+    loop.settings.volume = 0.5
+    loop.settings.clips[0].push({ instrumentId: 'piano', note: 60, velocity: 100, position: 0, duration: 2 })
+    loop.settings.automation[0].push({ sourceId: 'knob', parameter: 'value', value: 30, position: 1 })
+    const layout = reactive({ columns: 1, rows: 1, items: [loop], connections: [] })
+    const bus = new BankEventBus()
+    const events = []
+    bus.subscribe((event) => events.push(event))
+    const playing = ref(false)
+    let beat = 0
+    let playback
+    const app = testRenderer().createApp({
+      setup() {
+        playback = useGridPlayback({
+          layout: () => layout, banks: () => undefined, bankId: 'A', bankEvents: bus,
+          clock: { position: () => beat }, playing: () => playing.value, editing: () => false,
+          transportStartImmediate: () => true, triggeredByInput: () => false,
+          startOnInput: () => undefined, signals: new Map(), routeNote() {},
+        })
+        return () => h('div')
+      },
+    })
+    app.mount({})
+    playback.loopPlayState.set('loop', true)
+    playing.value = true
+    assert.equal(events.find((event) => event.kind === 'loop-note' && event.on)?.note.velocity, 50)
+    layout.items[0].settings.muted = true
+    assert.ok(events.some((event) => event.kind === 'loop-note' && !event.on))
+    beat = 1
+    playback.loopEngine.tick()
+    assert.ok(events.some((event) => event.kind === 'loop-automation' && event.event?.value === 30))
+    beat = 4
+    playback.loopEngine.tick()
+    assert.equal(events.filter((event) => event.kind === 'loop-note' && event.on).length, 1)
+    app.unmount()
+  } finally { await server.close() }
+})
+
+test('volume mode presents sliders and mute buttons only for controls with volume', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.volume = 0.4
+    loop.settings.muted = true
+    const instrument = createControl('instrument', 1, 0, 'instrument-pad', '303')
+    const piano = createControl('piano', 2, 0, 'piano-roll')
+    const html = await renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+      layout: { columns: 3, rows: 1, items: [loop, instrument, piano], connections: [] },
+      editing: false, wiring: false, volumeMode: true, settingsOpen: false, bpm: 120,
+    }) }))
+    assert.match(html, /aria-label="Loop sequencer volume"[^>]*aria-valuenow="40"/)
+    assert.match(html, /aria-label="Unmute Loop sequencer"/)
+    assert.match(html, /aria-label="303 Pad volume"/)
+    assert.doesNotMatch(html, /aria-label="Piano volume"/)
+  } finally { await server.close() }
+})
 
 test('loop tiles preview the selected clip and expose separate arm and play controls', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
@@ -147,6 +273,8 @@ test('loop data is copied independently and validates through project save/load'
     const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
     const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.volume = 0.5
+    loop.settings.muted = true
     loop.settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 3.5, duration: 1 })
     const copy = copyControl(loop, 'copy')
     copy.settings.clips[0][0].note = 61
@@ -158,6 +286,8 @@ test('loop data is copied independently and validates through project save/load'
     assert.equal(isSavedProject(project), true)
     const loaded = await loadProjectFromFile(await saveProjectToFile(project))
     assert.deepEqual(loaded.banks[0].layout.items[0].settings.clips, loop.settings.clips)
+    assert.equal(loaded.banks[0].layout.items[0].settings.volume, 0.5)
+    assert.equal(loaded.banks[0].layout.items[0].settings.muted, true)
     loop.settings.clips[0][0].position = 4
     assert.equal(isSavedProject(project), false)
   } finally { await server.close() }
@@ -179,6 +309,26 @@ test('transport beat position remains continuous across tempo changes', async ()
     assert.equal(clock.position(), 3)
     clock.start(60)
     assert.equal(clock.position(), 0)
+  } finally { await server.close() }
+})
+
+test('stopped repeat timing shares a continuous tempo-aware clock', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { TransportClock } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    let now = 0
+    const clock = new TransportClock(() => now)
+    now = 1000
+    assert.equal(clock.repeatPosition(), 2)
+    clock.setTempo(60)
+    now = 2000
+    assert.equal(clock.repeatPosition(), 3)
+    clock.start(60)
+    now = 3000
+    clock.stop()
+    now = 4000
+    assert.equal(clock.position(), 1)
+    assert.equal(clock.repeatPosition(), 2)
   } finally { await server.close() }
 })
 

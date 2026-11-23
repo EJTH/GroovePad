@@ -32,6 +32,16 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
     vm.runInNewContext(code, { module: tapModule, exports: tapModule.exports, HTMLElement: Element })
     dependencies['../pointerTap'] = tapModule.exports
   }
+  if (name === 'MPCPad' || name === 'PianoRoll') {
+    const source = await readFile(new URL('../src/components/useNoteRepeat.ts', import.meta.url), 'utf8')
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const repeatModule = { exports: {} }
+    vm.runInNewContext(code, { module: repeatModule, exports: repeatModule.exports, performance,
+      setInterval: environment.setInterval ?? setInterval, clearInterval: environment.clearInterval ?? clearInterval,
+      setTimeout: environment.setTimeout ?? setTimeout, clearTimeout: environment.clearTimeout ?? clearTimeout,
+      require: (path) => path === 'vue' ? vueMock : dependencies[path] })
+    dependencies['./useNoteRepeat'] = repeatModule.exports
+  }
   if (name === 'GrooveGrid') {
     const sources = [
       ['../grid', '/src/grid.ts'],
@@ -157,6 +167,40 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
   } finally {
     await server.close()
   }
+})
+
+test('note repeat delays pad gates and piano notes until the next transport subdivision', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const expression = await server.ssrLoadModule('/src/expression.ts')
+    const music = await server.ssrLoadModule('/src/music.ts')
+    const dependencies = { '../expression': expression, '../music': music }
+    let beat = 0
+    let nextId = 0
+    const timers = new Map()
+    const environment = {
+      setInterval: (fn) => { timers.set(++nextId, fn); return nextId },
+      clearInterval: (id) => timers.delete(id),
+    }
+    const target = new Element(48)
+    const timing = { repeatDivision: '1/16', bpm: 120, playing: true, transportClock: { repeatPosition: () => beat } }
+    const pad = await setupComponent('MPCPad', { ...timing, label: 'Pad', settings: { color: '#ffffff' } }, dependencies, environment)
+    const piano = await setupComponent('PianoRoll', { ...timing, label: 'Piano', settings: {
+      scale: 'chromatic', rootNote: 'C', octaveTranspose: 0, octaves: 1, numRows: 1,
+      orientation: 'horizontal', style: 'pads', color: '#ffffff',
+    } }, dependencies, environment)
+    pad.api.press(pointer(1, target, 'mouse', 0.5, 0, 25))
+    piano.api.down(pointer(2, target, 'mouse', 0.5, 0, 25), 48)
+    assert.equal(pad.emitted.some((event) => event.parameter === 'gate'), false)
+    assert.equal(piano.emitted.some((event) => event.parameter === 'note'), false)
+    beat = 0.25
+    for (const tick of timers.values()) tick()
+    assert.equal(pad.emitted.find((event) => event.parameter === 'gate')?.value, 1)
+    assert.equal(piano.emitted.find((event) => event.parameter === 'note')?.on, true)
+    pad.api.release(pointer(1, target, 'mouse', 0, 0, 25))
+    piano.api.up(pointer(2, target, 'mouse', 0, 0, 25))
+    pad.dispose(); piano.dispose()
+  } finally { await server.close() }
 })
 
 test('piano keeps three nearby touch contacts and duplicate notes independent', async () => {

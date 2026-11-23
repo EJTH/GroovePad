@@ -30,10 +30,17 @@ export function useGridPlayback(options: {
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
   const loopPlayState = reactive(new Map<string, boolean>())
+  const silentVoices = new Set<number>()
   const loopEngine = new SequencedLoopEngine(
     () => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop'),
     () => options.clock.position(),
-    (id, note, on) => {
+    (id, note, on, loopId) => {
+      const loop = options.layout().items.find((item) => item.id === loopId && item.type === 'sequenced-loop')
+      if (on && loop?.type === 'sequenced-loop') {
+        note = { ...note, velocity: loop.settings.muted ? 0 : note.velocity * (loop.settings.volume ?? 1) }
+        if (note.velocity === 0) { silentVoices.add(id); return }
+      }
+      if (!on && silentVoices.delete(id)) return
       options.bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? options.bankId, voiceId: JSON.stringify([options.bankId, id]), note, on })
     },
     (id, event) => {
@@ -46,6 +53,10 @@ export function useGridPlayback(options: {
     },
     (beat) => options.bankEvents.emit({ kind: 'count-in-click', beat }),
   )
+  watch(() => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop')
+    .map((item) => [item.id, item.settings.muted] as const), (loops) => {
+    for (const [id, muted] of loops) if (muted) loopEngine.silence(id)
+  }, { flush: 'sync' })
 
   function updateLoopStatus() {
     const next = new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>()

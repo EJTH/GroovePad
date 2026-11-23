@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
+import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision } from '../grid'
 import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
 import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
 import { noteName } from '../music'
@@ -17,6 +17,7 @@ import SettingsDialog from './SettingsDialog.vue'
 import OutputSelector from './OutputSelector.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
 import GridControlSettingsDialog from './GridControlSettingsDialog.vue'
+import VolumeControl from './VolumeControl.vue'
 import { controlTypes } from './gridControlTypes'
 import { useGridInteraction } from './useGridInteraction'
 import { BankEventBus, TransportClock } from '../sequencedLoop'
@@ -27,6 +28,8 @@ const props = defineProps<{
   layout: GridLayout
   editing: boolean
   wiring: boolean
+  volumeMode?: boolean
+  repeatDivision?: RepeatDivision
   settingsOpen: boolean
   bpm: number
   playing?: boolean
@@ -88,6 +91,18 @@ void loopPlayState
 void toggleLoop
 void changeLoopIndex
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
+function volumeValue(item: GridItem) {
+  if (item.type === 'instrument-pad') return (item.settings.instrumentParams.volume + 48) / 48
+  if (item.type === 'sequenced-loop') return item.settings.volume ?? 1
+  return 0
+}
+function setVolume(item: GridItem, value: number) {
+  if (item.type === 'instrument-pad') item.settings.instrumentParams.volume = Math.round((-48 + value * 48) * 100) / 100
+  else if (item.type === 'sequenced-loop') item.settings.volume = value
+}
+function toggleMute(item: GridItem) {
+  if (item.type === 'instrument-pad' || item.type === 'sequenced-loop') item.settings.muted = !item.settings.muted
+}
 const sourceItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.sourceId))
 const targetItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.targetId))
 const availableOutputs = computed(() => sourceItem.value && targetItem.value
@@ -568,7 +583,7 @@ function removeItem() {
       <div
         ref="grid"
         class="groove-grid"
-        :class="{ editing }"
+        :class="{ editing: editing || wiring || volumeMode }"
         :style="{ gridTemplateColumns: `repeat(${layout.columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${layout.rows}, minmax(0, 1fr))` }"
       >
         <svg v-if="wiring && (layout.connections.length || wireDrag)" class="wires" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -588,13 +603,13 @@ function removeItem() {
         ><span v-if="editing && !wiring" aria-hidden="true">+</span></button>
 
         <div v-for="{ item, original } in renderedItems" :key="item.id" class="grid-item" :style="itemStyle(original)">
-          <div v-show="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
-            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event, true)" />
+          <div v-show="!editing && !wiring && !volumeMode" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
+            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
             <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :automation-hold="lfoAutomationHold(item.id)" @output="handleOutput(item, $event)" @hold-change="recordToggle(item.id, 'hold', $event)" />
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
-            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event, true)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
+            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
@@ -644,6 +659,10 @@ function removeItem() {
               </div>
             </div>
           </div>
+          <VolumeControl v-if="volumeMode && (original.type === 'instrument-pad' || original.type === 'sequenced-loop')"
+            :label="original.label" :color="original.settings.color" :value="volumeValue(original)" :muted="!!original.settings.muted"
+            @change="setVolume(original, $event)" @mute="toggleMute(original)" />
+          <div v-else-if="volumeMode" class="grid-item-main">{{ original.label }}</div>
           <button
             v-if="editing"
             type="button"

@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
-import type { PadSettings, ParameterOutput } from '../grid'
+import type { PadSettings, ParameterOutput, RepeatDivision } from '../grid'
+import type { TransportClock } from '../sequencedLoop'
+import { useNoteRepeat } from './useNoteRepeat'
 import { ExpressionTracker } from '../expression'
 
-const props = defineProps<{ label: string; settings: PadSettings; wiredActive?: boolean; rotated?: boolean; inputMuted?: boolean }>()
+const props = defineProps<{ label: string; settings: PadSettings; wiredActive?: boolean; rotated?: boolean; inputMuted?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointerId = ref<number | null>(null)
 const keyboardPressed = ref(false)
 const expression = new ExpressionTracker()
+const repeat = useNoteRepeat({
+  division: () => props.repeatDivision, bpm: () => props.bpm ?? 120, playing: () => props.playing,
+  clock: () => props.transportClock, send: (_value: number, on) => emit('output', { parameter: 'gate', value: on ? 1 : 0 }),
+})
+function gate(on: boolean) { repeat.change('gate', 1, on) }
 
 function press(event: PointerEvent) {
   if (event.button !== 0 || pointerId.value !== null || keyboardPressed.value) return
@@ -19,7 +26,7 @@ function press(event: PointerEvent) {
   const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.rotated ? 'x' : 'y', props.rotated)
   emit('output', { parameter: 'velocity', value: velocity })
   emit('output', { parameter: 'pressure', value: velocity })
-  emit('output', { parameter: 'gate', value: 1 })
+  gate(true)
 }
 
 function move(event: PointerEvent) {
@@ -33,7 +40,7 @@ function release(event: PointerEvent) {
   pointerId.value = null
   expression.remove(event.pointerId)
   emit('output', { parameter: 'pressure', value: expression.pressure, active: false })
-  emit('output', { parameter: 'gate', value: 0 })
+  gate(false)
 }
 
 function keyDown(event: KeyboardEvent) {
@@ -43,7 +50,7 @@ function keyDown(event: KeyboardEvent) {
   expression.set('keyboard', 100)
   emit('output', { parameter: 'velocity', value: 100 })
   emit('output', { parameter: 'pressure', value: 100 })
-  emit('output', { parameter: 'gate', value: 1 })
+  gate(true)
 }
 
 function keyUp(event: KeyboardEvent) {
@@ -57,13 +64,13 @@ function releaseKeyboard() {
   keyboardPressed.value = false
   expression.remove('keyboard')
   emit('output', { parameter: 'pressure', value: expression.pressure, active: false })
-  emit('output', { parameter: 'gate', value: 0 })
+  gate(false)
 }
 
 onBeforeUnmount(() => {
   if (pointerId.value !== null || keyboardPressed.value) {
     emit('output', { parameter: 'pressure', value: 0, active: false })
-    emit('output', { parameter: 'gate', value: 0 })
+    gate(false)
   }
 })
 </script>

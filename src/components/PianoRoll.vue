@@ -2,9 +2,11 @@
 import { computed, onBeforeUnmount, reactive, watch } from 'vue'
 import { noteName, scaleNote, scales } from '../music'
 import { ExpressionTracker } from '../expression'
-import type { ParameterOutput, PianoRollSettings } from '../grid'
+import type { ParameterOutput, PianoRollSettings, RepeatDivision } from '../grid'
+import type { TransportClock } from '../sequencedLoop'
+import { useNoteRepeat } from './useNoteRepeat'
 
-const props = defineProps<{ label: string; settings: PianoRollSettings; rotated?: boolean }>()
+const props = defineProps<{ label: string; settings: PianoRollSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointers = reactive(new Map<number, number>())
 const keys = reactive(new Set<number>())
@@ -97,9 +99,16 @@ function bendAt(event: PointerEvent, key: HTMLElement) {
   const neighbor = notes.value[index + (offset < 0 ? -1 : 1)]
   return offset * (neighbor === undefined ? 1 : Math.abs(neighbor - current))
 }
+const repeat = useNoteRepeat({
+  division: () => props.repeatDivision, bpm: () => props.bpm ?? 120, playing: () => props.playing,
+  clock: () => props.transportClock,
+  send: (value: { note: number; velocity: number; bend?: number }, on) => {
+    if (on) emit('output', { parameter: 'velocity', value: value.velocity })
+    emit('output', { parameter: 'note', value: value.note, on, velocity: value.velocity, ...(value.bend === undefined ? {} : { bend: value.bend }) })
+  },
+})
 function send(note: number, on: boolean, velocity = 100, bend?: number) {
-  if (on) emit('output', { parameter: 'velocity', value: velocity })
-  emit('output', { parameter: 'note', value: note, on, velocity, ...(bend === undefined ? {} : { bend }) })
+  repeat.change(note, { note, velocity, bend }, on)
 }
 function sendPressure() {
   emit('output', { parameter: 'pressure', value: expression.pressure, active: expression.active })
@@ -145,7 +154,10 @@ function move(event: PointerEvent) {
   if (currentNote === undefined || (props.settings.style === 'whites-blacks' && !isScaleNote(newNote))) return
   const bend = props.settings.style === 'glide-strip' ? bendAt(event, target) : undefined
   if (currentNote === newNote) {
-    if (bend !== undefined) emit('output', { parameter: 'note', value: newNote, bend })
+    if (bend !== undefined) {
+      repeat.update(newNote, (value) => ({ ...value, bend }))
+      emit('output', { parameter: 'note', value: newNote, bend })
+    }
     return
   }
 

@@ -14,11 +14,12 @@ async function createDialog() {
   const module = { exports: {} }
   vm.runInNewContext(outputText, {
     module, exports: module.exports,
-    require: (path) => path === 'vue' ? vue : { default: {} },
+    require: (path) => path === 'vue' ? vue : path === '../project'
+      ? { MIN_INFO_SCROLL_SPEED: 1, MAX_INFO_SCROLL_SPEED: 100 } : { default: {} },
     performance: { now: () => now },
   })
   const events = []
-  const api = module.exports.default.setup({ bpm: 120 }, { expose() {}, emit: (...args) => events.push(args) })
+  const api = module.exports.default.setup({ bpm: 120, infoText: 'Project notes', infoScrollSpeed: 20 }, { expose() {}, emit: (...args) => events.push(args) })
   return { api, events, tap: (time) => { now = time; api.tapTempo() } }
 }
 
@@ -50,10 +51,20 @@ test('tap tempo rejects overly fast taps and saves only valid precise values', a
   assert.equal(api.draft.value, 300)
   assert.equal(api.error.value, '')
   api.draft.value = 127.35
+  assert.equal(api.infoDraft.value, 'Project notes')
+  api.infoDraft.value = '  Updated   notes  '
+  api.speedDraft.value = 12.5
   api.saveTempo()
-  assert.deepEqual(events, [['save', 127.35]])
+  assert.deepEqual(events, [['save', 127.35, '  Updated   notes  ', 12.5]])
   api.draft.value = 301
   api.saveTempo()
   assert.equal(events.length, 1)
   assert.match(api.error.value, /between 1 and 300/)
+  api.draft.value = 120
+  for (const speed of [0, 101, NaN]) {
+    api.speedDraft.value = speed
+    api.saveTempo()
+    assert.equal(events.length, 1)
+    assert.match(api.error.value, /between 1 and 100/)
+  }
 })

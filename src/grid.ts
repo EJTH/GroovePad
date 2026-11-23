@@ -22,6 +22,7 @@ export interface InstrumentPadSettings {
   color: string
   instrumentType: InstrumentType
   mode: 'trigger' | 'toggle'
+  muted?: boolean
   instrumentParams: Record<string, any>
 }
 
@@ -49,6 +50,8 @@ export interface LfoSettings {
 export interface ModWheelSettings { depth: number; autoCenter: boolean; recordAutomation: boolean }
 export type Scale = 'chromatic' | 'major' | 'minor' | 'dorian' | 'phrygian' | 'lydian' | 'mixolydian' | 'locrian' | 'major-pentatonic' | 'minor-pentatonic' | 'blues'
 export type TempoDivision = '1/1' | '3/4' | '1/2' | '1/4' | '1/8' | '1/16' | '1/32'
+export type ToolMode = 'edit' | 'wire' | 'volume' | 'repeat' | null
+export type RepeatDivision = '1/4' | '1/8' | '1/16' | '1/32'
 export type PianoRollStyle = 'pads' | 'whites-blacks' | 'glide-strip'
 export interface PianoRollSettings { color: string; octaves: number; rootNote: PianoRootNote; octaveTranspose: number; scale: Scale; orientation: 'horizontal' | 'vertical'; numRows: number; style: PianoRollStyle; pressureMode: 'pressure' | 'position' }
 export function validPianoRollNoteRange(scale: unknown, rootNote: unknown, octaves: unknown, octaveTranspose: unknown, numRows: unknown, style: unknown) {
@@ -82,6 +85,8 @@ export type LoopQuantize = 'off' | '1/4' | '1/8' | '1/16' | '1/32'
 export const MAX_LOOP_CLIP_INDEX = 15
 export interface SequencedLoopSettings {
   color: string
+  volume?: number
+  muted?: boolean
   barLength: number
   clipIndex: number
   armed: boolean

@@ -4,9 +4,10 @@ import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import TempoDialog from './components/TempoDialog.vue'
-import { canResizeGrid, copyControl, type GridLayout } from './grid'
+import ToolBar from './components/ToolBar.vue'
+import { canResizeGrid, copyControl, type GridLayout, type ToolMode, type RepeatDivision } from './grid'
 import { loadDefaultProject } from './defaultProject'
-import { isSavedProject, migrateSavedProject, type Bank } from './project'
+import { DEFAULT_INFO_SCROLL_SPEED, isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 import { loadStoredProject, saveStoredProject } from './projectStorage'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
@@ -24,6 +25,22 @@ const banks = ref<Bank[]>([
 
 const selectedBankId = ref('A')
 const bpm = ref(120)
+const infoText = ref('')
+const infoScrollSpeed = ref(DEFAULT_INFO_SCROLL_SPEED)
+const infoScroll = ref<HTMLElement | null>(null)
+const infoScrollWidth = ref(0)
+const infoScrollDuration = computed(() => infoScrollWidth.value ? infoScrollWidth.value / infoScrollSpeed.value : 30)
+watch(infoScroll, (element, _previous, onCleanup) => {
+  if (!element) {
+    infoScrollWidth.value = 0
+    return
+  }
+  const observer = new ResizeObserver(() => {
+    infoScrollWidth.value = element.getBoundingClientRect().width
+  })
+  observer.observe(element)
+  onCleanup(() => observer.disconnect())
+}, { flush: 'post' })
 const assets = ref<SampleAsset[]>([])
 const storageKey = 'groovepad.project.v1'
 const storageError = ref('')
@@ -50,6 +67,8 @@ async function initializeStorage() {
       banks.value = data.banks
       selectedBankId.value = data.selectedBankId
       bpm.value = data.bpm
+      infoText.value = data.infoText ?? ''
+      infoScrollSpeed.value = data.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
       assets.value = data.assets ?? []
       for (const asset of samplesInBanks(data.banks)) addAsset(asset)
     }
@@ -66,7 +85,8 @@ function saveLocalProject() {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = undefined
   if (!storageReady.value || storageBlocked.value) return
-  const project = { version: 1 as const, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }
+  const project = { version: 1 as const, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value,
+    banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }
   saveQueue = saveQueue.then(async () => {
     await saveStoredProject(project)
     storageError.value = ''
@@ -80,7 +100,7 @@ function replaceInvalidProject() {
   saveLocalProject()
 }
 
-watch([banks, selectedBankId, bpm, assets], () => {
+watch([banks, selectedBankId, bpm, infoText, infoScrollSpeed, assets], () => {
   if (!storageReady.value || storageBlocked.value) return
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = window.setTimeout(saveLocalProject, 300)
@@ -112,9 +132,11 @@ onMounted(() => {
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
 const bankEvents = new BankEventBus()
 const menuOpen = ref(false)
-const editing = ref(false)
-const wiring = ref(false)
-watch(editing, (value) => { if (!value) wiring.value = false })
+const tool = ref<ToolMode>(null)
+const repeatDivision = ref<RepeatDivision>('1/16')
+const editing = computed(() => tool.value === 'edit')
+const wiring = computed(() => tool.value === 'wire')
+const toolLabel = computed(() => tool.value ? ({ edit: 'EDIT MODE', wire: 'WIRE MODE', volume: 'VOLUME MODE', repeat: 'NOTE REPEAT' })[tool.value] : '')
 const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
 const assetsOpen = ref(false)
@@ -246,7 +268,8 @@ async function saveProject() {
   projectError.value = ''
   try {
     const blob = await saveProjectToFile(JSON.parse(JSON.stringify({
-      version: 1, bpm: bpm.value, banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value,
+      version: 1, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value,
+      banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value,
     })))
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -277,6 +300,8 @@ async function loadProject(event: Event) {
     banks.value = project.banks
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
+    infoText.value = project.infoText ?? ''
+    infoScrollSpeed.value = project.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
@@ -346,8 +371,10 @@ function addImportedBank(bank: Bank) {
   importedBanks.value = null
 }
 
-function saveTempo(value: number) {
+function saveTempo(value: number, info: string, speed: number) {
   bpm.value = value
+  infoText.value = info
+  infoScrollSpeed.value = speed
   projectSettingsOpen.value = false
 }
 
@@ -362,6 +389,8 @@ async function newProject() {
     banks.value = project.banks
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
+    infoText.value = project.infoText ?? ''
+    infoScrollSpeed.value = project.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
@@ -406,9 +435,14 @@ onUnmounted(() => {
           </svg>
         </button>
 
-        <div class="display" aria-label="Tempo and current bank">
-          <button class="display-tempo" type="button" aria-label="Change tempo" @click="projectSettingsOpen = true"><strong>{{ bpm }}</strong><span>BPM</span></button>
-          <div class="display-bank" :title="selectedBank.title">{{ selectedBank.title }}</div>
+        <div class="display" aria-label="Tempo, project info and current bank">
+          <div class="display-top">
+            <button class="display-tempo" type="button" aria-label="Change tempo" @click="projectSettingsOpen = true"><strong>{{ bpm }}</strong><span>BPM</span></button>
+            <div v-if="infoText" class="display-info" :title="infoText" tabindex="0">
+              <div ref="infoScroll" class="display-info-scroll" :style="{ animationDuration: `${infoScrollDuration}s` }">{{ infoText }}</div>
+            </div>
+          </div>
+          <div class="display-bank" :class="{ 'mode-indicator': tool }" :title="toolLabel || selectedBank.title">{{ toolLabel || selectedBank.title }}</div>
         </div>
 
         <div class="beat-controls">
@@ -429,19 +463,7 @@ onUnmounted(() => {
         </div>
       </section>
       <div class="header-actions">
-        <button v-if="editing" class="icon-button" type="button" :aria-label="wiring ? 'Exit wire mode' : 'Wire controls'"
-          :aria-pressed="wiring" title="Wire controls" @click="wiring = !wiring">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="5" cy="6" r="2" /><circle cx="19" cy="18" r="2" />
-            <path d="M7 6h3c6 0 0 12 6 12h1" />
-          </svg>
-        </button>
-        <button class="icon-button" type="button" :aria-label="editing ? 'Exit edit mode' : 'Edit grid'"
-          :aria-pressed="editing" title="Edit grid" @click="editing = !editing">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 20l4-.8L19 8.2 15.8 5 4.8 16 4 20zM14.5 6.3l3.2 3.2M3 21h18" />
-          </svg>
-        </button>
+        <ToolBar :mode="tool" :division="repeatDivision" @select="tool = $event" @division="repeatDivision = $event" />
       <div class="menu-container" @keydown.esc="menuOpen = false">
         <button
           class="icon-button"
@@ -480,6 +502,7 @@ onUnmounted(() => {
       </div>
       </div>
     </header>
+    <div id="repeat-banner"></div>
     <input ref="projectInput" type="file" accept=".zip,.gpz,application/zip" hidden @change="loadProject">
     <input ref="bankInput" type="file" accept=".json,.zip,.gpz,application/json,application/zip" hidden @change="loadBank">
     <div v-if="storageError" class="storage-error" role="alert">
@@ -525,6 +548,8 @@ onUnmounted(() => {
         :layout="bank.layout"
         :editing="editing && bank.id === selectedBankId"
         :wiring="wiring && bank.id === selectedBankId"
+        :volume-mode="tool === 'volume' && bank.id === selectedBankId"
+        :repeat-division="tool === 'repeat' && bank.id === selectedBankId ? repeatDivision : undefined"
         :settings-open="gridSettingsOpen && bank.id === selectedBankId"
         :bpm="bpm"
         :playing="playing"
@@ -562,6 +587,6 @@ onUnmounted(() => {
         </button>
       </div>
     </SettingsDialog>
-    <TempoDialog v-if="projectSettingsOpen" :bpm="bpm" @close="projectSettingsOpen = false" @save="saveTempo" />
+    <TempoDialog v-if="projectSettingsOpen" :bpm="bpm" :info-text="infoText" :info-scroll-speed="infoScrollSpeed" @close="projectSettingsOpen = false" @save="saveTempo" />
   </main>
 </template>

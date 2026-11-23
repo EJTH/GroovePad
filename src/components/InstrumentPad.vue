@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
-import type { HeldNote, InstrumentPadSettings, ParameterOutput } from '../grid'
+import type { HeldNote, InstrumentPadSettings, ParameterOutput, RepeatDivision } from '../grid'
+import type { TransportClock } from '../sequencedLoop'
 import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type InstrumentInstance } from '../instruments'
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
 const error = ref('')
 const inputsMuted = ref(false)
@@ -34,6 +35,7 @@ function incomingBend() {
 }
 
 function syncParameters() {
+  const params = props.settings.muted ? { ...props.settings.instrumentParams, volume: -Infinity } : props.settings.instrumentParams
   if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
     if (instrument.params.sample !== props.settings.instrumentParams.sample) {
       generation++
@@ -43,20 +45,20 @@ function syncParameters() {
       hitNotes.clear()
       syncNote()
     } else if (instrument instanceof SampleHit) {
-      instrument.updateParameters(props.settings.instrumentParams as SampleHitParams)
+      instrument.updateParameters(params as SampleHitParams)
     } else {
-      instrument.updateParameters(props.settings.instrumentParams as SampleLoopParams)
+      instrument.updateParameters(params as SampleLoopParams)
     }
     return
   }
   if (!(instrument instanceof Bass303) && !(instrument instanceof DrumKit)) return
-  for (const [key, value] of Object.entries(props.settings.instrumentParams)) {
+  for (const [key, value] of Object.entries(params)) {
     const values = typeof value === 'object' && value !== null
       ? Object.entries(value).map(([field, entry]) => [`${key}.${field}`, entry] as const)
       : [[key, value] as const]
     for (const [name, entry] of values) {
       if (appliedParameters.get(name) === entry) continue
-      if (typeof entry === 'number' && Number.isFinite(entry)) instrument.updateParameter(name, entry)
+      if (typeof entry === 'number' && (Number.isFinite(entry) || (name === 'volume' && entry === -Infinity))) instrument.updateParameter(name, entry)
       else if (instrument instanceof DrumKit && name === 'drum' && typeof entry === 'string') instrument.updateParameter(name, entry)
       else continue
       appliedParameters.set(name, entry)
@@ -172,6 +174,7 @@ watch(() => localPressed ? 0 : incomingBend(),
     if (!(instrument instanceof SampleHit) || props.settings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
   })
 watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
+watch(() => props.settings.muted, syncParameters, { flush: 'sync' })
 onBeforeUnmount(() => {
   if (localPressed && props.settings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
   unmounted = true
@@ -183,6 +186,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="instrument-pad">
     <MPCPad :label="label" :settings="settings" :rotated="rotated" :wired-active="!inputsMuted && (notes.length > 0 || (loopNotes?.length ?? 0) > 0)"
+      :repeat-division="settings.mode === 'trigger' ? repeatDivision : undefined" :bpm="bpm" :playing="playing" :transport-clock="transportClock"
       :input-muted="settings.mode === 'toggle' ? inputsMuted : undefined" @output="handlePadOutput" />
     <span v-if="error" class="instrument-error" role="alert">{{ error }}</span>
   </div>

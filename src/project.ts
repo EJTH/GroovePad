@@ -3,6 +3,10 @@ import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, te
 import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
 
+export const DEFAULT_INFO_SCROLL_SPEED = 20
+export const MIN_INFO_SCROLL_SPEED = 1
+export const MAX_INFO_SCROLL_SPEED = 100
+
 export interface Bank {
   id: string
   title: string
@@ -14,6 +18,8 @@ export interface Bank {
 export interface SavedProject {
   version: 1
   bpm: number
+  infoText?: string
+  infoScrollSpeed?: number
   banks: Bank[]
   selectedBankId: string
   assets?: SampleAsset[]
@@ -50,6 +56,7 @@ function validSample(params: Record<string, unknown>, start: unknown, end: unkno
 function validInstrument(settings: Record<string, unknown>): boolean {
   const params = settings.instrumentParams
   if (!color(settings.color) || !oneOf(settings.mode, ['trigger', 'toggle']) ||
+    (settings.muted !== undefined && typeof settings.muted !== 'boolean') ||
     !object(params) || !within(params.volume, -48, 0) || !validEnvelope(params.envelope)) return false
   switch (settings.instrumentType) {
     case 'sample-hit':
@@ -101,7 +108,8 @@ function isItem(value: unknown): value is GridItem {
       oneOf(s.scale, [...scaleChoices])
     case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER) &&
       (s.baseIndex === undefined || integer(s.baseIndex, 0, Number.MAX_SAFE_INTEGER))
-    case 'sequenced-loop': return color(s.color) && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
+    case 'sequenced-loop': return color(s.color) && (s.volume === undefined || within(s.volume, 0, 1)) &&
+      (s.muted === undefined || typeof s.muted === 'boolean') && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
       typeof s.armed === 'boolean' && typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
       oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
       Array.isArray(s.clips[String(s.clipIndex)]) &&
@@ -270,7 +278,9 @@ export function migrateSavedProject(value: unknown): void {
 
 export function isSavedProject(value: unknown): value is SavedProject {
   if (!object(value) || value.version !== 1 || typeof value.selectedBankId !== 'string' ||
-    !within(value.bpm, 1, 300) || !Array.isArray(value.banks) || !value.banks.length) return false
+    !within(value.bpm, 1, 300) || (value.infoText !== undefined && typeof value.infoText !== 'string') ||
+    (value.infoScrollSpeed !== undefined && !within(value.infoScrollSpeed, MIN_INFO_SCROLL_SPEED, MAX_INFO_SCROLL_SPEED)) ||
+    !Array.isArray(value.banks) || !value.banks.length) return false
   if (value.assets !== undefined && (!Array.isArray(value.assets) ||
     !value.assets.every((asset: unknown) => object(asset) && typeof asset.name === 'string' &&
       typeof asset.source === 'string' && /^data:[^,]*;base64,/.test(asset.source)) ||

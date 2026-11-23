@@ -304,7 +304,7 @@ test('project archives preserve unused assets and reject invalid asset lists', a
     const asset = { name: 'unused.wav', source: 'data:audio/wav;base64,YQ==' }
     const hit = createControl('hit', 0, 0, 'instrument-pad', 'sample-hit')
     Object.assign(hit.settings.instrumentParams, { sample: asset.source, sampleName: asset.name })
-    const project = { version: 1, bpm: 120, selectedBankId: 'A', assets: [asset, { name: 'unused.wav', source: 'data:audio/webm;codecs=opus;base64,Yg==' }],
+    const project = { version: 1, bpm: 120, infoText: '  Archive   project info  ', infoScrollSpeed: 12.5, selectedBankId: 'A', assets: [asset, { name: 'unused.wav', source: 'data:audio/webm;codecs=opus;base64,Yg==' }],
       banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
         layout: { columns: 4, rows: 4, items: [hit], connections: [] } }] }
     const archive = await saveProjectToFile(project)
@@ -320,9 +320,17 @@ test('project archives preserve unused assets and reject invalid asset lists', a
       await reader.close()
     }
     const loaded = await loadProjectFromFile(archive)
+    assert.equal(loaded.infoText, project.infoText)
+    assert.equal(loaded.infoScrollSpeed, project.infoScrollSpeed)
     assert.deepEqual(loaded.assets, project.assets)
     assert.equal(loaded.banks[0].layout.items[0].settings.instrumentParams.sample, asset.source)
     assert.equal(isSavedProject({ ...project, assets: undefined }), true)
+    assert.equal(isSavedProject({ ...project, infoText: undefined }), true)
+    assert.equal(isSavedProject({ ...project, infoText: 123 }), false)
+    assert.equal(isSavedProject({ ...project, infoScrollSpeed: undefined }), true)
+    for (const speed of [0, 101, NaN, '20']) {
+      assert.equal(isSavedProject({ ...project, infoScrollSpeed: speed }), false)
+    }
     project.assets.push(asset)
     assert.equal(isSavedProject(project), false)
     project.assets = [{ name: 'invalid', source: 'https://example.com/audio.wav' }]

@@ -25,13 +25,19 @@ export class TransportClock {
   private started = 0
   private running = false
   private tempo = 120
+  private stoppedBeat = 0
+  private stoppedStarted: number
 
   private now: () => number
 
-  constructor(now: () => number = () => performance.now()) { this.now = now }
+  constructor(now: () => number = () => performance.now()) { this.now = now; this.stoppedStarted = now() }
 
   position() {
     return this.beat + (this.running ? (this.now() - this.started) * this.tempo / 60000 : 0)
+  }
+
+  repeatPosition() {
+    return this.running ? this.position() : this.stoppedBeat + (this.now() - this.stoppedStarted) * this.tempo / 60000
   }
 
   start(tempo: number) {
@@ -42,6 +48,8 @@ export class TransportClock {
   }
 
   setTempo(tempo: number) {
+    this.stoppedBeat = this.repeatPosition()
+    this.stoppedStarted = this.now()
     this.beat = this.position()
     this.started = this.now()
     this.tempo = tempo
@@ -49,6 +57,8 @@ export class TransportClock {
 
   stop() {
     this.beat = this.position()
+    this.stoppedBeat = this.beat
+    this.stoppedStarted = this.now()
     this.running = false
   }
 }
@@ -85,7 +95,7 @@ export class SequencedLoopEngine {
   private voiceId = 0
   private loops: () => Loop[]
   private position: () => number
-  private send: (id: number, note: LoopNote, on: boolean) => void
+  private send: (id: number, note: LoopNote, on: boolean, loopId: string) => void
   private sendAutomation: (loopId: string, event?: LoopAutomation) => void
   private bankId: string
   private clipIndex: (loop: Loop) => number
@@ -94,7 +104,7 @@ export class SequencedLoopEngine {
   constructor(
     loops: () => Loop[],
     position: () => number,
-    send: (id: number, note: LoopNote, on: boolean) => void,
+    send: (id: number, note: LoopNote, on: boolean, loopId: string) => void,
     sendAutomation: (loopId: string, event?: LoopAutomation) => void = () => {},
     bankId = '',
     clipIndex: (loop: Loop) => number = (loop) => loop.settings.clipIndex,
@@ -136,9 +146,15 @@ export class SequencedLoopEngine {
   }
 
   private release(state: State) {
-    for (const voice of state.voices) this.send(voice.id, voice.note, false)
-    state.voices = []
+    this.silence(state.id)
     this.sendAutomation(state.id)
+  }
+
+  silence(id: string) {
+    const state = this.states.get(id)
+    if (!state) return
+    for (const voice of state.voices) this.send(voice.id, voice.note, false, state.id)
+    state.voices = []
   }
 
   tick() {
@@ -220,7 +236,7 @@ export class SequencedLoopEngine {
     const releaseUntil = (at: number) => {
       let active = 0
       for (const voice of state.voices) {
-        if (voice.end <= at) this.send(voice.id, voice.note, false)
+        if (voice.end <= at) this.send(voice.id, voice.note, false, state.id)
         else state.voices[active++] = voice
       }
       state.voices.length = active
@@ -230,7 +246,7 @@ export class SequencedLoopEngine {
       if ('automation' in event) { this.sendAutomation(state.id, event.automation); continue }
       const voice = { id: ++this.voiceId, note: event.note, end: event.at + event.note.duration }
       state.voices.push(voice)
-      this.send(voice.id, voice.note, true)
+      this.send(voice.id, voice.note, true, state.id)
     }
 
     releaseUntil(now)

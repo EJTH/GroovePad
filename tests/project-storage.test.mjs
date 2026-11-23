@@ -25,7 +25,7 @@ test('IndexedDB stores sample blobs and restores projects and shared samples', a
     hit.settings.instrumentParams.sample = source
     hit.settings.instrumentParams.sampleName = 'beat.wav'
     const project = {
-      version: 1, bpm: 120, selectedBankId: 'A', assets: [{ name: 'beat.wav', source }],
+      version: 1, bpm: 120, infoText: '  Local   project info  ', infoScrollSpeed: 12.5, selectedBankId: 'A', assets: [{ name: 'beat.wav', source }],
       banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
         layout: { columns: 4, rows: 4, items: [hit], connections: [] } }],
     }
@@ -53,6 +53,8 @@ test('IndexedDB stores sample blobs and restores projects and shared samples', a
     }] })
     const updated = await loadStoredProject()
     assert.equal(updated.bpm, 135)
+    assert.equal(updated.infoText, '  Local   project info  ')
+    assert.equal(updated.infoScrollSpeed, 12.5)
     assert.deepEqual(updated.assets, [])
   } finally {
     await server.close()
