@@ -5,7 +5,7 @@ import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import { canResizeGrid, copyControl, type GridLayout } from './grid'
-import { createDefaultProject } from './defaultProject'
+import { loadDefaultProject } from './defaultProject'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
@@ -402,17 +402,27 @@ function saveTempo() {
   projectSettingsOpen.value = false
 }
 
-function newProject() {
+async function newProject() {
   if (!window.confirm('Start a new project? The current project will be replaced.')) return
-  gridSettingsOpen.value = false
-  bankDraft.value = null
-  banks.value = createDefaultProject()
-  selectedBankId.value = 'B'
-  bpm.value = 120
-  assets.value = []
-  workspaceRevision.value++
-  storageBlocked = false
-  saveLocalProject()
+  busy.value = true
+  projectError.value = ''
+  try {
+    const project = await loadDefaultProject()
+    gridSettingsOpen.value = false
+    bankDraft.value = null
+    banks.value = project.banks
+    selectedBankId.value = project.selectedBankId
+    bpm.value = project.bpm
+    assets.value = project.assets ?? []
+    for (const asset of samplesInBanks(project.banks)) addAsset(asset)
+    workspaceRevision.value++
+    storageBlocked = false
+    saveLocalProject()
+  } catch (error) {
+    projectError.value = `Default project could not be loaded: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    busy.value = false
+  }
 }
 
 onUnmounted(() => {

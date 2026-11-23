@@ -1,19 +1,23 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { createServer } from 'vite'
 
-test('default project places both drum kits and wires the bassline bank', async () => {
+test('default project loads the bundled ZIP template', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  const originalFetch = globalThis.fetch
   try {
-    const { createDefaultProject } = await server.ssrLoadModule('/src/defaultProject.ts')
+    const { loadDefaultProject } = await server.ssrLoadModule('/src/defaultProject.ts')
     const { effectiveControls } = await server.ssrLoadModule('/src/modulation.ts')
     const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
-    const banks = createDefaultProject()
+    globalThis.fetch = async () => new Response(await readFile(new URL('../templates/default.zip', import.meta.url)))
+    const project = await loadDefaultProject()
+    const banks = project.banks
     const [beat, bassline] = banks
 
     assert.deepEqual(banks.map((bank) => bank.title), ['Beat', 'Bassline'])
     assert.equal(isSavedProject({
-      version: 1, bpm: 120, selectedBankId: 'B', banks,
+      version: project.version, bpm: project.bpm, selectedBankId: project.selectedBankId, banks,
     }), true)
 
     const drums = beat.layout.items.filter((item) => item.type === 'instrument-pad')
@@ -44,6 +48,7 @@ test('default project places both drum kits and wires the bassline bank', async 
     assert.ok(bass.settings.instrumentParams.filterFrequency > 2500)
     assert.ok(Math.abs(bass.settings.instrumentParams.resonance - 11.8) < 0.001)
   } finally {
+    globalThis.fetch = originalFetch
     await server.close()
   }
 })
