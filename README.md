@@ -6,6 +6,10 @@ A mobile-first groovebox built with Vue 3, TypeScript, and Vite.
 
 Run `npm run dev` to start the development server. Run `npm run build` to type-check and create a production build.
 
+## GitHub Pages
+
+Set the repository's **Settings > Pages > Build and deployment > Source** to **GitHub Actions**. The build workflow tests and builds the site on every push and pull request, and deploys `dist` to Pages after successful pushes to `main`. It can also be run manually on `main`. The Pages build uses relative asset paths so it works under a repository subpath.
+
 ## Current functionality
 
 The header contains the transport controls, tempo and current bank display, and beat indicator. Below it are the bank selector and editable grid. Each bank has its own layout, initially 4 by 4, with up to 8 columns and 10 rows. Enable edit mode with the header button, then tap a **+** cell, choose a control from the icon grid, and save its settings. Expand the name and size summary in control settings to edit its type, name, color and layout. Instrument pads have a separate icon grid for choosing their instrument type. Tap an existing control to edit or remove it. Drag a control to an empty cell to move or copy it, or onto another control to swap them when both fit. Copies do not include wires. Drag a corner to resize. Turn off edit mode to play. **Grid settings** changes the number of columns and rows; controls cannot overlap or extend outside the grid.
