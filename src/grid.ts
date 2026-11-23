@@ -2,7 +2,7 @@ import type { InstrumentType } from './instruments/types'
 import { InstrumentFactory } from './instruments'
 import { PIANO_ROOT_NOTES, scaleNote, scales, type PianoRootNote } from './music'
 
-export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad' | 'output-selector'
+export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad' | 'output-selector' | 'sequenced-loop'
 
 interface GridItemBase {
   id: string
@@ -33,9 +33,11 @@ export interface KnobSettings {
   value: number
   step: number
   unit: string
+  recordAutomation: boolean
 }
 
 export interface LfoSettings {
+  color: string
   waveform: 'sine' | 'saw' | 'square' | 'random'
   rateMode: 'free' | 'sync'
   rate: number
@@ -44,7 +46,7 @@ export interface LfoSettings {
   smoothness: number
 }
 
-export interface ModWheelSettings { depth: number; autoCenter: boolean }
+export interface ModWheelSettings { depth: number; autoCenter: boolean; recordAutomation: boolean }
 export type Scale = 'chromatic' | 'major' | 'minor' | 'dorian' | 'phrygian' | 'lydian' | 'mixolydian' | 'locrian' | 'major-pentatonic' | 'minor-pentatonic' | 'blues'
 export type TempoDivision = '1/1' | '3/4' | '1/2' | '1/4' | '1/8' | '1/16' | '1/32'
 export type PianoRollStyle = 'pads' | 'whites-blacks' | 'glide-strip'
@@ -71,9 +73,24 @@ export function validPianoRollSettings(settings: PianoRollSettings) {
     ['pads', 'whites-blacks', 'glide-strip'].includes(settings.style) &&
     validPianoRollNoteRange(settings.scale, settings.rootNote, settings.octaves, settings.octaveTranspose, settings.numRows, settings.style)
 }
-export interface ArpeggiatorSettings { enabled: boolean; style: 'up' | 'down' | 'up-down' | 'random'; rate: TempoDivision; distance: number; steps: number; gate: number; scale: Scale }
+export interface ArpeggiatorSettings { color: string; enabled: boolean; style: 'up' | 'down' | 'up-down' | 'random'; rate: TempoDivision; distance: number; steps: number; gate: number; scale: Scale }
 export interface HeldNote { note: number; velocity: number; count: number; bend?: number }
 export interface OutputSelectorSettings { index: number; baseIndex?: number }
+export interface LoopNote { bankId?: string; instrumentId: string; note: number; velocity: number; bend?: number; position: number; duration: number }
+export interface LoopAutomation { bankId?: string; sourceId: string; parameter: string; value: number; active?: boolean; position: number }
+export type LoopQuantize = 'off' | '1/4' | '1/8' | '1/16' | '1/32'
+export const MAX_LOOP_CLIP_INDEX = 15
+export interface SequencedLoopSettings {
+  color: string
+  barLength: number
+  clipIndex: number
+  armed: boolean
+  syncMode: 'immediate' | 'sync'
+  quantize: LoopQuantize
+  recordScope: 'bank' | 'all'
+  clips: Record<string, LoopNote[]>
+  automation: Record<string, LoopAutomation[]>
+}
 
 export type GridItem = GridItemBase & (
   | { type: 'pad'; settings: PadSettings }
@@ -84,6 +101,7 @@ export type GridItem = GridItemBase & (
   | { type: 'arpeggiator'; settings: ArpeggiatorSettings }
   | { type: 'instrument-pad'; settings: InstrumentPadSettings }
   | { type: 'output-selector'; settings: OutputSelectorSettings }
+  | { type: 'sequenced-loop'; settings: SequencedLoopSettings }
 )
 
 export interface ParameterOutput {
@@ -94,20 +112,23 @@ export interface ParameterOutput {
   on?: boolean
   velocity?: number
   bend?: number
+  user?: boolean
 }
 
-export const DEFAULT_PIANO_COLOR = '#b8d986'
+export const DEFAULT_GRID_COLOR = '#b8d986'
+export const DEFAULT_PIANO_COLOR = DEFAULT_GRID_COLOR
 
 export function createControl(id: string, x: number, y: number, type: GridItemType, instrumentType?: InstrumentType): GridItem {
   const base = { id, x, y, width: 1, height: 1, orientation: 'horizontal' as const }
   switch (type) {
     case 'pad': return { ...base, type, label: 'Pad', settings: { color: '#b8d986' } }
-    case 'knob': return { ...base, type, label: 'Knob', settings: { color: '#83c9bb', min: 0, max: 127, defaultValue: 64, value: 64, step: 1, unit: '' } }
-    case 'lfo': return { ...base, type, label: 'LFO', settings: { waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } }
-    case 'mod-wheel': return { ...base, type, label: 'Mod Wheel', settings: { depth: 1, autoCenter: false } }
+    case 'knob': return { ...base, type, label: 'Knob', settings: { color: '#83c9bb', min: 0, max: 127, defaultValue: 64, value: 64, step: 1, unit: '', recordAutomation: true } }
+    case 'lfo': return { ...base, type, label: 'LFO', settings: { color: DEFAULT_GRID_COLOR, waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } }
+    case 'mod-wheel': return { ...base, type, label: 'Mod Wheel', settings: { depth: 1, autoCenter: false, recordAutomation: true } }
     case 'piano-roll': return { ...base, type, label: 'Piano', settings: { color: DEFAULT_PIANO_COLOR, octaves: 1, rootNote: 'C', octaveTranspose: 0, scale: 'chromatic', orientation: 'horizontal', numRows: 1, style: 'pads', pressureMode: 'position' } }
-    case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 0, gate: 0.5, scale: 'chromatic' } }
+    case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { color: DEFAULT_GRID_COLOR, enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 0, gate: 0.5, scale: 'chromatic' } }
     case 'output-selector': return { ...base, type, label: 'Output Selector', settings: { index: 0 } }
+    case 'sequenced-loop': return { ...base, type, label: 'Sequenced Loop', settings: { color: DEFAULT_GRID_COLOR, barLength: 1, clipIndex: 0, armed: false, syncMode: 'sync', quantize: 'off', recordScope: 'bank', clips: { 0: [] }, automation: { 0: [] } } }
     case 'instrument-pad':
       const iType = instrumentType || 'sample-hit'
       return {
@@ -187,6 +208,9 @@ export function copyControl(item: GridItem, id: string): GridItem {
     case 'piano-roll': return { ...item, id, settings: { ...item.settings } }
     case 'arpeggiator': return { ...item, id, settings: { ...item.settings } }
     case 'output-selector': return { ...item, id, settings: { ...item.settings } }
+    case 'sequenced-loop': return { ...item, id, settings: { ...item.settings,
+      clips: Object.fromEntries(Object.entries(item.settings.clips).map(([index, notes]) => [index, notes.map((note) => ({ ...note }))])),
+      automation: Object.fromEntries(Object.entries(item.settings.automation).map(([index, events]) => [index, events.map((event) => ({ ...event }))])) } }
     case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
   }
 }

@@ -3,10 +3,11 @@ import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import { canResizeGrid, createControl, type GridLayout } from './grid'
+import { canResizeGrid, copyControl, createControl, type GridLayout } from './grid'
 import { isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
 import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset } from './sampleAssets'
+import { BankEventBus, TransportClock } from './sequencedLoop'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -144,6 +145,8 @@ onMounted(() => {
 })
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
 const playing = ref(false)
+const transportClock = new TransportClock()
+const bankEvents = new BankEventBus()
 const beat = ref(0)
 const menuOpen = ref(false)
 const editing = ref(false)
@@ -200,14 +203,21 @@ function updateBeatTimer() {
 
 function togglePlayback() {
   playing.value = !playing.value
+  if (playing.value) transportClock.start(bpm.value)
+  else transportClock.stop()
   beat.value = 0
   updateBeatTimer()
 }
-watch(bpm, updateBeatTimer)
+watch(bpm, () => { transportClock.setTempo(bpm.value); updateBeatTimer() }, { flush: 'sync' })
 
 function nextBankId() {
+  const reserved = new Set(banks.value.map((bank) => bank.id))
+  for (const bank of banks.value) for (const item of bank.layout.items) if (item.type === 'sequenced-loop') {
+    for (const notes of Object.values(item.settings.clips)) for (const note of notes) if (note.bankId) reserved.add(note.bankId)
+    for (const events of Object.values(item.settings.automation)) for (const event of events) if (event.bankId) reserved.add(event.bankId)
+  }
   let number = 1
-  while (banks.value.some((bank) => bank.id === `bank-${number}`)) number++
+  while (reserved.has(`bank-${number}`)) number++
   return `bank-${number}`
 }
 
@@ -364,7 +374,24 @@ async function loadBank(event: Event) {
 }
 
 function addImportedBank(bank: Bank) {
-  const imported = { ...bank, id: nextBankId() }
+  const hasExternalTargets = bank.layout.items.some((item) => item.type === 'sequenced-loop' &&
+    (Object.values(item.settings.clips).some((notes) => notes.some((note) => note.bankId && note.bankId !== bank.id)) ||
+     Object.values(item.settings.automation).some((events) => events.some((event) => event.bankId && event.bankId !== bank.id))))
+  if (hasExternalTargets) {
+    importedBanks.value = null
+    projectError.value = 'This bank contains loops targeting other banks. Load the complete project to preserve those targets.'
+    return
+  }
+  const items = bank.layout.items.map((item) => {
+    if (item.type !== 'sequenced-loop') return item
+    const copy = copyControl(item, item.id)
+    if (copy.type === 'sequenced-loop') {
+      for (const notes of Object.values(copy.settings.clips)) for (const note of notes) if (note.bankId === bank.id) delete note.bankId
+      for (const events of Object.values(copy.settings.automation)) for (const event of events) if (event.bankId === bank.id) delete event.bankId
+    }
+    return copy
+  })
+  const imported = { ...bank, id: nextBankId(), layout: { ...bank.layout, items } }
   banks.value.push(imported)
   for (const asset of samplesInBanks([imported])) addAsset(asset)
   selectedBankId.value = imported.id
@@ -526,12 +553,19 @@ onUnmounted(() => {
 
     <section class="workspace" :aria-label="`${selectedBank.title} workspace`">
       <GrooveGrid
-        :key="`${workspaceRevision}:${selectedBank.id}`"
-        :layout="selectedBank.layout"
-        :editing="editing"
-        :wiring="wiring"
-        :settings-open="gridSettingsOpen"
+        v-for="bank in banks"
+        v-show="bank.id === selectedBankId"
+        :key="`${workspaceRevision}:${bank.id}`"
+        :bank-id="bank.id"
+        :banks="banks"
+        :bank-events="bankEvents"
+        :layout="bank.layout"
+        :editing="editing && bank.id === selectedBankId"
+        :wiring="wiring && bank.id === selectedBankId"
+        :settings-open="gridSettingsOpen && bank.id === selectedBankId"
         :bpm="bpm"
+        :playing="playing"
+        :transport-clock="transportClock"
         @close-settings="gridSettingsOpen = false"
       />
     </section>

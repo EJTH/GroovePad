@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { KnobSettings, ParameterOutput } from '../grid'
 
 const props = defineProps<{ label: string; settings: KnobSettings; emitInitial?: boolean; rotated?: boolean }>()
-const emit = defineEmits<{ output: [output: ParameterOutput] }>()
+const emit = defineEmits<{ output: [output: ParameterOutput]; activity: [active: boolean] }>()
 const pointerId = ref<number | null>(null)
 let lastY = 0
 let lastX = 0
@@ -18,7 +18,7 @@ function setValue(value: number, previous = props.settings.value): number {
   const { min, max, step } = props.settings
   const snapped = min + Math.round((value - min) / step) * step
   const next = Number(Math.max(min, Math.min(max, snapped)).toPrecision(12))
-  if (next !== previous) emit('output', { parameter: 'value', value: next, delta: next - previous })
+  if (next !== previous) emit('output', { parameter: 'value', value: next, delta: next - previous, user: true })
   return next
 }
 
@@ -29,6 +29,7 @@ function start(event: PointerEvent) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
+  emit('activity', true)
   lastX = event.clientX
   lastY = event.clientY
   dragValue = props.settings.value
@@ -54,7 +55,7 @@ function wheel(event: WheelEvent) {
 }
 
 function end(event: PointerEvent) {
-  if (pointerId.value === event.pointerId) pointerId.value = null
+  if (pointerId.value === event.pointerId) { pointerId.value = null; emit('activity', false) }
 }
 
 function keyDown(event: KeyboardEvent) {

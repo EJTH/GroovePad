@@ -119,7 +119,7 @@ onBeforeUnmount(() => { stop(); syncForwarded([]) })
 </script>
 
 <template>
-  <button type="button" class="arp" :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`"
+  <button type="button" class="arp" :style="{ '--arp-color': settings.color }" :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`"
     :aria-pressed="settings.enabled" @pointerdown="tap.down" @pointerup="tap.up"
     @pointercancel="tap.cancel" @lostpointercapture="tap.cancel" @click="tap.click">
     <strong>{{ label }}</strong>
@@ -128,7 +128,7 @@ onBeforeUnmount(() => { stop(); syncForwarded([]) })
 </template>
 
 <style scoped>
-.arp { width: 100%; height: 100%; padding: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; overflow: hidden; border: 1px solid #69775b; border-radius: 4px; background: #30392b; color: #e2edd9; touch-action: none; }
-.arp[aria-pressed="false"] { background: #252623; color: #a7a89f; }
+.arp { width: 100%; height: 100%; padding: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; overflow: hidden; border: 1px solid var(--arp-color); border-radius: 4px; background: color-mix(in srgb, var(--arp-color) 20%, #171816); color: #e2edd9; touch-action: none; }
+.arp[aria-pressed="false"] { background: color-mix(in srgb, var(--arp-color) 7%, #171816); color: #a7a89f; }
 .arp strong, .arp span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 </style>

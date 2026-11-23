@@ -6,8 +6,8 @@ import { Bass303, Drum808, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; rotated?: boolean }>()
-const emit = defineEmits<{ output: [output: ParameterOutput] }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean }>()
+const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
 const error = ref('')
 const inputsMuted = ref(false)
 let instrument: InstrumentInstance | undefined
@@ -18,9 +18,32 @@ let generation = 0
 let unmounted = false
 const appliedParameters = new Map<string, number | string>()
 const hitNotes = new Map<string, { note: number; velocity: number; bend: number }>()
+const liveNotes = new Map<number, HeldNote>()
 
 function incomingNotes() {
-  return inputsMuted.value ? [] : props.notes
+  const merged = new Map<number, HeldNote>()
+  for (const note of inputsMuted.value ? [] : [...props.notes, ...(props.loopNotes ?? [])]) {
+    const previous = merged.get(note.note)
+    merged.set(note.note, { ...note, count: note.count + (previous?.count ?? 0) })
+  }
+  return [...merged.values()].sort((a, b) => a.note - b.note)
+}
+
+function syncLiveNotes() {
+  const next = new Map<number, HeldNote>()
+  if (!inputsMuted.value) for (const note of props.notes) next.set(note.note, { ...note })
+  if (localPressed && props.settings.mode === 'trigger') {
+    const previous = next.get(60)
+    next.set(60, { note: 60, velocity: localVelocity, count: (previous?.count ?? 0) + 1 })
+  }
+  for (const [pitch, old] of liveNotes) {
+    for (let count = next.get(pitch)?.count ?? 0; count < old.count; count++) emit('liveNote', pitch, false, old.velocity, old.bend)
+  }
+  for (const [pitch, note] of next) {
+    for (let count = liveNotes.get(pitch)?.count ?? 0; count < note.count; count++) emit('liveNote', pitch, true, note.velocity, note.bend)
+  }
+  liveNotes.clear()
+  for (const [pitch, note] of next) liveNotes.set(pitch, note)
 }
 
 function incomingBend() {
@@ -138,11 +161,13 @@ function handlePadOutput(output: ParameterOutput) {
     if (props.settings.mode === 'toggle') {
       if (output.value > 0) {
         inputsMuted.value = !inputsMuted.value
+        syncLiveNotes()
         syncNote()
       }
       return
     }
     localPressed = output.value > 0
+    syncLiveNotes()
     syncNote()
   }
 }
@@ -150,16 +175,21 @@ function handlePadOutput(output: ParameterOutput) {
 watch(() => props.settings.mode, (mode, previous) => {
   if (previous === undefined || mode === previous) return
   inputsMuted.value = false
+  syncLiveNotes()
   syncNote()
 })
 watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
-  syncNote, { immediate: true, flush: 'sync' })
+  () => { syncLiveNotes(); syncNote() }, { immediate: true, flush: 'sync' })
+watch(() => (props.loopNotes ?? []).map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
+  syncNote, { flush: 'sync' })
 watch(() => localPressed ? 0 : incomingBend(),
   (bend) => {
     if (!(instrument instanceof SampleHit) || props.settings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
   })
 watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
 onBeforeUnmount(() => {
+  for (const [pitch, note] of liveNotes) for (let count = 0; count < note.count; count++) emit('liveNote', pitch, false, note.velocity, note.bend)
+  liveNotes.clear()
   unmounted = true
   generation++
   instrument?.dispose()
@@ -168,7 +198,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="instrument-pad">
-    <MPCPad :label="label" :settings="settings" :rotated="rotated" :wired-active="!inputsMuted && notes.length > 0"
+    <MPCPad :label="label" :settings="settings" :rotated="rotated" :wired-active="!inputsMuted && (notes.length > 0 || (loopNotes?.length ?? 0) > 0)"
       :input-muted="settings.mode === 'toggle' ? inputsMuted : undefined" @output="handlePadOutput" />
     <span v-if="error" class="instrument-error" role="alert">{{ error }}</span>
   </div>

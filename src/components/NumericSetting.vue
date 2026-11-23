@@ -25,7 +25,7 @@ const range = computed(() => {
 const settings = computed<KnobSettings>(() => {
   const { min, max, step } = frozenRange.value ?? range.value
   const value = Number.isFinite(props.modelValue) ? Math.min(max, Math.max(min, props.modelValue)) : min
-  return { color: '#b8d986', min, max, step, value, defaultValue: value, unit: '' }
+  return { color: '#b8d986', min, max, step, value, defaultValue: value, unit: '', recordAutomation: true }
 })
 
 function updateInput(event: Event) {

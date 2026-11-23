@@ -1,4 +1,4 @@
-import type { Connection, GridItem } from './grid'
+import { MAX_LOOP_CLIP_INDEX, type Connection, type GridItem } from './grid'
 
 export interface ParameterMetadata {
   id: string
@@ -15,6 +15,7 @@ export const scales = ['chromatic', 'major', 'minor', 'major-pentatonic', 'doria
 export const orientations = ['horizontal', 'vertical'] as const
 export const arpStyles = ['up', 'down', 'up-down', 'random'] as const
 export const tempoDivisions = ['1/1', '3/4', '1/2', '1/4', '1/8', '1/16', '1/32'] as const
+export const loopClipIndices = Array.from({ length: MAX_LOOP_CLIP_INDEX + 1 }, (_, index) => String(index))
 const velocityOutput: ParameterMetadata = { id: 'velocity', label: 'Velocity', kind: 'number', min: 0, max: 127 }
 const pressureOutput: ParameterMetadata = { id: 'pressure', label: 'Pressure', kind: 'number', min: 0, max: 127 }
 
@@ -117,6 +118,7 @@ export function inputs(item: GridItem): ParameterMetadata[] {
       select('enabled', 'On/off', ['off', 'on']),
       select('style', 'Style', arpStyles), select('rate', 'Rate', tempoDivisions), select('scale', 'Scale', scales),
     ]
+    case 'sequenced-loop': return [select('clipIndex', 'Clip index', loopClipIndices)]
     default: return []
   }
 }
@@ -153,6 +155,8 @@ export function applySelectInput(item: GridItem, parameter: string, index: numbe
     else if (parameter === 'scale' && scale !== undefined) item.settings.scale = scale
     else if (parameter === 'style' && style !== undefined) item.settings.style = style
     else if (parameter === 'rate' && rate !== undefined) item.settings.rate = rate
+  } else if (item.type === 'sequenced-loop' && parameter === 'clipIndex' && index >= 0 && index < loopClipIndices.length) {
+    item.settings.clipIndex = index
   }
 }
 

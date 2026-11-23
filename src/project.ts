@@ -1,4 +1,4 @@
-import { canResizeGrid, DEFAULT_PIANO_COLOR, isValidPlacement, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
+import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
 import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
@@ -81,11 +81,12 @@ function isItem(value: unknown): value is GridItem {
     case 'instrument-pad': return validInstrument(s)
     case 'knob': return color(s.color) && finite(s.min) && finite(s.max) && s.min < s.max &&
       finite(s.step) && s.step > 0 && s.step <= s.max - s.min &&
-      within(s.defaultValue, s.min, s.max) && within(s.value, s.min, s.max) && typeof s.unit === 'string'
-    case 'lfo': return oneOf(s.waveform, ['sine', 'saw', 'square', 'random']) &&
+      within(s.defaultValue, s.min, s.max) && within(s.value, s.min, s.max) && typeof s.unit === 'string' &&
+      typeof s.recordAutomation === 'boolean'
+    case 'lfo': return color(s.color) && oneOf(s.waveform, ['sine', 'saw', 'square', 'random']) &&
       oneOf(s.rateMode, ['free', 'sync']) && within(s.rate, 0.01, 20) &&
       within(s.depth, 0, 1) && within(s.offset, -1, 1) && within(s.smoothness, 0, 0.99)
-    case 'mod-wheel': return within(s.depth, 0, 1) && typeof s.autoCenter === 'boolean'
+    case 'mod-wheel': return within(s.depth, 0, 1) && typeof s.autoCenter === 'boolean' && typeof s.recordAutomation === 'boolean'
     case 'piano-roll': return color(s.color) && integer(s.octaves, 1, 3) && integer(s.octaveTranspose, -3, 3) &&
       oneOf(s.rootNote, [...PIANO_ROOT_NOTES]) &&
       oneOf(s.scale, [...scaleChoices]) &&
@@ -93,12 +94,31 @@ function isItem(value: unknown): value is GridItem {
       integer(s.numRows, 1, 8) && oneOf(s.style, ['pads', 'whites-blacks', 'glide-strip']) &&
       oneOf(s.pressureMode, ['pressure', 'position']) &&
       validPianoRollNoteRange(s.scale, s.rootNote, s.octaves, s.octaveTranspose, s.numRows, s.style)
-    case 'arpeggiator': return typeof s.enabled === 'boolean' && oneOf(s.style, ['up', 'down', 'up-down', 'random']) &&
+    case 'arpeggiator': return color(s.color) && typeof s.enabled === 'boolean' && oneOf(s.style, ['up', 'down', 'up-down', 'random']) &&
       oneOf(s.rate, [...tempoDivisions]) && integer(s.distance, -24, 24) && integer(s.steps, 0, 16) &&
       within(s.gate, 0.05, 1) &&
       oneOf(s.scale, [...scaleChoices])
     case 'output-selector': return integer(s.index, 0, Number.MAX_SAFE_INTEGER) &&
       (s.baseIndex === undefined || integer(s.baseIndex, 0, Number.MAX_SAFE_INTEGER))
+    case 'sequenced-loop': return color(s.color) && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
+      typeof s.armed === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
+      oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
+      Array.isArray(s.clips[String(s.clipIndex)]) &&
+      object(s.automation) && Object.entries(s.automation).every(([index, events]) =>
+        /^(0|[1-9]\d{0,2})$/.test(index) && Array.isArray(events) &&
+        events.every((event: unknown) => object(event) && typeof event.sourceId === 'string' && !!event.sourceId &&
+          (event.bankId === undefined || (typeof event.bankId === 'string' && !!event.bankId)) &&
+          typeof event.parameter === 'string' && !!event.parameter && finite(event.value) &&
+          (event.active === undefined || typeof event.active === 'boolean') &&
+          finite(event.position) && event.position >= 0 && event.position < (s.barLength as number) * 4)) &&
+      Object.entries(s.clips).every(([index, notes]) => /^(0|[1-9]\d{0,2})$/.test(index) &&
+        Array.isArray(notes) && notes.every((note: unknown) => object(note) &&
+          (note.bankId === undefined || (typeof note.bankId === 'string' && !!note.bankId)) &&
+          typeof note.instrumentId === 'string' && !!note.instrumentId &&
+          integer(note.note, 0, 127) && within(note.velocity, 0, 127) &&
+          (note.bend === undefined || finite(note.bend)) &&
+          within(note.position, 0, s.barLength as number * 4) && note.position < (s.barLength as number) * 4 &&
+          finite(note.duration) && note.duration > 0 && note.duration <= (s.barLength as number) * 4))
     default: return false
   }
 }
@@ -147,6 +167,19 @@ export function migrateSavedProject(value: unknown): void {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
     for (const item of bank.layout.items) {
       if (object(item) && item.orientation === undefined) item.orientation = 'horizontal'
+      if (object(item) && (item.type === 'lfo' || item.type === 'arpeggiator' || item.type === 'sequenced-loop') &&
+        object(item.settings) && item.settings.color === undefined) item.settings.color = DEFAULT_GRID_COLOR
+      if (object(item) && (item.type === 'knob' || item.type === 'mod-wheel') &&
+        object(item.settings) && item.settings.recordAutomation === undefined) item.settings.recordAutomation = true
+      if (object(item) && item.type === 'sequenced-loop' && object(item.settings) && item.settings.automation === undefined) {
+        item.settings.automation = {}
+      }
+      if (object(item) && item.type === 'sequenced-loop' && object(item.settings) && item.settings.quantize === undefined) {
+        item.settings.quantize = 'off'
+      }
+      if (object(item) && item.type === 'sequenced-loop' && object(item.settings) && item.settings.recordScope === undefined) {
+        item.settings.recordScope = 'bank'
+      }
       if (object(item) && item.type === 'instrument-pad' && object(item.settings) && item.settings.mode === undefined) {
         item.settings.mode = 'trigger'
       }

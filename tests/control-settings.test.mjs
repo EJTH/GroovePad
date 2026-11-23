@@ -9,7 +9,7 @@ test('control summaries start collapsed and show each control name, size and col
   try {
     const { default: ControlIdentitySettings } = await server.ssrLoadModule('/src/components/ControlIdentitySettings.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
-    for (const type of ['pad', 'instrument-pad', 'knob', 'lfo', 'mod-wheel', 'piano-roll', 'arpeggiator', 'output-selector']) {
+    for (const type of ['pad', 'instrument-pad', 'knob', 'lfo', 'mod-wheel', 'piano-roll', 'arpeggiator', 'output-selector', 'sequenced-loop']) {
       const draft = createControl(type, 0, 0, type)
       draft.label = 'My control'
       draft.width = 2
@@ -28,6 +28,51 @@ test('control summaries start collapsed and show each control name, size and col
         : /class="color-swatch no-color"/)
       assert.match(html, /Control orientation/)
     }
+  } finally {
+    await server.close()
+  }
+})
+
+test('LFOs, arpeggiators and sequenced loops migrate and display their configurable colors', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { default: ControlIdentitySettings } = await server.ssrLoadModule('/src/components/ControlIdentitySettings.vue')
+    const { createControl, copyControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { migrateSavedProject, isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const items = ['lfo', 'arpeggiator', 'sequenced-loop'].map((type, x) => createControl(type, x, 0, type))
+    const layout = { columns: 3, rows: 1, items, connections: [] }
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout,
+    }] }
+    for (const item of items) delete item.settings.color
+    migrateSavedProject(project)
+    assert.ok(items.every((item) => /^#[0-9a-f]{6}$/i.test(item.settings.color)))
+    assert.equal(isSavedProject(project), true)
+    for (const [index, item] of items.entries()) {
+      item.settings.color = ['#ff1234', '#12ff34', '#1234ff'][index]
+      const html = await renderToString(createSSRApp({ render: () => h(ControlIdentitySettings, {
+        draft: item, columns: 3, rows: 1, controlTypes: [{ type: item.type, label: item.label }],
+      }) }))
+      assert.match(html, new RegExp(`<input[^>]*value="${item.settings.color}"[^>]*type="color"`))
+      assert.equal(copyControl(item, 'copy').settings.color, item.settings.color)
+      item.settings.color = 'invalid'
+      assert.equal(isSavedProject(project), false)
+      item.settings.color = ['#ff1234', '#12ff34', '#1234ff'][index]
+    }
+    migrateSavedProject(project)
+    assert.equal(isSavedProject(project), true)
+    const restored = JSON.parse(JSON.stringify(project))
+    assert.deepEqual(restored.banks[0].layout.items.map((item) => item.settings.color), ['#ff1234', '#12ff34', '#1234ff'])
+    const html = await renderToString(createSSRApp({ render: () => h(GrooveGrid,
+      { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false }) }))
+    assert.match(html, /--lfo-color:#ff1234/)
+    assert.match(html, /--wave-color:#ff1234/)
+    assert.match(html, /--arp-color:#12ff34/)
+    assert.match(html, /--loop-color:#1234ff/)
+    const editHtml = await renderToString(createSSRApp({ render: () => h(GrooveGrid,
+      { layout, editing: true, wiring: false, settingsOpen: false, bpm: 120, playing: false }) }))
+    for (const item of items) assert.ok(editHtml.includes(`--item-color:${item.settings.color}`))
   } finally {
     await server.close()
   }
@@ -67,6 +112,37 @@ test('control rotation and hit polyphony migrate, validate, and survive project 
     hit.settings.instrumentParams.polyphony = 1
     hit.orientation = 'sideways'
     assert.equal(isSavedProject(project), false)
+  } finally {
+    await server.close()
+  }
+})
+
+test('knob and mod wheel automation recording settings default on and migrate without overwriting choices', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { migrateSavedProject, isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const items = ['knob', 'mod-wheel'].map((type, x) => createControl(type, x, 0, type))
+    for (const item of items) {
+      assert.equal(item.settings.recordAutomation, true)
+      const { default: Panel } = await server.ssrLoadModule(`/src/components/${item.type === 'knob' ? 'Knob' : 'ModWheel'}SettingsPanel.vue`)
+      const html = await renderToString(createSSRApp({ render: () => h(Panel, { draft: item }) }))
+      assert.match(html, /<input(?=[^>]*\bchecked\b)(?=[^>]*type="checkbox")[^>]*> Record automation for this control/)
+      delete item.settings.recordAutomation
+    }
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 2, rows: 1, items, connections: [] },
+    }] }
+    migrateSavedProject(project)
+    assert.ok(items.every((item) => item.settings.recordAutomation === true))
+    items[0].settings.recordAutomation = false
+    items[1].settings.recordAutomation = false
+    migrateSavedProject(project)
+    assert.ok(items.every((item) => item.settings.recordAutomation === false))
+    assert.equal(isSavedProject(project), true)
+    const restored = JSON.parse(JSON.stringify(project))
+    assert.ok(restored.banks[0].layout.items.every((item) => item.settings.recordAutomation === false))
   } finally {
     await server.close()
   }

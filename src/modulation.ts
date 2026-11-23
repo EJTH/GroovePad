@@ -197,6 +197,9 @@ function baseValue(item: GridItem, input: ParameterMetadata): number | undefined
     return typeof value === 'number' ? value : undefined
   }
   if (item.type === 'knob' && input.id === 'value') return item.settings.value
+  if (item.type === 'sequenced-loop' && input.id === 'clipIndex') {
+    return (item.settings.clipIndex + 0.5) * 128 / input.choices!.length - 0.5
+  }
   if (item.type === 'lfo') {
     if (input.id === 'rate') return item.settings.rate
     if (input.id === 'depth') return item.settings.depth
@@ -255,6 +258,10 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
     if (!original || resolving.has(id)) return undefined
     resolving.add(id)
     const item = copyControl(original, original.id)
+    if (item.type === 'knob') {
+      const value = signals.get(`${item.id}:value`)
+      if (value !== undefined) item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value))
+    }
     for (const input of inputs(item)) {
       if (input.kind !== 'number' || input.min === undefined || input.max === undefined) continue
       const base = baseValue(item, input)

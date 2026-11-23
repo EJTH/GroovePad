@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { canResizeGrid, canSwapItems, copyControl, createControl, isValidPlacement, MAX_GRID_COLUMNS, MAX_GRID_ROWS, validPianoRollSettings, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
-import { createsCycle, inputs, isCompatible, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
+import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput } from '../grid'
+import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
 import { effectiveControls, modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
-import { InstrumentFactory, type InstrumentInstance } from '../instruments'
 import MPCPad from './MPCPad.vue'
 import Knob from './Knob.vue'
 import LFO from './LFO.vue'
@@ -13,17 +12,16 @@ import ModWheel from './ModWheel.vue'
 import PianoRoll from './PianoRoll.vue'
 import Arpeggiator from './Arpeggiator.vue'
 import InstrumentPad from './InstrumentPad.vue'
-import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
-import KnobSettingsPanel from './KnobSettingsPanel.vue'
-import LFOSettingsPanel from './LFOSettingsPanel.vue'
-import ModWheelSettingsPanel from './ModWheelSettingsPanel.vue'
-import PianoRollSettingsPanel from './PianoRollSettingsPanel.vue'
-import ArpeggiatorSettingsPanel from './ArpeggiatorSettingsPanel.vue'
 import NumericSetting from './NumericSetting.vue'
-import ControlIdentitySettings from './ControlIdentitySettings.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import OutputSelector from './OutputSelector.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
+import GridControlSettingsDialog from './GridControlSettingsDialog.vue'
+import { controlTypes } from './gridControlTypes'
+import { useGridInteraction } from './useGridInteraction'
+import { BankEventBus, SequencedLoopEngine, TransportClock, type BankEvent } from '../sequencedLoop'
+import type { Bank } from '../project'
+import { pointerTap } from '../pointerTap'
 
 const props = defineProps<{
   layout: GridLayout
@@ -31,6 +29,11 @@ const props = defineProps<{
   wiring: boolean
   settingsOpen: boolean
   bpm: number
+  playing?: boolean
+  transportClock?: TransportClock
+  bankId?: string
+  banks?: Bank[]
+  bankEvents?: BankEventBus
 }>()
 const emit = defineEmits<{ closeSettings: []; output: [itemId: string, output: ParameterOutput] }>()
 
@@ -40,73 +43,7 @@ const columns = ref(props.layout.columns)
 const rows = ref(props.layout.rows)
 const selectedId = ref<string | null>(null)
 const draft = ref<GridItem | null>(null)
-const controlIdentity = ref<InstanceType<typeof ControlIdentitySettings> | null>(null)
 const addPosition = ref<{ x: number; y: number } | null>(null)
-const controlTypes: { type: GridItemType; label: string; description: string; icon: string }[] = [
-  { type: 'instrument-pad', label: 'Instrument Pad', description: 'Play a sound', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M9 13l2 2 4-6' },
-  { type: 'pad', label: 'Pad', description: 'Trigger a control', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M12 8v8 M8 12h8' },
-  { type: 'knob', label: 'Knob', description: 'Adjust a value', icon: 'M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9z M12 12l4-4' },
-  { type: 'lfo', label: 'LFO', description: 'Modulate with a wave', icon: 'M2 12c2.5 0 2.5-7 5-7s2.5 14 5 14 2.5-14 5-14 2.5 7 5 7' },
-  { type: 'mod-wheel', label: 'Mod Wheel', description: 'Control modulation', icon: 'M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M7 11h10 M7 14h10' },
-  { type: 'piano-roll', label: 'Piano Roll', description: 'Play notes', icon: 'M3 5h18v14H3z M9 5v14 M15 5v14 M6 5v7 M12 5v7 M18 5v7' },
-  { type: 'arpeggiator', label: 'Arpeggiator', description: 'Sequence held notes', icon: 'M4 19h3v-4H4z M10 19h3V9h-3z M16 19h3V4h-3z' },
-  { type: 'output-selector', label: 'Output Selector', description: 'Route a signal', icon: 'M3 12h7 M10 12l5-6h6 M10 12l5 6h6 M18 3l3 3-3 3 M18 15l3 3-3 3' },
-]
-const sampleLoading = ref(false)
-let preview: InstrumentInstance | undefined
-let previewGeneration = 0
-let previewVelocity = 100
-
-function stopPreview() {
-  previewGeneration++
-  preview?.dispose()
-  preview = undefined
-}
-
-async function previewInstrument(velocity: number) {
-  const item = draft.value
-  if (!item || item.type !== 'instrument-pad') return
-  if (sampleLoading.value) {
-    message.value = 'Wait for the sample to finish loading.'
-    return
-  }
-  const generation = ++previewGeneration
-  preview?.release()
-  try {
-    await Tone.start()
-    if (generation !== previewGeneration) return
-    preview ??= InstrumentFactory.create(item.settings.instrumentType, item.settings.instrumentParams)
-    await preview.trigger(velocity, 60)
-    if (generation !== previewGeneration) return
-    message.value = ''
-  } catch (error) {
-    if (generation === previewGeneration) {
-      message.value = `Preview error: ${error instanceof Error ? error.message : String(error)}`
-      console.error(message.value, error)
-    }
-  }
-}
-
-function handlePreviewOutput(output: ParameterOutput) {
-  if (output.parameter === 'velocity') previewVelocity = output.value
-  if (output.parameter === 'gate') {
-    if (output.value > 0) void previewInstrument(previewVelocity)
-    else {
-      previewGeneration++
-      preview?.release()
-    }
-  }
-}
-
-watch(() => draft.value?.type === 'instrument-pad'
-  ? [draft.value.settings.instrumentType, draft.value.settings.instrumentParams] : null,
-stopPreview, { deep: true, flush: 'sync' })
-onBeforeUnmount(stopPreview)
-const dropAction = ref<{ original: GridItem; candidate: GridItem; swapId?: string } | null>(null)
-const canCopyDrop = computed(() => {
-  const drop = dropAction.value
-  return !!drop && isValidPlacement(props.layout, copyControl(drop.candidate, nextControlId()))
-})
 const wireFirst = ref<string | null>(null)
 const wireDrag = ref<{ pointerId: number; sourceId: string; x: number; y: number } | null>(null)
 const wirePair = ref<{ sourceId: string; targetId: string } | null>(null)
@@ -120,7 +57,144 @@ const selectorFlash = ref<{ sourceId: string; targetId: string; sequence: number
 let selectorFlashSequence = 0
 let selectorFlashTimer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => clearTimeout(selectorFlashTimer))
-const displayItems = computed(() => props.editing ? props.layout.items : effectiveControls(props.layout, signals))
+const clock = props.transportClock ?? new TransportClock()
+const bankId = props.bankId ?? ''
+const bankEvents = props.bankEvents ?? new BankEventBus()
+const loopVoices = reactive(new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>())
+const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
+const liveControls = reactive(new Set<string>())
+const manualOverrides = reactive(new Map<string, number>())
+let automationSequence = 0
+const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean }>())
+const loopEngine = new SequencedLoopEngine(
+  () => props.layout.items.filter((item): item is Extract<GridItem, { type: 'sequenced-loop' }> => item.type === 'sequenced-loop'),
+  () => clock.position(),
+  (id, note, on) => {
+    bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? bankId, voiceId: JSON.stringify([bankId, id]), note, on })
+  },
+  (id, event) => {
+    bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([bankId, id]), bankId: event ? (event.bankId ?? bankId) : undefined, event })
+  },
+  bankId,
+  (loop) => {
+    const effective = displayItems.value.find((item) => item.id === loop.id)
+    return effective?.type === 'sequenced-loop' ? effective.settings.clipIndex : loop.settings.clipIndex
+  },
+)
+function receiveBankEvent(event: BankEvent) {
+  if (event.kind === 'live-note') {
+    if (props.playing && !props.editing) loopEngine.record(event.instrumentId, event.note, event.velocity, event.bend, event.on, event.bankId)
+  } else if (event.kind === 'live-automation') {
+    if (props.playing && !props.editing) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, event.active, event.bankId)
+  } else if (event.kind === 'loop-note' && event.bankId === bankId) {
+    if (event.on) loopVoices.set(event.voiceId, { instrumentId: event.note.instrumentId, note: event.note.note, velocity: event.note.velocity, bend: event.note.bend })
+    else loopVoices.delete(event.voiceId)
+  } else if (event.kind === 'loop-automation') {
+    if (!event.event) { loopAutomation.delete(event.owner); return }
+    if (event.bankId !== bankId) return
+    let values = loopAutomation.get(event.owner)
+    if (!values) { loopAutomation.set(event.owner, new Map()); values = loopAutomation.get(event.owner)! }
+    values.set(`${event.event.sourceId}:${event.event.parameter}`, {
+      sourceId: event.event.sourceId, value: event.event.value, active: event.event.active, sequence: ++automationSequence,
+    })
+  }
+}
+const unsubscribeBankEvents = bankEvents.subscribe(receiveBankEvent)
+let loopTimer: ReturnType<typeof setInterval> | undefined
+function updateLoopStatus() {
+  const next = new Map<string, { enabled: boolean; pending: boolean }>()
+  for (const item of props.layout.items) if (item.type === 'sequenced-loop') {
+    next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id) })
+  }
+  if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
+    status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending)) loopStatus.value = next
+}
+function toggleLoop(id: string) {
+  const item = props.layout.items.find((entry) => entry.id === id)
+  if (item?.type !== 'sequenced-loop') return
+  if (!props.playing) item.settings.armed = !item.settings.armed
+  else if (!item.settings.armed) { loopEngine.toggle(item, clock.position()); loopEngine.tick() }
+  updateLoopStatus()
+}
+const loopTaps = new Map<string, ReturnType<typeof pointerTap>>()
+function loopTap(id: string) {
+  let tap = loopTaps.get(id)
+  if (!tap) { tap = pointerTap(() => toggleLoop(id)); loopTaps.set(id, tap) }
+  return tap
+}
+function recordedNotes(id: string): HeldNote[] {
+  const notes = new Map<number, HeldNote>()
+  for (const voice of loopVoices.values()) if (voice.instrumentId === id) {
+    const previous = notes.get(voice.note)
+    notes.set(voice.note, { note: voice.note, velocity: voice.velocity, bend: voice.bend, count: (previous?.count ?? 0) + 1 })
+  }
+  return [...notes.values()]
+}
+function captureNote(id: string, note: number, on: boolean, velocity: number, bend?: number) {
+  if (props.playing && !props.editing) bankEvents.emit({ kind: 'live-note', bankId, instrumentId: id, note, on, velocity, bend })
+}
+onBeforeUnmount(() => {
+  if (loopTimer !== undefined) clearInterval(loopTimer)
+  loopEngine.stop()
+  unsubscribeBankEvents()
+})
+const playbackAutomation = computed(() => {
+  const selected = new Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>()
+  for (const values of loopAutomation.values()) for (const [key, event] of values) {
+    if (!selected.has(key) || selected.get(key)!.sequence < event.sequence) selected.set(key, event)
+  }
+  return selected
+})
+const effectiveSignals = computed(() => {
+  const result = new Map(signals)
+  for (const [key, event] of playbackAutomation.value) {
+    const source = props.layout.items.find((item) => item.id === event.sourceId)
+    if (!source || liveControls.has(source.id) || (manualOverrides.get(key) ?? -1) >= event.sequence) continue
+    if (event.active === false) result.delete(key)
+    else result.set(key, event.value)
+  }
+  return result
+})
+function controlActivity(id: string, active: boolean) {
+  if (active) {
+    const item = props.layout.items.find((entry) => entry.id === id)
+    const value = playbackAutomation.value.get(`${id}:value`)
+    if (item?.type === 'knob' && value && value.active !== false) {
+      item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value.value))
+    }
+    liveControls.add(id)
+  } else {
+    liveControls.delete(id)
+    const item = props.layout.items.find((entry) => entry.id === id)
+    if (item) for (const output of outputs(item)) manualOverrides.delete(`${id}:${output.id}`)
+  }
+}
+const displayItems = computed(() => props.editing ? props.layout.items : effectiveControls(props.layout, effectiveSignals.value))
+watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
+  ({ id: item.id, index: item.settings.clipIndex })), (selections) => {
+  for (const selection of selections) {
+    const loop = props.layout.items.find((item) => item.id === selection.id)
+    if (loop?.type !== 'sequenced-loop') continue
+    loop.settings.clips[String(selection.index)] ??= []
+    loop.settings.automation[String(selection.index)] ??= []
+  }
+}, { immediate: true, flush: 'sync' })
+watch([() => props.playing, () => props.editing], ([playing, editing], previous) => {
+  if (loopTimer !== undefined) clearInterval(loopTimer)
+  loopTimer = undefined
+  if (!playing) loopEngine.stop()
+  else if (editing) loopEngine.suspend()
+  else {
+    if (previous?.[1]) loopEngine.resume()
+    for (const loop of props.layout.items) if (loop.type === 'sequenced-loop' && loop.settings.armed && !loopEngine.isEnabled(loop.id)) {
+      loopEngine.toggle(loop)
+    }
+    loopEngine.tick()
+    loopTimer = setInterval(() => { loopEngine.tick(); updateLoopStatus() }, 20)
+  }
+  if (!playing || editing) { liveControls.clear(); manualOverrides.clear() }
+  updateLoopStatus()
+}, { immediate: true, flush: 'sync' })
 const sourceItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.sourceId))
 const targetItem = computed(() => props.layout.items.find((item) => item.id === wirePair.value?.targetId))
 const availableOutputs = computed(() => sourceItem.value && targetItem.value
@@ -136,16 +210,6 @@ function availableInputs(outputId: string) {
     !props.layout.connections.some((connection) => connection.sourceId === source.id &&
       connection.sourceParameter === outputId && connection.targetId === target.id && connection.targetParameter === input.id))
 }
-const interaction = ref<{
-  pointerId: number
-  mode: 'move' | 'resize'
-  startX: number
-  startY: number
-  original: GridItem
-  candidate: GridItem
-  moved: boolean
-} | null>(null)
-
 const cells = computed(() => Array.from({ length: props.layout.columns * props.layout.rows }, (_, index) => ({
   x: index % props.layout.columns,
   y: Math.floor(index / props.layout.columns),
@@ -231,12 +295,19 @@ function openSettings(item: GridItem) {
   message.value = ''
 }
 
-function changeType(event: Event) {
-  const target = event.target
+const { interaction, dropAction, canCopyDrop, startInteraction, updateInteraction, endInteraction, completeDrop, itemStyle } =
+  useGridInteraction({
+    getLayout: () => props.layout,
+    isEditing: () => props.editing,
+    grid,
+    message,
+    openSettings,
+    nextControlId,
+  })
+
+function changeType(type: GridItemType) {
   const item = draft.value
-  if (!(target instanceof HTMLSelectElement) || !item) return
-  const type = target.value as GridItemType
-  if (type === item.type) return
+  if (!item || type === item.type) return
   const replacement = createControl(item.id, item.x, item.y, type)
   replacement.width = item.width
   replacement.height = item.height
@@ -245,67 +316,23 @@ function changeType(event: Event) {
   draft.value = replacement
 }
 
-function saveItem() {
-  const item = draft.value
-  if (!item) return
-  if (sampleLoading.value) {
-    message.value = 'Wait for the sample to finish loading.'
-    return
-  }
-  if (!item.label.trim()) {
-    controlIdentity.value?.open()
-    message.value = 'Enter a control name.'
-    return
-  }
-  if (!isValidPlacement(props.layout, item)) {
-    controlIdentity.value?.open()
-    message.value = 'The control must fit inside the grid without overlapping another control.'
-    return
-  }
-  if (item.type === 'knob') {
-    const { min, max, step, defaultValue, value } = item.settings
-    if (![min, max, step, defaultValue, value].every(Number.isFinite) || min >= max || step <= 0 ||
-      step > max - min || defaultValue < min || defaultValue > max || value < min || value > max) {
-      message.value = 'Use a valid range and positive step; default and current values must be inside the range.'
-      return
-    }
-  }
-  if (item.type === 'piano-roll' && !validPianoRollSettings(item.settings)) {
-    message.value = 'Use valid piano roll settings and keep the note range within MIDI notes 0 to 127.'
-    return
-  }
-  if (item.type === 'arpeggiator' && (!Number.isSafeInteger(item.settings.steps) ||
-    item.settings.steps < 0 || item.settings.steps > 16)) {
-    message.value = 'Arpeggiator steps must be a whole number from 0 to 16.'
-    return
-  }
-  if (item.type === 'instrument-pad' && item.settings.instrumentType === 'sample-hit' &&
-    (!Number.isSafeInteger(item.settings.instrumentParams.polyphony) ||
-      item.settings.instrumentParams.polyphony < 1 || item.settings.instrumentParams.polyphony > 16)) {
-    message.value = 'Polyphony must be a whole number from 1 to 16.'
-    return
-  }
-  if (selectedId.value && props.layout.connections.some((connection) => {
-    const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
-    const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
-    const items = props.layout.items.map((entry) => entry.id === item.id ? item : entry)
-    return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter) ||
-      !selectorConnectionsCompatible(items, props.layout.connections, connection)
-  })) {
-    message.value = 'Remove incompatible wires before changing the control type.'
-    return
-  }
+function saveItem(item: GridItem) {
   const index = props.layout.items.findIndex((entry) => entry.id === selectedId.value)
-  if (index !== -1) props.layout.items[index] = { ...item, label: item.label.trim() }
-  else props.layout.items.push({ ...item, label: item.label.trim() })
+  if (index !== -1) props.layout.items[index] = item
+  else props.layout.items.push(item)
   selectedId.value = null
   draft.value = null
   message.value = ''
 }
 
-function handleOutput(item: GridItem, output: ParameterOutput) {
+function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   const original = props.layout.items.find((entry) => entry.id === item.id)
   if (!original) return
+  if (user && (original.type === 'pad' || original.type === 'instrument-pad') && output.parameter === 'gate') {
+    controlActivity(item.id, output.value > 0)
+  } else if (user && original.type === 'piano-roll' && output.parameter === 'pressure') {
+    controlActivity(item.id, output.active !== false)
+  }
   if (original.type === 'knob' && item.type === 'knob' && output.parameter === 'value') {
     const adjusted = original.settings.value + (output.delta ?? output.value - item.settings.value)
     original.settings.value = Math.max(original.settings.min, Math.min(original.settings.max, adjusted))
@@ -313,8 +340,16 @@ function handleOutput(item: GridItem, output: ParameterOutput) {
     if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
     else signals.set(`${item.id}:${output.parameter}`, output.value)
   }
-  emit('output', item.id, output)
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
+  const recordable = (original.type !== 'knob' && original.type !== 'mod-wheel') || original.settings.recordAutomation
+  if (props.playing && !props.editing && recordable && (user || output.user) && sourceParameter?.kind === 'number') {
+    bankEvents.emit({ kind: 'live-automation', bankId, sourceId: item.id, parameter: output.parameter,
+      value: original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value, active: output.active })
+  }
+  if (props.playing && (user || output.user) && sourceParameter?.kind === 'number' && !liveControls.has(item.id)) {
+    manualOverrides.set(`${item.id}:${output.parameter}`, automationSequence)
+  }
+  emit('output', item.id, output)
   if (!sourceParameter || sourceParameter.kind !== 'note') return
   if (output.on) void Tone.start().catch((error: unknown) => console.error('Could not start audio:', error))
   routeNote(item.id, output)
@@ -361,14 +396,14 @@ function selectorDestination(item: GridItem) {
 }
 
 function numericWireValue(wire: Connection) {
-  const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
+  const signal = numericSignal(props.layout, wire, effectiveSignals.value, (id) => displayItems.value.find((entry) => entry.id === id))
   if (!signal) return undefined
   const offset = modulationOffset(wire, signal)
   return offset === undefined ? signal.value : selectorNumericValue(wire, signal, normalizeSignal(signal.value, signal.min, signal.max) * 127)
 }
 
 function selectorInputValue(wire: Connection) {
-  const signal = numericSignal(props.layout, wire, signals, (id) => displayItems.value.find((entry) => entry.id === id))
+  const signal = numericSignal(props.layout, wire, effectiveSignals.value, (id) => displayItems.value.find((entry) => entry.id === id))
   if (!signal) return undefined
   const target = props.layout.items.find((item) => item.id === wire.targetId)
   const count = props.layout.connections.filter((connection) => connection.sourceId === wire.targetId).length
@@ -592,127 +627,6 @@ function removeItem() {
   message.value = ''
 }
 
-function startInteraction(event: PointerEvent, item: GridItem, mode: 'move' | 'resize') {
-  if (!props.editing || interaction.value || event.button !== 0) return
-  event.preventDefault()
-  const target = event.currentTarget
-  if (!(target instanceof HTMLElement)) return
-  target.setPointerCapture(event.pointerId)
-  interaction.value = {
-    pointerId: event.pointerId,
-    mode,
-    startX: event.clientX,
-    startY: event.clientY,
-    original: { ...item },
-    candidate: { ...item },
-    moved: false,
-  }
-}
-
-function updateInteraction(event: PointerEvent) {
-  const current = interaction.value
-  if (!current || current.pointerId !== event.pointerId || !grid.value) return
-  const style = window.getComputedStyle(grid.value)
-  const columnGap = parseFloat(style.columnGap) || 0
-  const rowGap = parseFloat(style.rowGap) || 0
-  const rect = grid.value.getBoundingClientRect()
-  const stepX = (rect.width + columnGap) / props.layout.columns
-  const stepY = (rect.height + rowGap) / props.layout.rows
-  const dx = event.clientX - current.startX
-  const dy = event.clientY - current.startY
-  current.moved ||= Math.abs(dx) > 5 || Math.abs(dy) > 5
-  const deltaX = Math.round(dx / stepX)
-  const deltaY = Math.round(dy / stepY)
-  current.candidate = current.mode === 'move'
-    ? { ...current.original, x: current.original.x + deltaX, y: current.original.y + deltaY }
-    : { ...current.original, width: current.original.width + deltaX, height: current.original.height + deltaY }
-}
-
-function endInteraction(event: PointerEvent, cancelled = false) {
-  const current = interaction.value
-  if (!current || current.pointerId !== event.pointerId) return
-  if (!cancelled) updateInteraction(event)
-  interaction.value = null
-  if (cancelled) return
-  if (!current.moved) {
-    openSettings(current.original)
-  } else if (current.moved && current.mode === 'move') {
-    if (!grid.value) return
-    const rect = grid.value.getBoundingClientRect()
-    if (event.clientX < rect.left || event.clientX >= rect.right || event.clientY < rect.top || event.clientY >= rect.bottom) {
-      message.value = 'Drop the control inside the grid.'
-      return
-    }
-    const x = Math.floor((event.clientX - rect.left) / rect.width * props.layout.columns)
-    const y = Math.floor((event.clientY - rect.top) / rect.height * props.layout.rows)
-    const target = props.layout.items.find((item) => item.id !== current.original.id &&
-      x >= item.x && x < item.x + item.width && y >= item.y && y < item.y + item.height)
-    if (target) {
-      if (!canSwapItems(props.layout, current.original, target)) {
-        message.value = 'These controls cannot be swapped without overlapping or leaving the grid.'
-        return
-      }
-      dropAction.value = { original: current.original, candidate: current.candidate, swapId: target.id }
-    } else if (current.candidate.x !== current.original.x || current.candidate.y !== current.original.y) {
-      if (!isValidPlacement(props.layout, current.candidate)) {
-        message.value = 'The control must fit inside the grid without overlapping another control.'
-        return
-      }
-      dropAction.value = { original: current.original, candidate: current.candidate }
-    }
-    message.value = ''
-  } else if (current.moved) {
-    if (isValidPlacement(props.layout, current.candidate)) {
-      const index = props.layout.items.findIndex((item) => item.id === current.original.id)
-      if (index !== -1) props.layout.items[index] = current.candidate
-      message.value = ''
-    } else {
-      message.value = 'The control must fit inside the grid without overlapping another control.'
-    }
-  }
-}
-
-function completeDrop(action: 'move' | 'copy' | 'swap') {
-  const drop = dropAction.value
-  if (!drop) return
-  const index = props.layout.items.findIndex((item) => item.id === drop.original.id)
-  if (index < 0) {
-    message.value = 'The control no longer exists.'
-  } else if (action === 'swap') {
-    const otherIndex = props.layout.items.findIndex((item) => item.id === drop.swapId)
-    const first = props.layout.items[index]
-    const other = props.layout.items[otherIndex]
-    if (!first || !other || !canSwapItems(props.layout, first, other)) {
-      message.value = 'These controls cannot be swapped without overlapping or leaving the grid.'
-    } else {
-      props.layout.items[index] = { ...first, x: other.x, y: other.y }
-      props.layout.items[otherIndex] = { ...other, x: first.x, y: first.y }
-      message.value = ''
-    }
-  } else {
-    const candidate = action === 'copy' ? copyControl(drop.candidate, nextControlId()) : drop.candidate
-    if (!isValidPlacement(props.layout, candidate)) {
-      message.value = 'The control must fit inside the grid without overlapping another control.'
-    } else if (action === 'copy') {
-      props.layout.items.push(candidate)
-      message.value = ''
-    } else {
-      props.layout.items[index] = candidate
-      message.value = ''
-    }
-  }
-  dropAction.value = null
-}
-
-function itemStyle(item: GridItem) {
-  const candidate = interaction.value?.original.id === item.id ? interaction.value.candidate : item
-  // Keep an invalid preview in its original position rather than expanding the CSS grid.
-  const position = isValidPlacement(props.layout, candidate) ? candidate : item
-  return {
-    gridColumn: `${position.x + 1} / span ${position.width}`,
-    gridRow: `${position.y + 1} / span ${position.height}`,
-  }
-}
 </script>
 
 <template>
@@ -746,17 +660,30 @@ function itemStyle(item: GridItem) {
 
         <div v-for="item in displayItems" :key="item.id" class="grid-item" :style="itemStyle(item)">
           <div v-if="!editing" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
-            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event)" />
-            <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" />
+            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" @output="handleOutput(item, $event, true)" />
+            <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" @output="handleOutput(item, $event)" />
-            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event)" />
-            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" />
+            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="!liveControls.has(item.id) ? playbackAutomation.get(`${item.id}:value`)?.value : undefined" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
+            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" @output="handleOutput(item, $event, true)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
               @advance="advanceSelector(item)" />
-            <Arpeggiator v-else :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
+            <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
+            <button v-else-if="item.type === 'sequenced-loop'" type="button" class="loop-control"
+              :style="{ '--loop-color': item.settings.color }"
+              :aria-label="playing ? `${loopStatus.get(item.id)?.enabled ? 'Stop' : 'Start'} ${item.label}` : `${item.settings.armed ? 'Disarm' : 'Arm'} ${item.label} for recording`"
+              :aria-pressed="playing ? (loopStatus.get(item.id)?.enabled ?? false) : item.settings.armed"
+              :disabled="playing && item.settings.armed"
+              :title="playing && item.settings.armed ? 'Armed loops stay on while the transport plays' : undefined"
+              @pointerdown="loopTap(item.id).down" @pointerup="loopTap(item.id).up"
+              @pointercancel="loopTap(item.id).cancel" @lostpointercapture="loopTap(item.id).cancel"
+              @click="loopTap(item.id).click">
+              <strong>{{ item.label }}</strong>
+              <span>Clip {{ item.settings.clipIndex }} · {{ loopStatus.get(item.id)?.pending ? 'Waiting' : loopStatus.get(item.id)?.enabled ? 'On' : 'Off' }}</span>
+              <span v-if="item.settings.armed" class="loop-record-indicator"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" /></svg>Record armed</span>
+            </button>
           </div>
           <button
             v-else
@@ -805,6 +732,7 @@ function itemStyle(item: GridItem) {
           <button type="button" @click="completeDrop('move')">Move</button>
           <button type="button" :disabled="!canCopyDrop" @click="completeDrop('copy')">Copy</button>
         </template>
+
       </div>
       <p v-if="!dropAction.swapId && !canCopyDrop" class="grid-message">There is not enough separate space to copy here.</p>
     </SettingsDialog>
@@ -830,52 +758,10 @@ function itemStyle(item: GridItem) {
       </div>
     </SettingsDialog>
 
-    <SettingsDialog v-if="draft" title="Control settings" :showSaveButton="true" @close="draft = null; selectedId = null; message = ''" @save="saveItem">
-      <template #header-actions>
-        <MPCPad v-if="draft.type === 'instrument-pad'" class="preview-pad" label="Play"
-          :settings="draft.settings" @output="handlePreviewOutput" />
-      </template>
-      <form v-if="draft" class="settings-form control-settings" @submit.prevent="saveItem">
-        <ControlIdentitySettings ref="controlIdentity" :draft="draft" :columns="layout.columns" :rows="layout.rows"
-          :control-types="controlTypes" @change-type="changeType" />
-
-        <section v-if="draft.type !== 'pad' && draft.type !== 'output-selector'" class="control-parameters">
-        <template v-if="draft.type === 'instrument-pad'">
-          <InstrumentPadSettingsPanel :draft="draft" @loading-change="sampleLoading = $event" />
-        </template>
-        <KnobSettingsPanel v-else-if="draft.type === 'knob'" :draft="draft"
-          @default-value-change="draft.settings.defaultValue = $event; if (!selectedId) draft.settings.value = $event" />
-        <LFOSettingsPanel v-else-if="draft.type === 'lfo'" :draft="draft">
-          <template #preview>
-            <LFO label="Preview" :settings="draft.settings" :bpm="bpm" />
-          </template>
-        </LFOSettingsPanel>
-        <ModWheelSettingsPanel v-else-if="draft.type === 'mod-wheel'" :draft="draft" />
-        <PianoRollSettingsPanel v-else-if="draft.type === 'piano-roll'" :draft="draft" />
-        <ArpeggiatorSettingsPanel v-else-if="draft.type === 'arpeggiator'" :draft="draft" />
-        </section>
-
-        <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">
-          <h3>Connections</h3>
-          <div v-for="connection in layout.connections.filter((entry) => entry.sourceId === selectedId || entry.targetId === selectedId)" :key="connection.id" class="wire-entry">
-            <div class="wire-entry-heading">
-              <span class="wire-entry-label">{{ connectionLabel(connection) }}</span>
-              <ConnectionMapping v-if="canSetModulationAmount(connection)" :layout="layout" :connection="connection"
-                :label="connectionLabel(connection)" @error="message = $event" />
-              <button type="button" class="wire-button" :aria-label="`Remove wire: ${connectionLabel(connection)}`"
-                title="Remove wire" @click="removeWire(connection)">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19" /></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
-        <div class="settings-actions">
-          <button v-if="selectedId" type="button" class="remove-button" @click="removeItem">Remove</button>
-        </div>
-      </form>
-    </SettingsDialog>
+    <GridControlSettingsDialog v-if="draft" :draft="draft" :selected-id="selectedId" :layout="layout" :bpm="bpm" :banks="banks" :bank-id="bankId"
+      :message="message" @update:message="message = $event"
+      @close="draft = null; selectedId = null; message = ''" @save="saveItem"
+      @remove="removeItem" @remove-wire="removeWire" @change-type="changeType" />
     <SettingsDialog v-if="wirePair && sourceItem && targetItem" title="Connect controls" @close="wirePair = null; message = ''">
       <form class="settings-form" @submit.prevent="connectWire">
         <p>{{ sourceItem.label }} → {{ targetItem.label }}</p>
@@ -907,3 +793,4 @@ function itemStyle(item: GridItem) {
     </SettingsDialog>
   </div>
 </template>
+

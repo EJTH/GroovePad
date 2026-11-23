@@ -39,7 +39,7 @@ onBeforeUnmount(() => cancelAnimationFrame(frame))
 </script>
 
 <template>
-  <button type="button" class="lfo" :class="{ held }"
+  <button type="button" class="lfo" :class="{ held }" :style="{ '--lfo-color': settings.color }"
     :aria-label="`${label}, ${settings.waveform} LFO, ${held ? 'held' : 'running'}`"
     :aria-pressed="held" @pointerdown="tap.down" @pointerup="tap.up"
     @pointercancel="tap.cancel" @lostpointercapture="tap.cancel" @click="tap.click">
@@ -51,8 +51,8 @@ onBeforeUnmount(() => cancelAnimationFrame(frame))
 </template>
 
 <style scoped>
-.lfo { position: relative; width: 100%; height: 100%; padding: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px solid transparent; background: #26332e; color: #e4f2dc; text-align: center; overflow: hidden; font: inherit; font-size: 11px; cursor: pointer; touch-action: none; }
-.lfo.held { border-color: var(--accent); }
+.lfo { position: relative; width: 100%; height: 100%; padding: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--lfo-color); background: color-mix(in srgb, var(--lfo-color) 15%, #171816); color: #e4f2dc; text-align: center; overflow: hidden; font: inherit; font-size: 11px; cursor: pointer; touch-action: none; }
+.lfo.held { border-width: 2px; }
 .lfo:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .lfo span, .lfo strong, .lfo small { position: relative; text-shadow: 0 1px 3px #171816, 0 0 5px #171816; }
 .lfo strong { font-size: 12px; }

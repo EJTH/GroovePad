@@ -12,9 +12,10 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const dependencies = {}
-    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'sequencedLoop']) {
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
+    dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     const { createControl } = dependencies['../grid']
     const pad = createControl('pad', 0, 0, 'pad')
     const selector = createControl('selector', 1, 0, 'output-selector')
@@ -112,9 +113,10 @@ test('connection dialog drafts mappings until connect and resets them when ports
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const dependencies = {}
-    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments']) {
+    for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'sequencedLoop']) {
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
+    dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     const { createControl } = dependencies['../grid']
     const knob = createControl('knob', 0, 0, 'knob')
     const lfo = createControl('lfo', 1, 0, 'lfo')

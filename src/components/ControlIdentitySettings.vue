@@ -82,7 +82,7 @@ details[open] summary::after { content: '▾'; }
 .color-picker input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
 .color-picker:focus-within .color-swatch { outline: 2px solid var(--accent); outline-offset: 2px; }
 .color-swatch { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid #777; border-radius: 2px; }
-.color-swatch.no-color { background: linear-gradient(135deg, transparent 47%, #777 48%, #777 52%, transparent 53%); }
+.color-swatch.no-color { position: static; flex: 0 0 40px; width: 40px; height: 40px; background: linear-gradient(135deg, transparent 47%, #777 48%, #777 52%, transparent 53%); }
 .control-name { min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 700; text-align: left; overflow-wrap: anywhere; cursor: text; }
 .control-name-input { flex: 1 1 8rem; width: 100%; min-width: 0; padding: 2px 4px; border: 1px solid var(--accent); border-radius: 2px; background: #171816; color: #ecece8; font: inherit; font-weight: 700; }
 .control-size { color: var(--muted); white-space: nowrap; }

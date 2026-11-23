@@ -16,5 +16,6 @@ const emit = defineEmits<{ 'default-value-change': [value: number] }>()
       @update:model-value="emit('default-value-change', $event)" />
     <NumericSetting v-model="draft.settings.value" label="Current value" :step="0.1" />
     <label>Unit <input v-model="draft.settings.unit" type="text" maxlength="10" /></label>
+    <label class="inline-checkbox"><input v-model="draft.settings.recordAutomation" type="checkbox" /> Record automation for this control</label>
   </div>
 </template>

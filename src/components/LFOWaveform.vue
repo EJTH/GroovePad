@@ -16,12 +16,12 @@ const waveform = computed(() => {
 </script>
 
 <template>
-  <svg class="waveform" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+  <svg class="waveform" :style="{ '--wave-color': settings.color }" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
     <path :d="waveform" :transform="`translate(${-phase * 100} 0)`" vector-effect="non-scaling-stroke" />
   </svg>
 </template>
 
 <style scoped>
 .waveform { position: absolute; inset: 8%; width: 84%; height: 84%; overflow: visible; pointer-events: none; }
-.waveform path { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0.55; }
+.waveform path { fill: none; stroke: var(--wave-color); stroke-width: 1.5; opacity: 0.55; }
 </style>
