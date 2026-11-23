@@ -29,7 +29,6 @@ export function useGridPlayback(options: {
   let automationSequence = 0
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
-  const loopPlayState = reactive(new Map<string, boolean>())
   const silentVoices = new Set<number>()
   const loopEngine = new SequencedLoopEngine(
     () => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop'),
@@ -76,7 +75,7 @@ export function useGridPlayback(options: {
   function startArmedLoops() {
     for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
       loop.settings.armed && !loopEngine.isEnabled(loop.id)) {
-      loopPlayState.set(loop.id, true)
+      loop.settings.playing = true
       loopEngine.toggle(loop, options.clock.position(), true)
       updateLoopStatus()
     }
@@ -101,7 +100,7 @@ export function useGridPlayback(options: {
     if (item?.type !== 'sequenced-loop') return
     if (!options.playing()) setLoopArmed(item, !item.settings.armed)
     else if (!item.settings.armed) {
-      loopPlayState.set(id, !loopEngine.isEnabled(id))
+      item.settings.playing = !loopEngine.isEnabled(id)
       loopEngine.toggle(item, options.clock.position())
       loopEngine.tick()
     }
@@ -177,7 +176,7 @@ export function useGridPlayback(options: {
   }
 
   function loopWantsPlayback(item: SequencedLoop) {
-    return loopPlayState.get(item.id) ?? (loopEngine.isEnabled(item.id) || item.settings.armed)
+    return item.settings.playing ?? (loopEngine.isEnabled(item.id) || item.settings.armed)
   }
 
   function previewX(position: number, length: number) {
@@ -242,7 +241,7 @@ export function useGridPlayback(options: {
     const loop = options.layout().items.find((item) => item.id === id)
     if (loop?.type !== 'sequenced-loop') return
     const shouldPlay = !loopWantsPlayback(loop)
-    loopPlayState.set(id, shouldPlay)
+    loop.settings.playing = shouldPlay
     if (options.playing() && !options.editing() && loopEngine.isEnabled(id) !== shouldPlay) {
       loopEngine.toggle(loop, options.clock.position())
       loopEngine.tick()
@@ -281,7 +280,7 @@ export function useGridPlayback(options: {
       if (options.playing()) {
         if (event.on) for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
           loop.settings.armed && (loop.settings.recordScope === 'all' || event.bankId === options.bankId) && !loopEngine.isEnabled(loop.id)) {
-          loopPlayState.set(loop.id, true)
+          loop.settings.playing = true
           loopEngine.toggle(loop, options.clock.position(), true)
           updateLoopStatus()
         }
@@ -403,7 +402,7 @@ export function useGridPlayback(options: {
       const transportStarting = previous === false && !!options.transportStartImmediate()
       for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
         (loopWantsPlayback(loop) || (starting && options.triggeredByInput() && loop.settings.armed)) && !loopEngine.isEnabled(loop.id)) {
-        if (starting && options.triggeredByInput() && loop.settings.armed) loopPlayState.set(loop.id, true)
+        if (starting && options.triggeredByInput() && loop.settings.armed) loop.settings.playing = true
         loopEngine.toggle(loop, transportStarting ? 0 : options.clock.position(),
           transportStarting || (starting && !!options.transportStartImmediate() && loop.settings.armed))
       }
@@ -429,7 +428,6 @@ export function useGridPlayback(options: {
     liveControls,
     loopStatus,
     loopPlayheads,
-    loopPlayState,
     playbackAutomation,
     effectiveSignals,
     displayItems,

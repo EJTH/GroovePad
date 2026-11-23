@@ -110,7 +110,8 @@ function isItem(value: unknown): value is GridItem {
       (s.baseIndex === undefined || integer(s.baseIndex, 0, Number.MAX_SAFE_INTEGER))
     case 'sequenced-loop': return color(s.color) && (s.volume === undefined || within(s.volume, 0, 1)) &&
       (s.muted === undefined || typeof s.muted === 'boolean') && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
-      typeof s.armed === 'boolean' && typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
+      typeof s.armed === 'boolean' && (s.playing === undefined || typeof s.playing === 'boolean') &&
+      typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
       oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
       Array.isArray(s.clips[String(s.clipIndex)]) &&
       object(s.automation) && Object.entries(s.automation).every(([index, events]) =>

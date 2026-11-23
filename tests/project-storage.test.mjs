@@ -24,10 +24,14 @@ test('IndexedDB stores sample blobs and restores projects and shared samples', a
     const source = 'data:audio/wav;base64,YWJj'
     hit.settings.instrumentParams.sample = source
     hit.settings.instrumentParams.sampleName = 'beat.wav'
+    const playingLoop = createControl('playing', 1, 0, 'sequenced-loop')
+    const pausedLoop = createControl('paused', 2, 0, 'sequenced-loop')
+    playingLoop.settings.playing = true
+    pausedLoop.settings.playing = false
     const project = {
       version: 1, bpm: 120, infoText: '  Local   project info  ', infoScrollSpeed: 12.5, selectedBankId: 'A', assets: [{ name: 'beat.wav', source }],
       banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
-        layout: { columns: 4, rows: 4, items: [hit], connections: [] } }],
+        layout: { columns: 4, rows: 4, items: [hit, playingLoop, pausedLoop], connections: [] } }],
     }
 
     await saveStoredProject(project)

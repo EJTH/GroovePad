@@ -94,7 +94,7 @@ test('loop volume scales notes, mute releases them, and automation remains activ
       },
     })
     app.mount({})
-    playback.loopPlayState.set('loop', true)
+    playback.toggleLoopPlayback('loop')
     playing.value = true
     assert.equal(events.find((event) => event.kind === 'loop-note' && event.on)?.note.velocity, 50)
     layout.items[0].settings.muted = true
@@ -291,6 +291,69 @@ test('loop data is copied independently and validates through project save/load'
     loop.settings.clips[0][0].position = 4
     assert.equal(isSavedProject(project), false)
   } finally { await server.close() }
+})
+
+test('loop play choices survive project export and restore playback on transport start', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  const apps = []
+  try {
+    const { useGridPlayback } = await server.ssrLoadModule('/src/components/useGridPlayback.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const { isSavedProject, migrateSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const ready = createControl('ready', 0, 0, 'sequenced-loop')
+    const paused = createControl('paused', 1, 0, 'sequenced-loop')
+    const legacy = createControl('legacy', 2, 0, 'sequenced-loop')
+    paused.settings.armed = true
+    const project = reactive({ version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 3, rows: 1, items: [ready, paused, legacy], connections: [] },
+    }] })
+    const playing = ref(false)
+    function mount(layout) {
+      let playback
+      const app = testRenderer().createApp({
+        setup() {
+          playback = useGridPlayback({
+            layout: () => layout, banks: () => undefined, bankId: 'A', bankEvents: new BankEventBus(),
+            clock: { position: () => 0 }, playing: () => playing.value, editing: () => false,
+            transportStartImmediate: () => true, triggeredByInput: () => false,
+            startOnInput: () => undefined, signals: new Map(), routeNote() {},
+          })
+          return () => h('div')
+        },
+      })
+      app.mount({})
+      apps.push(app)
+      return playback
+    }
+    const playback = mount(project.banks[0].layout)
+    assert.equal(playback.loopWantsPlayback(legacy), false)
+    assert.equal(playback.loopWantsPlayback(paused), true)
+    playback.toggleLoopPlayback('ready')
+    playback.toggleLoopPlayback('paused')
+    assert.equal(ready.settings.playing, true)
+    assert.equal(paused.settings.playing, false)
+    const loaded = await loadProjectFromFile(await saveProjectToFile(project))
+    migrateSavedProject(loaded)
+    assert.equal(isSavedProject(loaded), true)
+    const restored = mount(reactive(loaded.banks[0].layout))
+    playing.value = true
+    assert.equal(restored.loopEngine.isEnabled('ready'), true)
+    assert.equal(restored.loopEngine.isEnabled('paused'), false)
+    assert.equal(restored.loopEngine.isEnabled('legacy'), false)
+    restored.toggleLoopPlayback('ready')
+    assert.equal(loaded.banks[0].layout.items[0].settings.playing, false)
+    playing.value = false
+    playing.value = true
+    assert.equal(restored.loopEngine.isEnabled('ready'), false)
+    loaded.banks[0].layout.items[0].settings.playing = 'yes'
+    assert.equal(isSavedProject(loaded), false)
+  } finally {
+    for (const app of apps) app.unmount()
+    await server.close()
+  }
 })
 
 test('transport beat position remains continuous across tempo changes', async () => {

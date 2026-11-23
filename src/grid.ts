@@ -90,6 +90,7 @@ export interface SequencedLoopSettings {
   barLength: number
   clipIndex: number
   armed: boolean
+  playing?: boolean
   countIn: boolean
   metronome: boolean
   syncMode: 'immediate' | 'sync'

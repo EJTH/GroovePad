@@ -67,7 +67,7 @@ const clock = props.transportClock ?? new TransportClock()
 const bankId = props.bankId ?? ''
 const bankEvents = props.bankEvents ?? new BankEventBus()
 const {
-  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, loopPlayState, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
+  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
   changeLoopIndex,
   recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, previewColor, loopPreviewCurves, armLoop,
   setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride, displayedAutomation,
@@ -87,7 +87,6 @@ const {
 })
 void loopEngine
 void loopAutomation
-void loopPlayState
 void toggleLoop
 void changeLoopIndex
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))

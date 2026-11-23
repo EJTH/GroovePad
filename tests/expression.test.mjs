@@ -1672,7 +1672,7 @@ test('loop arm and play controls operate independently while the transport runs'
       { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
     try {
       grid.api.toggleLoopPlayback('loop')
-      assert.equal(grid.api.loopPlayState.get('loop'), true)
+      assert.equal(loop.settings.playing, true)
       assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
 
       props.playing = true
@@ -1689,9 +1689,9 @@ test('loop arm and play controls operate independently while the transport runs'
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
       props.playing = false
       assert.equal(grid.api.loopEngine.isEnabled('loop'), false)
-      assert.equal(grid.api.loopPlayState.get('loop'), true)
+      assert.equal(loop.settings.playing, true)
       grid.api.toggleLoopPlayback('loop')
-      assert.equal(grid.api.loopPlayState.get('loop'), false)
+      assert.equal(loop.settings.playing, false)
 
       loop.settings.clips['0'] = [{ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 }]
       loop.settings.automation['0'] = [{ sourceId: 'knob', parameter: 'value', value: 64, position: 0 }]
