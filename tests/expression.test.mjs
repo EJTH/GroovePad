@@ -746,6 +746,71 @@ test('toggle mode mutes incoming notes without changing trigger mode behavior', 
   }
 })
 
+test('startup loads the default project only when no saved project exists', async () => {
+  const project = (id) => ({
+    version: 1, bpm: 123, selectedBankId: id,
+    banks: [{ id, title: id, icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+  })
+  const defaultProject = project('default')
+  const savedProject = project('saved')
+  let stored
+  let defaultLoads = 0
+  let defaultError
+  const app = await setupComponent('App', {}, {
+    './defaultProject': { loadDefaultProject: async () => {
+      defaultLoads++
+      if (defaultError) throw defaultError
+      return defaultProject
+    } },
+    './projectStorage': { loadStoredProject: async () => stored, saveStoredProject: async () => {} },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20 },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: () => null },
+    window: { clearTimeout, setTimeout, removeEventListener() {} },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await app.api.initializeStorage()
+    assert.equal(app.api.selectedBank.value.id, 'default')
+    assert.equal(defaultLoads, 1)
+
+    stored = savedProject
+    await app.api.initializeStorage()
+    assert.equal(app.api.selectedBank.value.id, 'saved')
+    assert.equal(defaultLoads, 1)
+  } finally {
+    app.dispose()
+  }
+
+  stored = undefined
+  defaultError = new Error('template unavailable')
+  const failed = await setupComponent('App', {}, {
+    './defaultProject': { loadDefaultProject: async () => { throw defaultError } },
+    './projectStorage': { loadStoredProject: async () => undefined, saveStoredProject: async () => {} },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20 },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: () => null },
+    window: { clearTimeout, setTimeout, removeEventListener() {} },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await failed.api.initializeStorage()
+    assert.equal(failed.api.storageReady.value, true)
+    assert.equal(failed.api.storageBlocked.value, true)
+    assert.equal(failed.api.selectedBank.value, undefined)
+    assert.match(failed.api.storageError.value, /Default project could not be loaded:.*template unavailable/)
+  } finally {
+    failed.dispose()
+  }
+})
+
 test('tapping a resize handle opens settings without preventing resize drags', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -762,10 +827,12 @@ test('tapping a resize handle opens settings without preventing resize drags', a
     const start = pointer(1, target, 'touch', 0.5, 0, 0)
     grid.api.startInteraction(start, layout.items[0], 'resize')
     grid.api.endInteraction(start)
+    grid.api.clickInteraction({ detail: 1 }, layout.items[0])
     assert.equal(grid.api.draft.value.id, 'pad')
     grid.api.draft.value = null
     grid.api.startInteraction(start, layout.items[0], 'resize')
     grid.api.endInteraction(pointer(1, target, 'touch', 0.5, 100, 0))
+    grid.api.clickInteraction({ detail: 1 }, layout.items[0])
     assert.equal(layout.items[0].width, 2)
     assert.equal(grid.api.draft.value, null)
     grid.dispose()
