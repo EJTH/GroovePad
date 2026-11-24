@@ -19,9 +19,7 @@ function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
 }
 
-const banks = ref<Bank[]>([
-  
-])
+const banks = ref<Bank[]>([])
 
 const selectedBankId = ref('A')
 const bpm = ref(120)
@@ -50,6 +48,10 @@ let saveTimer: number | undefined
 let saveQueue = Promise.resolve()
 
 async function initializeStorage() {
+  storageReady.value = false
+  storageBlocked.value = false
+  storageError.value = ''
+  let loadingDefault = false
   try {
     let data = await loadStoredProject()
     if (!data) {
@@ -63,18 +65,20 @@ async function initializeStorage() {
         data = legacy
       }
     }
-    if (data) {
-      banks.value = data.banks
-      selectedBankId.value = data.selectedBankId
-      bpm.value = data.bpm
-      infoText.value = data.infoText ?? ''
-      infoScrollSpeed.value = data.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
-      assets.value = data.assets ?? []
-      for (const asset of samplesInBanks(data.banks)) addAsset(asset)
+    if (!data) {
+      loadingDefault = true
+      data = await loadDefaultProject()
     }
+    banks.value = data.banks
+    selectedBankId.value = data.selectedBankId
+    bpm.value = data.bpm
+    infoText.value = data.infoText ?? ''
+    infoScrollSpeed.value = data.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
+    assets.value = data.assets ?? []
+    for (const asset of samplesInBanks(data.banks)) addAsset(asset)
   } catch (error) {
     storageBlocked.value = true
-    storageError.value = `Local project could not be loaded: ${error instanceof Error ? error.message : String(error)}. Saved data has not been overwritten.`
+    storageError.value = `${loadingDefault ? 'Default project' : 'Local project'} could not be loaded: ${error instanceof Error ? error.message : String(error)}. Saved data has not been overwritten.`
   } finally {
     await nextTick()
     storageReady.value = true
@@ -414,6 +418,12 @@ onUnmounted(() => {
 
 <template>
   <p v-if="!storageReady" role="status">Loading project...</p>
+  <div v-else-if="!selectedBank" class="storage-error" role="alert">
+    {{ storageError }}
+    <p v-if="projectError">{{ projectError }}</p>
+    <button type="button" @click="initializeStorage">Retry</button>
+    <button type="button" :disabled="busy" @click="newProject">Replace saved project</button>
+  </div>
   <main v-else class="app">
     <header class="header">
       <section class="transport" aria-label="Transport">
