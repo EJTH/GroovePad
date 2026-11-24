@@ -11,6 +11,8 @@ The workspace is organised as:
 3. The selected bank's grid in the main workspace.
 4. Optional dialogs for project, bank, control, and asset settings.
 
+Open **Menu → User Manual** for the documentation, or **Menu → About** for the app version, license information, and related links.
+
 ![Main transport and grid view](./images/main-workspace.png)
 
 ## Install GroovePad as a PWA

@@ -1,101 +1,71 @@
-# GroovePad.js
+# Getting started
 
-A mobile-first groovebox built with Vue 3, TypeScript, and Vite.
+GroovePad is a highly customizable, modular, flexible and open-source music groovebox application that runs in your browser, smartphone, tablet or desktop. It is designed and intended for jamming and performing and as such doesnt feature an "arrangement" timeline, instead a session record feature lets you capture your jams directly to an audio file.
 
-While the app is visible, it requests a screen wake lock to prevent the display from sleeping. This requires a supported browser and a secure context (HTTPS or localhost); the browser or device may still deny or release the lock, for example when battery is low.
+## Brief list of features
 
-Pads and piano keys react on pointer-down and disable browser touch gestures on the playing surface. Audio uses a short scheduling buffer to reduce playing latency; actual latency also depends on the device and audio output.
+- 303, 808, 909 Synths (More and better synth models are planned)
 
-## Development
+- A feature rich sampler:
+  - supports toggleable loops and hits.
+  - polyphonic, as much as your device can handle
+  - sustain (loop or back and forth if the sample is not long enough)
+  - ADSR Envelope
+  - Cuts: randomize cuts, play a specific cut - Automate or modulate selection
+  - Editor with zoom for precise placement of start/stop/cut markers.
 
-Run `npm run dev` to start the development server. Run `npm run build` to type-check and create a production build.
+- A fully modular grid where everything can be rearranged and resized with the following elements currently implemented and many more planned:
+  - Instruments
+  - Knobs, Faders and modwheel
+  - LFOs and Envelopes
+  - Arppegiator (More "MIDI" stuff will be added)
+  - Pads, pad grids, piano rolls.
+  - A loop sequencer that can record notes and automation on any other compoenent!
+  - A simple to use grid system with an optional but powerful wire system that lets you route any value, note or signal for advanced synth modulation or even workflows.
 
-Run `npm run setup-hooks` once per clone to enable automatic patch-version bumps on local commits. The hook updates and stages both `package.json` and `package-lock.json`; stage any changes to those files before committing. Hooks can be bypassed with `--no-verify` and do not run for commits created outside the clone. The setup refuses to replace an existing hooks configuration.
 
-## Install and offline use
+## Planned features (Soon)
+Within 14 day I hope to have implemented the following features:
+- More and more refined synth models.
+- FX (Punch in, global send channels, wireing etc)
+- Planned FX: Beat repeat, Stutter, Reverb, Echo, Filters, EQ, Limiter, Bitcrush, Flanger, Pitch shift, spectral freeze, gain, tube amp and more!
+- Entire tone.js backend as modular tools for custom patches that can be reused.
 
-The production build can be installed from a supported browser. On iPhone and iPad, use the browser's Share menu and choose **Add to Home Screen**. Other browsers may offer an Install option; availability varies by browser. Visit the app online first and allow it to finish loading before using it offline. When an update is ready, use the **Update** button to save the current project and reload; playback stops, and session recording must be stopped first. Each open tab can update when ready.
 
-Projects and sample audio are saved in the browser's IndexedDB. Browser storage is device- and origin-specific and can be cleared or limited by the browser; use **Save project** to keep a separate backup. Existing locally saved projects are transferred to IndexedDB on first launch. The development server is not an offline PWA; test installation with a production build served over HTTPS or localhost.
 
-## GitHub Pages
 
-Set the repository's **Settings > Pages > Build and deployment > Source** to **GitHub Actions**. Pushes and pull requests are tested and built; successful pushes to `main` publish the beta at the site's `beta/` path while preserving the stable site. Beta has its own installable app name, icon and project storage; use project export/import to transfer projects. Before the first release, stable is built from the revision recorded in `.github/stable-ref`. Older versions without the update button may need all app tabs and installed app windows closed and reopened before the new update flow can load. If an older stable service worker intercepts beta, close all stable tabs and reopen the site to let the updated service worker take over.
 
-To publish stable, run **Actions > Release stable > Run workflow** on `main`. The workflow bumps the minor version and resets the patch, tests and builds both sites, commits and tags the release, creates a GitHub Release, and deploys Pages. The workflow token needs permission to push to `main` and create tags; branch protection must allow this. Pull the release commit before your next push. If a release fails after the commit and tag are pushed, inspect the workflow and repository state before retrying.
 
-## Current functionality
 
-The header contains the transport controls, tempo and current bank display, and beat indicator. Click the tempo to open project settings, where you can enter a precise BPM or tap the **Tap** button at least twice, and set optional info text that scrolls beside the BPM. Adjust its speed from 1 to 100 pixels per second (default 20). Tap tempo averages up to four recent intervals. Settings changes apply immediately and are kept when the dialog closes. Numeric values are limited to their valid ranges; knob steps do not restrict typed values. Below the header are the bank selector and editable grid. Each bank has its own layout, initially 4 by 4, with up to 8 columns and 10 rows. Enable edit mode with the header button, then tap a **+** cell and choose a control from the icon grid. Expand the name and size summary in control settings to edit its type, name, color and layout. Instrument pads have a separate icon grid for choosing their instrument type. Tap an existing control to edit or remove it. Drag a control to an empty cell to move or copy it, or onto another control to swap them when both fit. Copies do not include wires. Drag a corner to resize. Turn off edit mode to play. **Grid settings** changes the number of columns and rows; controls cannot overlap or extend outside the grid.
+# Installing for offline use
+The official GroovePad.io app cannot be found on any "app store". The app is an HTML5 Progressive Web Application - So it has to be installed on your device through the browser. How to do this depends on the platform, see below.
 
-Use the header **Record session** button to capture the app's performance audio, including live playing and loops. Press it again to stop and download the recording. Recording is independent of the transport, and metronome and count-in clicks are not included. Project settings lists recording formats supported by the browser; the choice is saved with the project. Ogg/Opus is the default when supported, otherwise stereo 16-bit WAV. WAV requires AudioWorklet and a secure context (HTTPS or localhost), and produces larger files. A format selected on another device may be unavailable; choose a supported format before recording. WebM files may not be seekable in some audio players. Long sessions use more memory, and leaving the app before stopping discards the recording.
+## iOS
 
-Tapping a resize corner without dragging also opens the control's settings, including on small grid cells.
+1. Open GroovePad.io in Safari while online.
+2. Tap **Share**, then **Add to Home Screen**.
+3. Confirm, then open GroovePad from its Home Screen icon.
 
-Numeric settings offer both a knob and an input for precise entry. Knobs for unbounded values adjust over an adaptive range; enter a larger or smaller value to change that range.
+## Android
 
-Drag knobs right or up to increase their value, and left or down to decrease it. These directions rotate with the control. Mouse wheels and horizontal trackpad scrolling also adjust them.
+1. Open GroovePad.io in Chrome while online.
+2. Open the browser menu and tap **Install app** or **Add to Home screen**.
+3. Confirm, then open GroovePad from its app icon.
 
-Every grid control has a **Control orientation** setting under Layout. Vertical rotates the entire control clockwise, including its label; horizontal leaves it upright. The piano roll's separate keyboard layout setting determines how its keys are arranged before rotation.
+## Chrome
 
-Use the edit button in the header to add controls, then the wire button to drag from a source to a destination and select their compatible parameters. The wire button is available independently of edit mode. Knobs can be wired to LFO rate, waveform, depth or offset. Selectable settings divide the 0–127 input range evenly among their options, in menu order. LFO offset shifts the waveform, with output limited to -1 through 1. Banks, controls, and wires are saved in browser storage.
+1. Open GroovePad.io in Chrome while online.
+2. Select the install icon in the address bar, or open the menu and choose **Install app**.
+3. Confirm the installation and launch GroovePad from the installed app.
 
-The header tools are mutually exclusive. In **Volume mode**, drag an instrument pad or loop sequencer tile up or right to increase its volume, or use its corner button to mute it. Instrument volume adjusts its saved base setting; loop volume scales played note velocities without affecting recorded automation. Muting a loop releases its playing notes but leaves automation running. These settings are saved with the project.
+# Release Notes
 
-In **Note repeat**, choose 1/4, 1/8, 1/16 or 1/32 in the banner and hold a trigger-mode instrument pad, pad or piano key. The first note waits for the next subdivision; releasing before then produces no note. The division can be changed while holding a note. Repeats follow the transport during playback and the project tempo when stopped. Armed loop sequencers record the repeated instrument-pad and piano notes individually. Toggle-mode instrument pads retain their normal input-mute behavior.
 
-LFO settings include an animated preview using the current settings and project tempo. Tap the preview to hold or resume it without affecting the grid. LFOs, arpeggiators and loop sequencers have configurable colors in their control settings.
 
-LFOs, knobs and mod wheels can also control the numeric and selectable sound settings of Sample Hit, Sample Loop, 303 and 808 instrument pads. Sample playback mode, loop mode and reverse, and 808 drum type are selectable destinations. Sample pitch, volume and envelope settings update active voices; playback mode, direction and drum settings take effect on the next trigger. Sample files, waveform markers and instrument type are not modulation destinations.
+# Build & Development
 
-Wired knobs add their current value to the destination's configured value; their minimum can be negative. An auto-centering mod wheel adds or subtracts up to its depth as a fraction of the destination range, returning to zero adjustment at the center. Adjustments are clamped to the destination range and do not overwrite its saved base value.
+See the [developer guide](docs/developer-guide.md).
 
-In the connect dialog or either control's settings, use **MOD** or **ABS** on a numeric connection and set its minimum and maximum endpoints. MOD adds offsets from -100% to 100% of the destination's range to its configured value. ABS sets actual destination values; for selectable settings, choose the endpoint options instead. The source's minimum and maximum map to the endpoints, with linear interpolation between them; reversed and equal endpoints are supported. Switching from MOD to ABS clamps negative percentages to zero before converting them to destination values. Blank ABS endpoints use the destination's minimum and maximum; blank MOD endpoints default to -100% for the minimum of a bipolar source or 0% otherwise, and 100% for the maximum. Older percentage-based ABS and single-amount mappings retain their behavior. For an Output Selector, MOD offsets the incoming numeric signal or the user-selected output, respectively; ABS sets the signal or output selection. Note connections do not have numeric mappings.
+# License
 
-An Output Selector accepts one number or note input and routes it to one connected destination at a time. Connect destinations of the same signal type; tap the selector to cycle through them in wire creation order. Its separate Output selection input scales the source's output range to 0–127, then maps it evenly across those destinations. It displays the selected control and input name and the latest incoming signal value, and briefly highlights the newly selected destination when tapped. Held notes move to the newly selected destination.
-
-Piano rolls have a configurable color and show note names. The arpeggiator runs while it receives held notes, for example from a wired piano roll, and displays the current note name. During playback its steps follow the transport's note divisions; changing held notes does not restart the rhythm. While the transport is stopped it plays independently at the displayed tempo. Tap it to toggle between arpeggiation and passing notes through unchanged. Its **On/off** input can also be wired to a numeric output: values 0–63 select off and 64–127 select on after mapping. A wire changes the effective state without overwriting the saved toggle; an active ABS wire takes precedence over taps. Steps sets the number of transposed distance levels beyond the original notes; each level contains all held notes. Distance transposes successive levels in semitones. Every style starts at the untransposed level; Down plays the notes in descending order within each level. Non-chromatic scales quantize transposed notes upward relative to each held note.
-
-New arpeggiators default to distance 12 and steps 0; existing saved settings are unchanged.
-
-A **Loop sequencer** records notes played directly on instrument pads or piano rolls. Piano notes play back through the piano roll's current connections, including any arpeggiator; generated arpeggiator notes are not recorded. When a sequencer is armed, playing a pad or piano roll starts the transport and recording immediately, including the first hit. **Record from** selects the loop's own bank (default) or all banks; this setting applies to all its clips. Recording overdubs the selected **Clip index** (0–15); choosing an unused index creates an empty clip. The clip index can also be wired to a numeric control; the wire selects the effective clip without overwriting the saved index. Each note retains its bank, source, pitch, velocity, initial bend and duration. Loop playback is not recorded again. Notes whose original source or bank has been removed are skipped.
-
-In the sequence editor, use the actions button to add a row, or tap, long-press or right-click a row label for its actions. The toolbar also has timeline zoom and full-screen controls. A playhead marks playback when the edited clip is active. Mute applies to that note or automation row in the current clip only. Remove deletes that row from the current clip or from every clip in this loop. Copy and paste retains the original row identity and replaces its events and mute state in the destination clip; the clipboard is available while the loop settings are open. Clone sequence copies all rows and mute states to the first unused clip index and selects it; cloning is unavailable when all 16 indices are in use.
-
-Only one loop sequencer can be armed across all banks. Arming another disarms the previous one without stopping its playback. Copies are created disarmed; when loading an older project with multiple armed sequencers, only the first remains armed.
-
-Loop settings let you choose which buttons appear on its tile: play/pause, record arm, clear, clone, next/previous clip, full-screen editor and quantization. Existing and new loops show arm, play/pause and clear by default. Choose play/pause while the transport is stopped to set whether the loop should start when playback begins; stopping playback preserves that choice, and it is saved with the project. An armed loop starts automatically unless its play state is turned off. Clear erases notes and motion events from the displayed clip; clone copies it to the first unused clip and selects that index. The editor button opens the displayed clip in full screen. Quantization cycles through off, 1/4, 1/8, 1/16 and 1/32. Swipe up or down on a loop (or use the up and down arrow keys) to change its saved clip index by one, from 0 to 15. An active ABS clip-index wire takes precedence over the saved selection; MOD wires adjust it, including after using the clip buttons. The red record icon shows when recording is armed. **Bar length** is 1–64 bars of four beats; all clips in that loop share the length. **Immediate** starts at once, while **Sync to clip length** starts at the next matching transport boundary. All banks remain live when not displayed; switching banks or entering edit mode does not stop their loops or instruments. Recordings and clip settings are saved with the project.
-
-The metronome button above the beat indicator toggles clicks during playback, whether or not a loop is armed. It starts off each time the app opens. If an armed sequencer has **One-bar count-in before recording** enabled, the app Play button gives an audible four-beat lead-in before playback, regardless of the metronome setting. Starting by playing a pad or piano roll skips this lead-in and starts immediately. In either case, all loops selected for playback start together at the transport start, regardless of their sync modes.
-
-Armed loops record arpeggiator on/off taps and LFO hold/resume taps during playback. These replay as control state changes; live taps take priority until the next recorded event, and a wired arpeggiator on/off input retains its usual precedence.
-
-The loop settings show a tracker for the chosen clip. Add a source/note row, then tap a 1/16 step to add a note. Tap an event to edit its source, pitch, velocity, position or duration; tap a single event again or use Delete to remove it. When a step contains multiple events, choose one from the event list. Recorded timings remain unchanged until edited. Zoom with the timeline buttons and scroll horizontally to pan. Note rows use their source colors; recorded control automation appears in separate rows whose events can also be edited or deleted. Changing the clip index opens that clip, creating it if needed.
-
-**Record quantize** snaps newly recorded note starts to the nearest 1/4, 1/8, 1/16 or 1/32 note; Off preserves their timing. Notes rounded to the loop end wrap to its start. Existing notes, note durations, editor placement and automation timing are not changed.
-
-Enable **One-bar count-in before recording** to hear four beats before an armed loop starts playback and recording; input during the count-in is not recorded. In sync mode the count-in leads into the next clip-length boundary with room for a full bar. Coincident count-in and metronome beats share a single click. Count-in is off by default.
-
-Armed loops also record pointer-dragged knob movements, user-generated mod-wheel movements and pad/piano velocity, pressure and gate outputs while the transport runs. Continuous motion is sampled once per 1/32-note interval, with the final value also retained on release; separate gestures remain separate. Note, velocity and gate events are not rate-limited. Knob changes from LFOs, loop playback, scrolling or keyboard input are not recorded. Velocity, pressure and gate outputs are recorded as automation only when wired; note velocity is always retained in the note itself. Knob and mod-wheel settings include **Record automation for this control**, enabled by default; disabling it stops new automation from that control being recorded without affecting existing playback. On playback these changes drive the original controls' existing wires; moving a control yourself takes priority while it is being used. If multiple loops automate the same output, the most recently played event takes precedence. Automation does not replace saved base settings.
-
-Recording continuous motion replaces that control's existing automation over the touched portion of the clip, including across the loop boundary; other controls and notes remain overdubbed independently. While playback is running, armed loops also record sound and performance settings changed in control settings, including instrument parameters, envelopes and selections, knob ranges, LFOs, mod wheels, piano rolls and arpeggiators. Settings automation follows the same bank scope and overrides the saved value during playback without replacing it; the settings dialog displays the effective playback value. Layout, names, colors, control and instrument types, sample files and waveform cuts are not recorded. The loop preview shows the playing position and uses the original controls' colors for notes and automation.
-
-Use the menu to add a bank, edit its title, icon, color and grid dimensions, or remove it after confirmation. A long press on a bank also opens its settings. **Add bank from file** accepts a project ZIP and lets you choose a bank, or accepts an individual bank JSON file. Project settings changes the tempo and info text. The browser automatically saves the current project locally.
-
-Sample Hit and Sample Loop pads accept local audio files up to 2 MB, or record from a microphone with **Record** and **Stop**. Recording requires microphone permission and a secure browser context (HTTPS or localhost). Recordings are numbered mono 16-bit WAV files and have no fixed time limit, but large recordings may exceed browser storage or available memory. **Reset** removes the sample and its markers.
-
-Samples imported or recorded are kept in the project asset library, even after resetting or removing a pad. In Sample Hit settings, use the archive button to load a project sample. The menu's **Manage assets** opens the same library without selection and lets you swap a sample for a local audio file in every pad using it. Deleting a sample requires pressing Delete twice and unsets it from all pads using it; swapping or deleting resets their waveform markers. Existing projects' embedded pad samples are added to the library when loaded.
-
-The waveform editor lets you drag to pan, scroll or pinch to zoom, and drag the start, end and cut markers. Choose **Add cut** and tap the waveform to split the selected region; remove cuts with the corresponding buttons. With cuts present, choose random, sequential or a specific cut for each trigger. For Sample Hit, choose **Loop mode** under Playback to select Loop or Back and forth; reverse playback is also available. When looping, it plays the lead-in and repeats between the first and last cuts; one cut loops from start to that cut, and no cuts loop the whole region. Sample Loop repeats the selected cut. On release, looping continues as the envelope fades, then exits at a loop boundary to play the tail toward the region's end (or start when moving backward). If the tail cannot fit, it begins immediately and fades out at the end of release. Raise envelope sustain above zero to hear held loops; release can be set up to 10 seconds. Samples are embedded in the project; browser storage is limited and reports an error if its quota is exceeded.
-
-Sample Hit's **Polyphony** sets the maximum number of sounding voices from 1 to 16 (default 1). Higher values let wired piano rolls play chords, including through note-routing controls; each pitch has its own release and glide bend. When the limit is reached, the oldest sounding voice is stopped. Multiple sources holding the same pitch share a held note until all release it. Other instruments remain monophonic.
-
-Hold **Play** in an instrument's settings header to preview the current settings, and release it as you would a pad.
-
-New instruments default to 100% sustain and a 0.5-second release, including the 303 filter envelope. Existing saved settings are unchanged.
-
-Use **Save project** to download a ZIP and **Load project** to choose one. Loading validates the complete project before replacing the current one. The version 1 archive contains `manifest.json`, one JSON configuration per bank under `banks/`, audio files under `samples/`, and an empty `loop_midi/` directory. Sample names are made unique in the archive when necessary. Older projects with embedded samples remain supported. Project size is limited by available browser storage and memory, rather than a fixed archive size. Archives containing separate MIDI files are not supported. Legacy sample URLs are cleared when loading; choose a local file instead. A bank whose loops target other banks must be loaded as part of its complete project, rather than imported alone.
-
-Pads and piano rolls expose velocity (0–127, set at note-on) and pressure (0–127, updated while held) as wireable outputs. Both support the same mapping modes as other numeric sources. Pressure-sensing pointers use pressure; other pointers use position from top to bottom, or left to right on a vertical piano roll. Keyboard presses use 100. The piano roll outputs the average pressure of all held contacts, rounded to the nearest integer. Once all contacts are released, pressure stops driving connected controls. Arpeggiators expose the velocity of each outgoing note, including in bypass mode. The header's separate recording button is not implemented yet.
-
-The piano roll's **Pressure mode** can instead force position on the key, even when a device reports pressure. This also sets the note-on velocity. Pressure sensing mode retains the position fallback for pointers that do not report usable pressure.
+GroovePad.io is licensed under the GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).

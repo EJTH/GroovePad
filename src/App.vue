@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import GrooveGrid from './components/GrooveGrid.vue'
+import AboutDialog from './components/AboutDialog.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import TempoDialog from './components/TempoDialog.vue'
@@ -198,6 +199,7 @@ const toolLabel = computed(() => tool.value ? ({ edit: 'EDIT MODE', wire: 'WIRE 
 const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
 const assetsOpen = ref(false)
+const aboutOpen = ref(false)
 const projectError = ref('')
 const recordingError = ref('')
 const recordingState = ref<'idle' | 'starting' | 'recording' | 'stopping'>('idle')
@@ -602,6 +604,9 @@ onUnmounted(() => {
             <button type="button" :disabled="banks.length <= 1" @click="removeBankOpen = true; menuOpen = false">Remove current bank</button>
             <button type="button" @click="editBank(selectedBank); menuOpen = false">Bank settings</button>
             <button type="button" @click="gridSettingsOpen = true; menuOpen = false">Grid settings</button>
+            <p>Help</p>
+            <a href="https://github.com/EJTH/GroovePad/blob/main/docs/README.md" target="_blank" rel="noopener noreferrer" @click="menuOpen = false">User Manual</a>
+            <button type="button" @click="aboutOpen = true; menuOpen = false">About</button>
           </nav>
         </template>
       </div>
@@ -677,6 +682,7 @@ onUnmounted(() => {
       />
     </section>
     <SampleAssetsDialog v-if="assetsOpen" @close="assetsOpen = false" />
+    <AboutDialog v-if="aboutOpen" :version="version" @close="aboutOpen = false" />
     <SettingsDialog v-if="bankSettings" title="Bank settings" @close="closeBankSettings">
       <form class="settings-form bank-form" @submit.prevent="closeBankSettings">
         <label>Title <input :value="bankSettings.title" required maxlength="80" @input="updateBankText($event, 'title')" @blur="updateBankText($event, 'title', true)"></label>
