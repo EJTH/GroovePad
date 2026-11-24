@@ -20,7 +20,7 @@ const emit = defineEmits<{ 'loading-change': [loading: boolean] }>()
       </select>
     </label>
     <label class="inline-checkbox"><input v-model="draft.settings.instrumentParams.reverse" type="checkbox" /> Reverse playback</label>
-    <NumericSetting v-model.number="draft.settings.instrumentParams.polyphony" label="Polyphony (voices)" :min="1" :max="16" :step="1" />
+    <NumericSetting v-model.number="draft.settings.instrumentParams.polyphony" label="Polyphony (voices)" :min="1" :max="16" :step="1" integer />
     <p v-if="draft.settings.instrumentParams.loopMode !== 'once' && draft.settings.instrumentParams.envelope.sustain === 0" class="loop-hint">
       Increase envelope sustain to hear the loop while holding the pad.
     </p>

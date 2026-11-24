@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, nextTick, ref } from 'vue'
 import type { KnobSettings, ParameterOutput } from '../grid'
+import { settingGestureKey } from '../settingsAutomation'
 import Knob from './Knob.vue'
 
 const props = withDefaults(defineProps<{
@@ -9,9 +10,26 @@ const props = withDefaults(defineProps<{
   min?: number
   max?: number
   step?: number
+  integer?: boolean
 }>(), { step: 1 })
 const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
 const frozenRange = ref<{ min: number; max: number; step: number } | null>(null)
+const settingGesture = inject(settingGestureKey, undefined)
+let gesturing = false
+
+function startGesture(event: PointerEvent) {
+  if (event.button !== 0 || gesturing) return
+  frozenRange.value = range.value
+  gesturing = true
+  settingGesture?.(true)
+}
+
+function endGesture() {
+  frozenRange.value = null
+  if (!gesturing) return
+  gesturing = false
+  settingGesture?.(false)
+}
 
 const range = computed(() => {
   const value = Number.isFinite(props.modelValue) ? props.modelValue : 0
@@ -30,7 +48,27 @@ const settings = computed<KnobSettings>(() => {
 
 function updateInput(event: Event) {
   const input = event.target
-  if (input instanceof HTMLInputElement) emit('update:modelValue', input.valueAsNumber)
+  if (!(input instanceof HTMLInputElement)) return
+  const value = input.valueAsNumber
+  if (Number.isFinite(value) && (props.min === undefined || value >= props.min) &&
+    (props.max === undefined || value <= props.max) && (!props.integer || Number.isSafeInteger(value))) {
+    emit('update:modelValue', value)
+    void nextTick(() => {
+      if (input.valueAsNumber === value && props.modelValue !== value) input.value = String(props.modelValue)
+    })
+  }
+}
+
+function finishInput(event: Event) {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) return
+  let value = input.valueAsNumber
+  if (!Number.isFinite(value)) value = props.modelValue
+  if (props.integer) value = Math.round(value)
+  value = Math.max(props.min ?? -Infinity, Math.min(props.max ?? Infinity, value))
+  input.value = String(value)
+  emit('update:modelValue', value)
+  void nextTick(() => { input.value = String(props.modelValue) })
 }
 
 function updateKnob(output: ParameterOutput) {
@@ -42,10 +80,10 @@ function updateKnob(output: ParameterOutput) {
   <div class="numeric-setting">
     <div
       class="numeric-knob"
-      @pointerdown.capture="frozenRange = range"
-      @pointerup="frozenRange = null"
-      @pointercancel="frozenRange = null"
-      @lostpointercapture="frozenRange = null"
+      @pointerdown.capture="startGesture"
+      @pointerup="endGesture"
+      @pointercancel="endGesture"
+      @lostpointercapture="endGesture"
     >
       <Knob :label="`${label} adjustment`" :settings="settings" @output="updateKnob" />
     </div>
@@ -59,6 +97,7 @@ function updateKnob(output: ParameterOutput) {
         step="any"
         required
         @input="updateInput"
+        @blur="finishInput"
       />
     </label>
     <slot />

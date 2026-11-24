@@ -82,6 +82,46 @@ test('control summaries start collapsed and show each control name, size and col
   }
 })
 
+test('control and grid settings dialogs do not render save buttons', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: Dialog } = await server.ssrLoadModule('/src/components/GridControlSettingsDialog.vue')
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const item = createControl('bass', 0, 0, 'instrument-pad', '303')
+    const layout = { columns: 1, rows: 1, items: [item], connections: [] }
+    const dialog = await renderToString(createSSRApp({ render: () => h(Dialog, {
+      draft: item, selectedId: item.id, newControl: false, layout, bpm: 120, message: '',
+    }) }))
+    const grid = await renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+      layout, editing: true, wiring: false, settingsOpen: true, bpm: 120,
+    }) }))
+    for (const html of [dialog, grid]) {
+      assert.match(html, /aria-label="Close"/)
+      assert.doesNotMatch(html, />Save<\/button>/)
+    }
+  } finally { await server.close() }
+})
+
+test('instrument settings display effective playback values rather than saved base values', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: Dialog } = await server.ssrLoadModule('/src/components/GridControlSettingsDialog.vue')
+    const { createControl, copyControl } = await server.ssrLoadModule('/src/grid.ts')
+    const item = createControl('bass', 0, 0, 'instrument-pad', '303')
+    const display = copyControl(item, item.id)
+    display.settings.instrumentParams.resonance = 8.25
+    display.settings.instrumentParams.envelope.attack = 0.123
+    const layout = { columns: 1, rows: 1, items: [item], connections: [] }
+    const html = await renderToString(createSSRApp({ render: () => h(Dialog, {
+      draft: item, displayItem: display, selectedId: item.id, newControl: false, layout, bpm: 120, message: '',
+    }) }))
+    assert.match(html, /aria-label="Resonance adjustment"[^>]*aria-valuenow="8\.25"/)
+    assert.match(html, /aria-label="Attack \(s\) adjustment"[^>]*aria-valuenow="0\.123"/)
+    assert.equal(item.settings.instrumentParams.resonance, 6)
+  } finally { await server.close() }
+})
+
 test('LFOs, arpeggiators and sequenced loops migrate and display their configurable colors', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {

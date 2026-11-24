@@ -6,6 +6,7 @@ import SequenceEditor from './SequenceEditor.vue'
 import type { Bank } from '../project'
 
 const props = defineProps<{ draft: Extract<GridItem, { type: 'sequenced-loop' }>; layout: GridLayout; banks?: Bank[]; bankId?: string }>()
+const emit = defineEmits<{ 'arm-change': [armed: boolean] }>()
 const validIndex = computed(() => Number.isSafeInteger(props.draft.settings.clipIndex) &&
   props.draft.settings.clipIndex >= 0 && props.draft.settings.clipIndex <= MAX_LOOP_CLIP_INDEX)
 watch(() => props.draft.settings.clipIndex, (index) => {
@@ -13,6 +14,13 @@ watch(() => props.draft.settings.clipIndex, (index) => {
   props.draft.settings.clips[String(index)] ??= []
   props.draft.settings.automation[String(index)] ??= []
 }, { immediate: true })
+watch(() => props.draft.settings.barLength, (barLength) => {
+  for (const notes of Object.values(props.draft.settings.clips)) for (const note of notes) {
+    note.position %= barLength * 4
+    note.duration = Math.min(note.duration, barLength * 4)
+  }
+  for (const events of Object.values(props.draft.settings.automation)) for (const event of events) event.position %= barLength * 4
+}, { flush: 'sync' })
 const notes = computed({
   get: () => props.draft.settings.clips[String(props.draft.settings.clipIndex)] ?? [],
   set: (value: LoopNote[]) => { if (validIndex.value) props.draft.settings.clips[String(props.draft.settings.clipIndex)] = value },
@@ -36,12 +44,12 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
   <div class="settings-section">
     <h3>Loop sequencer settings</h3>
     <div class="loop-settings-row">
-      <NumericSetting v-model="draft.settings.barLength" label="Bar length" :min="1" :max="64" />
-      <NumericSetting v-model="draft.settings.clipIndex" label="Clip index" :min="0" :max="MAX_LOOP_CLIP_INDEX" />
+      <NumericSetting v-model="draft.settings.barLength" label="Bar length" :min="1" :max="64" integer />
+      <NumericSetting v-model="draft.settings.clipIndex" label="Clip index" :min="0" :max="MAX_LOOP_CLIP_INDEX" integer />
     </div>
     <SequenceEditor v-if="validIndex" :key="draft.settings.clipIndex" v-model="notes" v-model:automation="automation" v-model:quantize="draft.settings.quantize"
       :bar-length="draft.settings.barLength" :instruments="instruments" :sources="sources" :bank-id="bankId" />
-    <label class="inline-checkbox"><input v-model="draft.settings.armed" type="checkbox"> Armed for record</label>
+    <label class="inline-checkbox"><input :checked="draft.settings.armed" type="checkbox" @change="emit('arm-change', ($event.target as HTMLInputElement).checked)"> Armed for record</label>
     <label class="inline-checkbox"><input v-model="draft.settings.countIn" type="checkbox"> One-bar count-in before recording</label>
     <label>Record from <select v-model="draft.settings.recordScope">
       <option value="bank">Current bank</option><option value="all">All banks</option>

@@ -493,18 +493,10 @@ button:focus-visible {
   min-width: 54px;
   height: 40px;
   min-height: 40px;
-  padding: 6px 12px;
-  font-size: 14px;
 }
 
-.dialog-save {
-  min-height: 40px;
+.dialog-header .dialog-header-actions .preview-pad .pad {
   padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-  color: #ecece8;
-  cursor: pointer;
   font-size: 14px;
 }
 

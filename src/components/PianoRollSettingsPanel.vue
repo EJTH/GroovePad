@@ -1,11 +1,62 @@
 <script setup lang="ts">
+import { watch } from 'vue'
 import type { GridItem } from '../grid'
 import { validPianoRollSettings } from '../grid'
 import { PIANO_ROOT_NOTES } from '../music'
 import NumericSetting from './NumericSetting.vue'
 import PianoRoll from './PianoRoll.vue'
 
-defineProps<{ draft: Extract<GridItem, { type: 'piano-roll' }> }>()
+const props = defineProps<{
+  draft: Extract<GridItem, { type: 'piano-roll' }>
+  baseDraft?: Extract<GridItem, { type: 'piano-roll' }>
+}>()
+let normalizing = false
+
+watch(() => {
+  const settings = (props.baseDraft ?? props.draft).settings
+  return [settings.octaves, settings.numRows, settings.octaveTranspose, settings.rootNote, settings.scale, settings.style] as const
+}, (values, previous) => {
+  const settings = (props.baseDraft ?? props.draft).settings
+  if (normalizing || validPianoRollSettings(settings)) return
+  const changed = values.findIndex((value, index) => value !== previous[index])
+  const candidates = Array.from({ length: 8 }, (_, row) => row + 1)
+    .flatMap((numRows) => Array.from({ length: 3 }, (_, octave) => octave + 1)
+      .flatMap((octaves) => Array.from({ length: 7 }, (_, transpose) => ({ numRows, octaves, octaveTranspose: transpose - 3 }))))
+  function distance(candidate: { octaves: number; numRows: number; octaveTranspose: number }) {
+    return Math.abs(settings.octaves - candidate.octaves) * (changed === 0 ? 100 : 1) +
+      Math.abs(settings.numRows - candidate.numRows) * (changed === 1 ? 100 : 1) +
+      Math.abs(settings.octaveTranspose - candidate.octaveTranspose) * (changed === 2 ? 100 : 1)
+  }
+  candidates.sort((a, b) => distance(a) - distance(b))
+  const nearest = candidates.find((candidate) => validPianoRollSettings({ ...settings, ...candidate }))
+  if (nearest) {
+    normalizing = true
+    try { Object.assign(settings, nearest) } finally { normalizing = false }
+  }
+}, { flush: 'sync' })
+
+function setNumber(field: 'octaves' | 'numRows' | 'octaveTranspose', value: number) {
+  const settings = props.draft.settings
+  const [min, max] = field === 'octaves' ? [1, 3] : field === 'numRows' ? [1, 8] : [-3, 3]
+  const candidates = Array.from({ length: max - min + 1 }, (_, index) => min + index)
+  candidates.sort((a, b) => Math.abs(a - value) - Math.abs(b - value))
+  const nearest = candidates.find((candidate) => validPianoRollSettings({ ...settings, [field]: candidate }))
+  if (nearest !== undefined) settings[field] = nearest
+}
+
+watch(() => [props.draft.settings.rootNote, props.draft.settings.scale, props.draft.settings.style], () => {
+  const settings = props.draft.settings
+  if (validPianoRollSettings(settings)) return
+  const candidates = Array.from({ length: settings.numRows }, (_, row) => row + 1)
+    .flatMap((numRows) => Array.from({ length: settings.octaves }, (_, octave) => ({ numRows, octaves: octave + 1 })))
+    .sort((a, b) => (settings.numRows - a.numRows + settings.octaves - a.octaves) -
+      (settings.numRows - b.numRows + settings.octaves - b.octaves))
+  const nearest = candidates.find((candidate) => validPianoRollSettings({ ...settings, ...candidate }))
+  if (nearest) {
+    settings.numRows = nearest.numRows
+    settings.octaves = nearest.octaves
+  }
+}, { flush: 'sync' })
 </script>
 
 <template>
@@ -29,9 +80,9 @@ defineProps<{ draft: Extract<GridItem, { type: 'piano-roll' }> }>()
         </select>
       </label>
     </div>
-    <NumericSetting v-model="draft.settings.octaves" label="Octaves per row" :min="1" :max="3" />
-    <NumericSetting v-model="draft.settings.numRows" label="Number of rows" :min="1" :max="8" />
-    <NumericSetting v-model="draft.settings.octaveTranspose" label="Octave transpose" :min="-3" :max="3" :step="1" />
+    <NumericSetting :model-value="draft.settings.octaves" label="Octaves per row" :min="1" :max="3" integer @update:model-value="setNumber('octaves', $event)" />
+    <NumericSetting :model-value="draft.settings.numRows" label="Number of rows" :min="1" :max="8" integer @update:model-value="setNumber('numRows', $event)" />
+    <NumericSetting :model-value="draft.settings.octaveTranspose" label="Octave transpose" :min="-3" :max="3" :step="1" integer @update:model-value="setNumber('octaveTranspose', $event)" />
     <label>Keyboard layout <select v-model="draft.settings.orientation"><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option></select></label>
     <label>Style <select v-model="draft.settings.style"><option value="pads">Pads</option><option value="whites-blacks">Whites & Blacks</option><option value="glide-strip">Glide strip</option></select></label>
     <label>Pressure mode <select v-model="draft.settings.pressureMode"><option value="position">Position on key</option><option value="pressure">Pressure sensing (position fallback)</option></select></label>

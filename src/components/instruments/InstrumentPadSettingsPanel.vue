@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { GridItem } from '../../grid'
-import { InstrumentFactory } from '../../instruments'
 import type { InstrumentType } from '../../instruments/types'
 import SampleHitSettings from './SampleHitSettings.vue'
 import SampleLoopSettings from './SampleLoopSettings.vue'
@@ -8,7 +7,7 @@ import Bass303Settings from './Bass303Settings.vue'
 import Drum808Settings from './Drum808Settings.vue'
 
 const props = defineProps<{ draft: Extract<GridItem, { type: 'instrument-pad' }> }>()
-const emit = defineEmits<{ 'loading-change': [loading: boolean] }>()
+const emit = defineEmits<{ 'loading-change': [loading: boolean]; 'change-instrument': [type: InstrumentType] }>()
 
 const instrumentTypes: { type: InstrumentType; label: string; icon: string }[] = [
   { type: 'sample-hit', label: 'Sample Hit', icon: 'M3 12h3l2-6 3 12 3-9 2 3h5' },
@@ -20,8 +19,7 @@ const instrumentTypes: { type: InstrumentType; label: string; icon: string }[] =
 
 function changeInstrumentType(type: InstrumentType) {
   if (type === props.draft.settings.instrumentType) return
-  props.draft.settings.instrumentParams = InstrumentFactory.getDefaultParams(type)
-  props.draft.settings.instrumentType = type
+  emit('change-instrument', type)
 }
 </script>
 

@@ -7,7 +7,7 @@ import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
 const error = ref('')
 const inputsMuted = ref(false)
@@ -185,7 +185,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="instrument-pad">
-    <MPCPad :label="label" :settings="settings" :rotated="rotated" :wired-active="!inputsMuted && (notes.length > 0 || (loopNotes?.length ?? 0) > 0)"
+    <MPCPad :label="label" :settings="settings" :rotated="rotated" :disabled="disabled" :wired-active="!inputsMuted && (notes.length > 0 || (loopNotes?.length ?? 0) > 0)"
       :repeat-division="settings.mode === 'trigger' ? repeatDivision : undefined" :bpm="bpm" :playing="playing" :transport-clock="transportClock"
       :input-muted="settings.mode === 'toggle' ? inputsMuted : undefined" @output="handlePadOutput" />
     <span v-if="error" class="instrument-error" role="alert">{{ error }}</span>

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
-import type { GridItem, GridItemType } from '../grid'
+import { isValidPlacement, type GridItem, type GridItemType, type GridLayout } from '../grid'
 import NumericSetting from './NumericSetting.vue'
 
-defineProps<{
+const props = defineProps<{
   draft: GridItem
+  layout?: GridLayout
   columns: number
   rows: number
   controlTypes: { type: GridItemType; label: string }[]
@@ -26,6 +27,27 @@ function editName() {
   })
 }
 
+function updateName(event: Event, finish = false) {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement)) return
+  if (input.value.trim()) props.draft.label = finish ? input.value.trim() : input.value
+  if (finish) input.value = props.draft.label
+}
+
+function setDimension(field: 'x' | 'y' | 'width' | 'height', value: number) {
+  const { draft, layout } = props
+  if (!layout) {
+    draft[field] = value
+    return
+  }
+  const limit = field === 'x' || field === 'width' ? layout.columns : layout.rows
+  const start = field === 'x' || field === 'y' ? 0 : 1
+  const candidates = Array.from({ length: limit }, (_, index) => index + start)
+  candidates.sort((a, b) => Math.abs(a - value) - Math.abs(b - value))
+  const nearest = candidates.find((candidate) => isValidPlacement(layout, { ...draft, [field]: candidate }))
+  if (nearest !== undefined) draft[field] = nearest
+}
+
 defineExpose({ open })
 </script>
 
@@ -37,11 +59,11 @@ defineExpose({ open })
         <input v-model="draft.settings.color" type="color" aria-label="Choose control color" />
       </label>
       <span v-else class="color-swatch no-color" title="No configurable color" aria-hidden="true"></span>
-      <input v-if="editingName" ref="inlineNameInput" v-model="draft.label" class="control-name-input"
+      <input v-if="editingName" ref="inlineNameInput" :value="draft.label" class="control-name-input"
         aria-label="Control name" maxlength="40" @click.stop
         @keydown.enter.prevent.stop="editingName = false"
         @keydown.esc.prevent.stop="editingName = false"
-        @blur="editingName = false" />
+        @input="updateName($event)" @blur="updateName($event, true); editingName = false" />
       <button v-else type="button" class="control-name" @click.stop.prevent="editName">
         {{ draft.label || 'Unnamed control' }}
       </button>
@@ -55,7 +77,7 @@ defineExpose({ open })
           <option v-for="control in controlTypes" :key="control.type" :value="control.type">{{ control.label }}</option>
         </select>
       </label>
-      <label>Name <input v-model="draft.label" maxlength="40" required /></label>
+      <label>Name <input :value="draft.label" maxlength="40" required @input="updateName($event)" @blur="updateName($event, true)" /></label>
       <h3 class="layout-heading">Layout</h3>
       <label>Control orientation
         <select v-model="draft.orientation">
@@ -64,10 +86,10 @@ defineExpose({ open })
         </select>
       </label>
       <div class="settings-dimensions">
-        <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="columns" @update:model-value="draft.x = $event - 1" />
-        <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="rows" @update:model-value="draft.y = $event - 1" />
-        <NumericSetting v-model="draft.width" label="Width" :min="1" :max="columns" />
-        <NumericSetting v-model="draft.height" label="Height" :min="1" :max="rows" />
+        <NumericSetting :model-value="draft.x + 1" label="Column" :min="1" :max="columns" integer @update:model-value="setDimension('x', $event - 1)" />
+        <NumericSetting :model-value="draft.y + 1" label="Row" :min="1" :max="rows" integer @update:model-value="setDimension('y', $event - 1)" />
+        <NumericSetting :model-value="draft.width" label="Width" :min="1" :max="columns" integer @update:model-value="setDimension('width', $event)" />
+        <NumericSetting :model-value="draft.height" label="Height" :min="1" :max="rows" integer @update:model-value="setDimension('height', $event)" />
       </div>
     </div>
   </details>

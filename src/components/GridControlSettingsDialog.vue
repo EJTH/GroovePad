@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch, computed } from 'vue'
-import * as Tone from 'tone'
-import { isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollSettings, type Connection, type GridItem, type GridItemType, type GridLayout, type ParameterOutput } from '../grid'
+import { ref, watch, computed, provide } from 'vue'
+import { createControl, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollSettings, type Connection, type GridItem, type GridItemType, type GridLayout } from '../grid'
 import { isCompatible, inputs, outputs, selectorConnectionsCompatible } from '../parameters'
-import { InstrumentFactory, type InstrumentInstance } from '../instruments'
+import { InstrumentFactory } from '../instruments'
+import type { InstrumentType } from '../instruments/types'
 import type ControlIdentitySettings from './ControlIdentitySettings.vue'
 import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
 import KnobSettingsPanel from './KnobSettingsPanel.vue'
@@ -15,14 +15,17 @@ import SequencedLoopSettingsPanel from './SequencedLoopSettingsPanel.vue'
 import ControlIdentitySettingsComponent from './ControlIdentitySettings.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
-import MPCPad from './MPCPad.vue'
+import InstrumentPad from './InstrumentPad.vue'
 import LFO from './LFO.vue'
 import { controlTypes } from './gridControlTypes'
 import type { Bank } from '../project'
+import { captureSettings, settingGestureKey } from '../settingsAutomation'
 
 const props = defineProps<{
   draft: GridItem
+  displayItem?: GridItem
   selectedId: string | null
+  newControl: boolean
   layout: GridLayout
   bpm: number
   message: string
@@ -30,11 +33,13 @@ const props = defineProps<{
   bankId?: string
 }>()
 const emit = defineEmits<{
-  close: []
   save: [item: GridItem]
   remove: []
   removeWire: [connection: Connection]
   changeType: [type: GridItemType]
+  armChange: [armed: boolean]
+  settingChange: [change: { id: string; value: number; continuous: boolean }]
+  settingActivity: [active: boolean]
   'update:message': [message: string]
 }>()
 
@@ -44,74 +49,125 @@ const message = computed({
   get: () => props.message,
   set: (value: string) => emit('update:message', value),
 })
-let preview: InstrumentInstance | undefined
-let previewGeneration = 0
-let previewVelocity = 100
-
-function stopPreview() {
-  previewGeneration++
-  preview?.dispose()
-  preview = undefined
-}
-
-async function previewInstrument(velocity: number) {
+const settingPaths = computed(() => {
   const item = props.draft
-  if (item.type !== 'instrument-pad') return
-  if (sampleLoading.value) {
-    message.value = 'Wait for the sample to finish loading.'
-    return
+  const prefix = item.type === 'instrument-pad'
+    ? `setting:${item.type}:${item.settings.instrumentType}:` : `setting:${item.type}:`
+  return new Map(captureSettings(item).map((setting) => {
+    const name = setting.id.slice(prefix.length)
+    const path = item.type === 'instrument-pad' && name !== 'mode'
+      ? `settings.instrumentParams.${name}` : `settings.${name}`
+    return [path, setting] as const
+  }))
+})
+const liveItem = computed(() => {
+  const item = props.draft
+  const cache = new WeakMap<object, object>()
+  function wrap<T extends object>(target: T, path: string[]): T {
+    const cached = cache.get(target)
+    if (cached) return cached as T
+    const proxy = new Proxy(target, {
+      get(object, key) {
+        const value: unknown = Reflect.get(object, key)
+        if (typeof key !== 'string' || key.startsWith('__v_')) return value
+        const nextPath = [...path, key]
+        if (nextPath[0] !== 'settings') return value
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) return wrap(value, nextPath)
+        if (!settingPaths.value.has(nextPath.join('.'))) return value
+        const display = props.displayItem
+        if (!display || display.id !== item.id || display.type !== item.type ||
+          (item.type === 'instrument-pad' && display.type === 'instrument-pad' &&
+            item.settings.instrumentType !== display.settings.instrumentType)) return value
+        let current: unknown = display
+        for (const part of nextPath) {
+          if (current === null || typeof current !== 'object') return value
+          current = Reflect.get(current, part)
+        }
+        return current
+      },
+      set(object, key, value) {
+        const previous: unknown = Reflect.get(object, key)
+        const displayed: unknown = Reflect.get(proxy, key)
+        const changed = Reflect.set(object, key, value)
+        if (changed && typeof key === 'string' && Object.is(previous, value) && !Object.is(displayed, value)) {
+          const setting = settingPaths.value.get([...path, key].join('.'))
+          if (setting) emit('settingChange', setting)
+        }
+        return changed
+      },
+    })
+    cache.set(target, proxy)
+    return proxy
   }
-  const generation = ++previewGeneration
-  preview?.release()
-  try {
-    await Tone.start()
-    if (generation !== previewGeneration) return
-    preview ??= InstrumentFactory.create(item.settings.instrumentType, item.settings.instrumentParams)
-    await preview.trigger(velocity, 60)
-    if (generation !== previewGeneration) return
-    message.value = ''
-  } catch (error) {
-    if (generation === previewGeneration) {
-      message.value = `Preview error: ${error instanceof Error ? error.message : String(error)}`
-      console.error(message.value, error)
-    }
+  return wrap(item, [])
+})
+let lastLabel = props.draft.label
+let suppressRecording = false
+provide(settingGestureKey, (active) => emit('settingActivity', active))
+watch(() => props.draft.label, (label) => {
+  if (label.trim()) lastLabel = label.trim()
+}, { flush: 'sync' })
+watch(() => captureSettings(props.draft), (next, previous) => {
+  if (suppressRecording) return
+  const before = new Map(previous.map((setting) => [setting.id, setting.value]))
+  for (const setting of next) {
+    const old = before.get(setting.id)
+    if (old !== undefined && old !== setting.value) emit('settingChange', setting)
   }
-}
+}, { flush: 'sync' })
 
-function handlePreviewOutput(output: ParameterOutput) {
-  if (output.parameter === 'velocity') previewVelocity = output.value
-  if (output.parameter === 'gate') {
-    if (output.value > 0) void previewInstrument(previewVelocity)
-    else {
-      previewGeneration++
-      preview?.release()
-    }
-  }
+function connectionsCompatible(item: GridItem) {
+  const items = props.layout.items.map((entry) => entry.id === item.id ? item : entry)
+  return props.layout.connections.every((connection) => {
+    const source = items.find((entry) => entry.id === connection.sourceId)
+    const target = items.find((entry) => entry.id === connection.targetId)
+    return !!source && !!target && isCompatible(source, connection.sourceParameter, target, connection.targetParameter) &&
+      selectorConnectionsCompatible(items, props.layout.connections, connection)
+  })
 }
 
 function changeType(event: Event) {
   const target = event.target
   const item = props.draft
   if (!(target instanceof HTMLSelectElement) || target.value === item.type) return
-  emit('changeType', target.value as GridItemType)
+  const type = target.value as GridItemType
+  const replacement = createControl(item.id, item.x, item.y, type)
+  if (!connectionsCompatible(replacement)) {
+    target.value = item.type
+    message.value = 'Remove incompatible wires before changing the control type.'
+    return
+  }
+  message.value = ''
+  emit('changeType', type)
 }
 
-watch(() => props.draft.type === 'instrument-pad'
-  ? [props.draft.settings.instrumentType, props.draft.settings.instrumentParams] : null,
-stopPreview, { deep: true, flush: 'sync' })
-onBeforeUnmount(stopPreview)
+function changeInstrumentType(type: InstrumentType) {
+  const item = props.draft
+  if (item.type !== 'instrument-pad' || item.settings.instrumentType === type) return
+  const params = InstrumentFactory.getDefaultParams(type)
+  const replacement: GridItem = { ...item, settings: { ...item.settings, instrumentType: type, instrumentParams: params } }
+  if (!connectionsCompatible(replacement)) {
+    message.value = 'Remove incompatible wires before changing the instrument type.'
+    return
+  }
+  suppressRecording = true
+  try {
+    item.settings.instrumentParams = params
+    item.settings.instrumentType = type
+  } finally {
+    suppressRecording = false
+  }
+  message.value = ''
+}
 
 function saveItem() {
   const item = props.draft
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   if (sampleLoading.value) {
     message.value = 'Wait for the sample to finish loading.'
     return
   }
-  if (!item.label.trim()) {
-    controlIdentity.value?.open()
-    message.value = 'Enter a control name.'
-    return
-  }
+  item.label = item.label.trim() || lastLabel
   if (!isValidPlacement(props.layout, item)) {
     controlIdentity.value?.open()
     message.value = 'The control must fit inside the grid without overlapping another control.'
@@ -155,18 +211,12 @@ function saveItem() {
     message.value = 'Polyphony must be a whole number from 1 to 16.'
     return
   }
-  if (props.selectedId && props.layout.connections.some((connection) => {
-    const source = connection.sourceId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.sourceId)
-    const target = connection.targetId === item.id ? item : props.layout.items.find((entry) => entry.id === connection.targetId)
-    const items = props.layout.items.map((entry) => entry.id === item.id ? item : entry)
-    return !source || !target || !isCompatible(source, connection.sourceParameter, target, connection.targetParameter) ||
-      !selectorConnectionsCompatible(items, props.layout.connections, connection)
-  })) {
+  if (!connectionsCompatible(item)) {
     message.value = 'Remove incompatible wires before changing the control type.'
     return
   }
   message.value = ''
-  emit('save', { ...item, label: item.label.trim() })
+  emit('save', item)
 }
 
 function connectionLabel(connection: Connection) {
@@ -185,30 +235,30 @@ function canSetModulationAmount(connection: Connection) {
 </script>
 
 <template>
-  <SettingsDialog title="Control settings" :showSaveButton="true" @close="emit('close')" @save="saveItem">
+  <SettingsDialog title="Control settings" @close="saveItem">
     <template #header-actions>
-      <MPCPad v-if="draft.type === 'instrument-pad'" class="preview-pad" label="Play"
-        :settings="draft.settings" @output="handlePreviewOutput" />
+      <InstrumentPad v-if="liveItem.type === 'instrument-pad'" :key="liveItem.settings.instrumentType" class="preview-pad" label="Play"
+        :settings="{ ...liveItem.settings, mode: 'trigger' }" :notes="[]" :disabled="sampleLoading" />
     </template>
     <form class="settings-form control-settings" @submit.prevent="saveItem">
-      <ControlIdentitySettingsComponent ref="controlIdentity" :draft="draft" :columns="layout.columns" :rows="layout.rows"
+      <ControlIdentitySettingsComponent ref="controlIdentity" :draft="draft" :layout="layout" :columns="layout.columns" :rows="layout.rows"
         :control-types="controlTypes" @change-type="changeType" />
 
       <section v-if="draft.type !== 'pad' && draft.type !== 'output-selector'" class="control-parameters">
-        <template v-if="draft.type === 'instrument-pad'">
-          <InstrumentPadSettingsPanel :draft="draft" @loading-change="sampleLoading = $event" />
+        <template v-if="liveItem.type === 'instrument-pad'">
+          <InstrumentPadSettingsPanel :draft="liveItem" @loading-change="sampleLoading = $event" @change-instrument="changeInstrumentType" />
         </template>
-        <KnobSettingsPanel v-else-if="draft.type === 'knob'" :draft="draft"
-          @default-value-change="draft.settings.defaultValue = $event; if (!selectedId) draft.settings.value = $event" />
-        <LFOSettingsPanel v-else-if="draft.type === 'lfo'" :draft="draft">
+        <KnobSettingsPanel v-else-if="liveItem.type === 'knob' && draft.type === 'knob'" :draft="liveItem" :base-draft="draft"
+          @default-value-change="liveItem.settings.defaultValue = $event; if (newControl) liveItem.settings.value = $event" />
+        <LFOSettingsPanel v-else-if="liveItem.type === 'lfo'" :draft="liveItem">
           <template #preview>
-            <LFO label="Preview" :settings="draft.settings" :bpm="bpm" />
+            <LFO label="Preview" :settings="liveItem.settings" :bpm="bpm" />
           </template>
         </LFOSettingsPanel>
-        <ModWheelSettingsPanel v-else-if="draft.type === 'mod-wheel'" :draft="draft" />
-        <PianoRollSettingsPanel v-else-if="draft.type === 'piano-roll'" :draft="draft" />
-        <ArpeggiatorSettingsPanel v-else-if="draft.type === 'arpeggiator'" :draft="draft" />
-        <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId" />
+        <ModWheelSettingsPanel v-else-if="liveItem.type === 'mod-wheel'" :draft="liveItem" />
+        <PianoRollSettingsPanel v-else-if="liveItem.type === 'piano-roll' && draft.type === 'piano-roll'" :draft="liveItem" :base-draft="draft" />
+        <ArpeggiatorSettingsPanel v-else-if="liveItem.type === 'arpeggiator'" :draft="liveItem" />
+        <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId" @arm-change="emit('armChange', $event)" />
       </section>
 
       <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">

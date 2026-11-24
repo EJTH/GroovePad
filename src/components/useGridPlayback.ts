@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
 import { effectiveControls } from '../modulation'
 import { outputs } from '../parameters'
+import { applySettingsAutomation } from '../settingsAutomation'
 import { pointerTap } from '../pointerTap'
 import type { Bank } from '../project'
 import { BankEventBus, SequencedLoopEngine, TransportClock, type BankEvent } from '../sequencedLoop'
@@ -26,6 +27,8 @@ export function useGridPlayback(options: {
   const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
   const liveControls = reactive(new Set<string>())
   const manualOverrides = reactive(new Map<string, number>())
+  const settingTimers = reactive(new Map<string, ReturnType<typeof setTimeout> | undefined>())
+  let settingGesture = false
   let automationSequence = 0
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
@@ -329,6 +332,14 @@ export function useGridPlayback(options: {
       if (event.active === false) result.delete(key)
       else result.set(key, event.value)
     }
+    for (const item of options.layout().items) if (item.type === 'knob') {
+      const parameter = 'setting:knob:value'
+      const event = playbackAutomation.value.get(`${item.id}:${parameter}`)
+      const output = playbackAutomation.value.get(`${item.id}:value`)
+      if (event && (!output || event.sequence > output.sequence) && displayedAutomation(item.id, parameter) !== undefined) {
+        result.set(`${item.id}:value`, event.value)
+      }
+    }
     return result
   })
 
@@ -366,20 +377,64 @@ export function useGridPlayback(options: {
     manualOverrides.set(`${itemId}:${parameter}`, automationSequence)
   }
 
+  function finishSettingChanges() {
+    for (const [key, timer] of settingTimers) {
+      if (timer !== undefined) clearTimeout(timer)
+      const [sourceId, parameter] = JSON.parse(key) as [string, string]
+      options.bankEvents.emit({ kind: 'live-automation-end', bankId: options.bankId, sourceId, parameter })
+      markManualOverride(sourceId, parameter)
+    }
+    settingTimers.clear()
+  }
+
+  function setSettingGesture(active: boolean) {
+    settingGesture = active
+    if (!active) finishSettingChanges()
+  }
+
+  function recordSettingChange(sourceId: string, change: { id: string; value: number; continuous: boolean }) {
+    if (!options.playing()) return
+    const parameter = change.id
+    const key = JSON.stringify([sourceId, parameter])
+    const timer = settingTimers.get(key)
+    markManualOverride(sourceId, parameter)
+    const source = options.layout().items.find((item) => item.id === sourceId)
+    if ((source?.type !== 'knob' && source?.type !== 'mod-wheel') || source.settings.recordAutomation) {
+      options.bankEvents.emit({ kind: 'live-automation', bankId: options.bankId, sourceId, parameter,
+        value: change.value, motion: change.continuous })
+    }
+    if (change.continuous) {
+      if (timer !== undefined) clearTimeout(timer)
+      settingTimers.set(key, settingGesture ? undefined : setTimeout(() => {
+        options.bankEvents.emit({ kind: 'live-automation-end', bankId: options.bankId, sourceId, parameter })
+        markManualOverride(sourceId, parameter)
+        settingTimers.delete(key)
+      }, 200))
+    }
+  }
+
   function displayedAutomation(id: string, parameter: string) {
     const key = `${id}:${parameter}`
     const event = playbackAutomation.value.get(key)
-    return event && event.active !== false && !liveControls.has(id) &&
+    return event && event.active !== false && !liveControls.has(id) && !settingTimers.has(JSON.stringify([id, parameter])) &&
       (manualOverrides.get(key) ?? -1) < event.sequence ? event.value : undefined
   }
 
   const displayItems = computed(() => {
     const layout = options.layout()
     const items = layout.items.map((item) => {
-      const enabled = item.type === 'arpeggiator' ? effectiveSignals.value.get(`${item.id}:enabled`) : undefined
-      return item.type === 'arpeggiator' && enabled !== undefined
-        ? { ...item, settings: { ...item.settings, enabled: enabled >= 0.5 } }
-        : item
+      const settings = new Map<string, number>()
+      for (const [key, event] of playbackAutomation.value) {
+        if (event.sourceId !== item.id) continue
+        const parameter = key.slice(item.id.length + 1)
+        if (!parameter.startsWith('setting:') || displayedAutomation(item.id, parameter) === undefined) continue
+        settings.set(parameter, event.value)
+      }
+      const effective = settings.size ? applySettingsAutomation(item, settings) : item
+      const enabled = effective.type === 'arpeggiator' ? effectiveSignals.value.get(`${item.id}:enabled`) : undefined
+      return effective.type === 'arpeggiator' && enabled !== undefined
+        ? { ...effective, settings: { ...effective.settings, enabled: enabled >= 0.5 } }
+        : effective
     })
     return effectiveControls({ ...layout, items }, effectiveSignals.value)
   })
@@ -394,6 +449,7 @@ export function useGridPlayback(options: {
   }, { immediate: true, flush: 'sync' })
 
   watch(options.playing, (playing, previous) => {
+    if (!playing) finishSettingChanges()
     if (loopTimer !== undefined) clearInterval(loopTimer)
     loopTimer = undefined
     if (!playing) loopEngine.stop()
@@ -417,6 +473,7 @@ export function useGridPlayback(options: {
   }, { immediate: true, flush: 'sync' })
 
   onBeforeUnmount(() => {
+    finishSettingChanges()
     if (loopTimer !== undefined) clearInterval(loopTimer)
     loopEngine.stop()
     unsubscribeBankEvents()
@@ -445,6 +502,9 @@ export function useGridPlayback(options: {
     previewColor,
     loopPreviewCurves,
     setLoopArmed,
+    recordSettingChange,
+    finishSettingChanges,
+    setSettingGesture,
     armLoop,
     toggleLoopPlayback,
     clearLoopClip,

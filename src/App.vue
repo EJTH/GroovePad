@@ -4,8 +4,9 @@ import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import TempoDialog from './components/TempoDialog.vue'
+import NumericSetting from './components/NumericSetting.vue'
 import ToolBar from './components/ToolBar.vue'
-import { canResizeGrid, copyControl, type GridLayout, type ToolMode, type RepeatDivision } from './grid'
+import { copyControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type GridLayout, type ToolMode, type RepeatDivision } from './grid'
 import { loadDefaultProject } from './defaultProject'
 import { DEFAULT_INFO_SCROLL_SPEED, isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
@@ -155,8 +156,8 @@ const { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock,
 const busy = ref(false)
 const projectInput = ref<HTMLInputElement | null>(null)
 const bankInput = ref<HTMLInputElement | null>(null)
-const bankDraft = ref<{ id: string | null; title: string; icon: string; color: string; columns: number; rows: number } | null>(null)
-const bankError = ref('')
+const bankSettingsId = ref<string | null>(null)
+const bankSettings = computed(() => banks.value.find((bank) => bank.id === bankSettingsId.value) ?? null)
 const removeBankOpen = ref(false)
 const importedBanks = ref<Bank[] | null>(null)
 const workspaceRevision = ref(0)
@@ -194,38 +195,25 @@ function nextBankId() {
 }
 
 function editBank(bank?: Bank) {
-  bankError.value = ''
-  bankDraft.value = bank
-    ? { id: bank.id, title: bank.title, icon: bank.icon, color: bank.color, columns: bank.layout.columns, rows: bank.layout.rows }
-    : { id: null, title: `Bank ${banks.value.length + 1}`, icon: '▦', color: '#b8d986', columns: 4, rows: 4 }
+  if (!bank) {
+    bank = { id: nextBankId(), title: `Bank ${banks.value.length + 1}`, icon: '▦', color: '#b8d986', layout: createLayout() }
+    banks.value.push(bank)
+    selectedBankId.value = bank.id
+  }
+  bankSettingsId.value = bank.id
 }
 
-function saveBank() {
-  const draft = bankDraft.value
-  if (!draft) return
-  const bank = draft.id ? banks.value.find((entry) => entry.id === draft.id) : undefined
-  const layout = bank?.layout ?? createLayout()
-  if (!draft.title.trim() || !draft.icon.trim() || !/^#[\da-f]{6}$/i.test(draft.color) ||
-    !canResizeGrid(layout, draft.columns, draft.rows)) {
-    bankError.value = 'Enter a title and icon, and choose a valid color and grid size that fits all controls.'
-    return
-  }
-  if (draft.id && !bank) {
-    bankError.value = 'Bank no longer exists.'
-    return
-  }
-  layout.columns = draft.columns
-  layout.rows = draft.rows
-  if (bank) {
-    bank.title = draft.title.trim()
-    bank.icon = draft.icon.trim()
-    bank.color = draft.color
-  } else {
-    const newBank = { id: nextBankId(), title: draft.title.trim(), icon: draft.icon.trim(), color: draft.color, layout }
-    banks.value.push(newBank)
-    selectedBankId.value = newBank.id
-  }
-  bankDraft.value = null
+function updateBankText(event: Event, field: 'title' | 'icon', finish = false) {
+  const input = event.target
+  const bank = bankSettings.value
+  if (!(input instanceof HTMLInputElement) || !bank) return
+  if (input.value.trim()) bank[field] = finish ? input.value.trim() : input.value
+  if (finish) input.value = bank[field]
+}
+
+function closeBankSettings() {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+  bankSettingsId.value = null
 }
 
 function removeCurrentBank() {
@@ -300,7 +288,7 @@ async function loadProject(event: Event) {
     const project = await loadProjectFromFile(file)
     if (!window.confirm('Replace the current project with the loaded project?')) return
     gridSettingsOpen.value = false
-    bankDraft.value = null
+    bankSettingsId.value = null
     banks.value = project.banks
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
@@ -375,13 +363,6 @@ function addImportedBank(bank: Bank) {
   importedBanks.value = null
 }
 
-function saveTempo(value: number, info: string, speed: number) {
-  bpm.value = value
-  infoText.value = info
-  infoScrollSpeed.value = speed
-  projectSettingsOpen.value = false
-}
-
 async function newProject() {
   if (!window.confirm('Start a new project? The current project will be replaced.')) return
   busy.value = true
@@ -389,7 +370,7 @@ async function newProject() {
   try {
     const project = await loadDefaultProject()
     gridSettingsOpen.value = false
-    bankDraft.value = null
+    bankSettingsId.value = null
     banks.value = project.banks
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
@@ -571,15 +552,13 @@ onUnmounted(() => {
       />
     </section>
     <SampleAssetsDialog v-if="assetsOpen" @close="assetsOpen = false" />
-    <SettingsDialog v-if="bankDraft" :title="bankDraft.id ? 'Bank settings' : 'Add bank'" @close="bankDraft = null">
-      <form class="settings-form bank-form" @submit.prevent="saveBank">
-        <label>Title <input v-model="bankDraft.title" required maxlength="80"></label>
-        <label>Icon <input v-model="bankDraft.icon" required maxlength="16"></label>
-        <label>Color <input v-model="bankDraft.color" type="color"></label>
-        <label>Columns <input v-model.number="bankDraft.columns" type="number" min="1" max="8" required></label>
-        <label>Rows <input v-model.number="bankDraft.rows" type="number" min="1" max="10" required></label>
-        <p v-if="bankError" class="grid-message" role="alert">{{ bankError }}</p>
-        <div class="settings-actions"><button type="submit">Save bank</button></div>
+    <SettingsDialog v-if="bankSettings" title="Bank settings" @close="closeBankSettings">
+      <form class="settings-form bank-form" @submit.prevent="closeBankSettings">
+        <label>Title <input :value="bankSettings.title" required maxlength="80" @input="updateBankText($event, 'title')" @blur="updateBankText($event, 'title', true)"></label>
+        <label>Icon <input :value="bankSettings.icon" required maxlength="16" @input="updateBankText($event, 'icon')" @blur="updateBankText($event, 'icon', true)"></label>
+        <label>Color <input v-model="bankSettings.color" type="color"></label>
+        <NumericSetting v-model="bankSettings.layout.columns" label="Columns" :min="Math.max(1, ...bankSettings.layout.items.map((item) => item.x + item.width))" :max="MAX_GRID_COLUMNS" integer />
+        <NumericSetting v-model="bankSettings.layout.rows" label="Rows" :min="Math.max(1, ...bankSettings.layout.items.map((item) => item.y + item.height))" :max="MAX_GRID_ROWS" integer />
       </form>
     </SettingsDialog>
     <SettingsDialog v-if="removeBankOpen" title="Remove bank" @close="removeBankOpen = false">
@@ -597,6 +576,6 @@ onUnmounted(() => {
         </button>
       </div>
     </SettingsDialog>
-    <TempoDialog v-if="projectSettingsOpen" :bpm="bpm" :info-text="infoText" :info-scroll-speed="infoScrollSpeed" @close="projectSettingsOpen = false" @save="saveTempo" />
+    <TempoDialog v-if="projectSettingsOpen" v-model:bpm="bpm" v-model:info-text="infoText" v-model:info-scroll-speed="infoScrollSpeed" @close="projectSettingsOpen = false" />
   </main>
 </template>

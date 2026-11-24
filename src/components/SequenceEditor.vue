@@ -55,7 +55,7 @@ function source(id: string, bankId?: string) { return props.sources.find((item) 
 function rowLabel(row: Row) {
   return row.kind === 'note'
     ? `${source(row.instrumentId, row.bankId)?.label ?? `Missing source (${effectiveBank(row.bankId)} / ${row.instrumentId})`} · ${noteName(row.note)}`
-    : `${source(row.sourceId, row.bankId)?.label ?? `Missing control (${effectiveBank(row.bankId)} / ${row.sourceId})`} · ${row.parameter}`
+    : `${source(row.sourceId, row.bankId)?.label ?? `Missing control (${effectiveBank(row.bankId)} / ${row.sourceId})`} · ${row.parameter.replace(/^setting:(?:instrument-pad:[^:]+|[^:]+):/, '')}`
 }
 function rowColor(row: Row) {
   return source(row.kind === 'note' ? row.instrumentId : row.sourceId, row.bankId)?.color ?? '#83c9bb'

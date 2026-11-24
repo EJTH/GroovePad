@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { canResizeGrid, copyControl, createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision } from '../grid'
+import { createControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision } from '../grid'
 import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
 import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
 import { noteName } from '../music'
@@ -45,10 +45,9 @@ const emit = defineEmits<{ closeSettings: []; output: [itemId: string, output: P
 
 const grid = ref<HTMLElement | null>(null)
 const message = ref('')
-const columns = ref(props.layout.columns)
-const rows = ref(props.layout.rows)
 const selectedId = ref<string | null>(null)
-const draft = ref<GridItem | null>(null)
+const selectedControl = computed(() => props.layout.items.find((item) => item.id === selectedId.value) ?? null)
+const newControl = ref(false)
 const addPosition = ref<{ x: number; y: number } | null>(null)
 const wireFirst = ref<string | null>(null)
 const wireDrag = ref<{ pointerId: number; sourceId: string; x: number; y: number } | null>(null)
@@ -71,6 +70,7 @@ const {
   changeLoopIndex,
   recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, previewColor, loopPreviewCurves, armLoop,
   setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride, displayedAutomation,
+  recordSettingChange, finishSettingChanges, setSettingGesture,
 } = useGridPlayback({
   layout: () => props.layout,
   banks: () => props.banks,
@@ -90,6 +90,7 @@ void loopAutomation
 void toggleLoop
 void changeLoopIndex
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
+const selectedDisplay = computed(() => displayItems.value.find((item) => item.id === selectedId.value))
 function volumeValue(item: GridItem) {
   if (item.type === 'instrument-pad') return (item.settings.instrumentParams.volume + 48) / 48
   if (item.type === 'sequenced-loop') return item.settings.volume ?? 1
@@ -125,7 +126,7 @@ const cells = computed(() => Array.from({ length: props.layout.columns * props.l
 watch(() => props.editing, (editing) => {
   if (!editing) {
     selectedId.value = null
-    draft.value = null
+    newControl.value = false
     addPosition.value = null
     interaction.value = null
     dropAction.value = null
@@ -152,19 +153,12 @@ watch([wirePair, wireOutput, wireInput], ([pair, output, input]) => {
 
 watch(() => props.settingsOpen, (open) => {
   if (open) {
-    columns.value = props.layout.columns
-    rows.value = props.layout.rows
     message.value = ''
   }
 })
 
 function resizeGrid() {
-  if (!canResizeGrid(props.layout, columns.value, rows.value)) {
-    message.value = 'Use up to 8 columns and 10 rows, and keep all controls inside the grid.'
-    return
-  }
-  props.layout.columns = columns.value
-  props.layout.rows = rows.value
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   message.value = ''
   emit('closeSettings')
 }
@@ -185,7 +179,10 @@ function chooseControlType(type: GridItemType) {
   const position = addPosition.value
   if (!position) return
   addPosition.value = null
-  draft.value = createControl(nextControlId(), position.x, position.y, type)
+  const item = createControl(nextControlId(), position.x, position.y, type)
+  props.layout.items.push(item)
+  selectedId.value = item.id
+  newControl.value = true
 }
 
 function isOccupied(x: number, y: number) {
@@ -196,7 +193,7 @@ function isOccupied(x: number, y: number) {
 
 function openSettings(item: GridItem) {
   selectedId.value = item.id
-  draft.value = copyControl(item, item.id)
+  newControl.value = false
   message.value = ''
 }
 
@@ -211,23 +208,22 @@ const { interaction, dropAction, canCopyDrop, startInteraction, updateInteractio
   })
 
 function changeType(type: GridItemType) {
-  const item = draft.value
+  const item = selectedControl.value
   if (!item || type === item.type) return
   const replacement = createControl(item.id, item.x, item.y, type)
   replacement.width = item.width
   replacement.height = item.height
   replacement.orientation = item.orientation
   if (item.label !== 'Pad' && item.label !== 'Knob') replacement.label = item.label
-  draft.value = replacement
+  const index = props.layout.items.findIndex((entry) => entry.id === item.id)
+  if (index !== -1) props.layout.items[index] = replacement
 }
 
 function saveItem(item: GridItem) {
-  const index = props.layout.items.findIndex((entry) => entry.id === selectedId.value)
-  if (index !== -1) props.layout.items[index] = item
-  else props.layout.items.push(item)
+  finishSettingChanges()
   if (item.type === 'sequenced-loop' && item.settings.armed) setLoopArmed(item, true)
   selectedId.value = null
-  draft.value = null
+  newControl.value = false
   message.value = ''
 }
 
@@ -560,13 +556,14 @@ function wireLine(connection: Connection) {
 }
 
 function removeItem() {
+  finishSettingChanges()
   const index = props.layout.items.findIndex((item) => item.id === selectedId.value)
   if (index !== -1) props.layout.items.splice(index, 1)
   for (const connection of [...props.layout.connections]) {
     if (connection.sourceId === selectedId.value || connection.targetId === selectedId.value) removeWire(connection)
   }
   selectedId.value = null
-  draft.value = null
+  newControl.value = false
   message.value = ''
 }
 
@@ -576,7 +573,7 @@ function removeItem() {
   <div class="grid-editor">
     <p v-if="editing && !wiring" class="edit-hint">Tap + to add a control. Tap a control to edit it.</p>
     <p v-if="wiring" class="edit-hint">{{ wireFirst ? 'Choose a destination control.' : 'Drag from a source to a destination, or tap each in order.' }}</p>
-    <p v-if="message && !draft && !settingsOpen" class="grid-message" role="alert">{{ message }}</p>
+    <p v-if="message && !selectedControl && !settingsOpen" class="grid-message" role="alert">{{ message }}</p>
 
     <div class="grid-area">
       <div
@@ -608,7 +605,7 @@ function removeItem() {
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :automation-hold="lfoAutomationHold(item.id)" @output="handleOutput(item, $event)" @hold-change="recordToggle(item.id, 'hold', $event)" />
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
@@ -714,11 +711,11 @@ function removeItem() {
       <p v-if="!dropAction.swapId && !canCopyDrop" class="grid-message">There is not enough separate space to copy here.</p>
     </SettingsDialog>
 
-    <SettingsDialog v-if="settingsOpen" title="Grid settings" :showSaveButton="true" @close="emit('closeSettings')" @save="resizeGrid">
+    <SettingsDialog v-if="settingsOpen" title="Grid settings" @close="resizeGrid">
       <form class="settings-form" @submit.prevent="resizeGrid">
         <div class="settings-dimensions grid-dimensions">
-          <NumericSetting v-model="columns" label="Columns" :min="1" :max="MAX_GRID_COLUMNS" />
-          <NumericSetting v-model="rows" label="Rows" :min="1" :max="MAX_GRID_ROWS" />
+          <NumericSetting v-model="layout.columns" label="Columns" :min="Math.max(1, ...layout.items.map((item) => item.x + item.width))" :max="MAX_GRID_COLUMNS" integer />
+          <NumericSetting v-model="layout.rows" label="Rows" :min="Math.max(1, ...layout.items.map((item) => item.y + item.height))" :max="MAX_GRID_ROWS" integer />
         </div>
         <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
       </form>
@@ -735,9 +732,12 @@ function removeItem() {
       </div>
     </SettingsDialog>
 
-    <GridControlSettingsDialog v-if="draft" :draft="draft" :selected-id="selectedId" :layout="layout" :bpm="bpm" :banks="banks" :bank-id="bankId"
+    <GridControlSettingsDialog v-if="selectedControl" :draft="selectedControl" :display-item="selectedDisplay" :selected-id="selectedId" :new-control="newControl" :layout="layout" :bpm="bpm" :banks="banks" :bank-id="bankId"
       :message="message" @update:message="message = $event"
-      @close="draft = null; selectedId = null; message = ''" @save="saveItem"
+      @save="saveItem"
+      @arm-change="selectedControl?.type === 'sequenced-loop' && setLoopArmed(selectedControl, $event)"
+      @setting-change="selectedId && recordSettingChange(selectedId, $event)"
+      @setting-activity="setSettingGesture"
       @remove="removeItem" @remove-wire="removeWire" @change-type="changeType" />
     <SettingsDialog v-if="wirePair && sourceItem && targetItem" title="Connect controls" @close="wirePair = null; message = ''">
       <form class="settings-form" @submit.prevent="connectWire">
