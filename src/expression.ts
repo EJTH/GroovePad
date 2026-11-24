@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 type PointerSample = Pick<PointerEvent, 'pointerType' | 'pressure' | 'clientX' | 'clientY'>
 type Bounds = Pick<DOMRect, 'top' | 'left' | 'height' | 'width'>
 

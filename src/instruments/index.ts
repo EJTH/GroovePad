@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { SampleHit } from './SampleHit'
 import { SampleLoop } from './SampleLoop'
 import { Bass303 } from './Bass303'

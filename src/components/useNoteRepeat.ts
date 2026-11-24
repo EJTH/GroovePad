@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { onBeforeUnmount, watch } from 'vue'
 import type { RepeatDivision } from '../grid'
 import type { TransportClock } from '../sequencedLoop'

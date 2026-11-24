@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 import { samplesInBanks } from './sampleAssets'
 import { isBeta } from './appChannel'

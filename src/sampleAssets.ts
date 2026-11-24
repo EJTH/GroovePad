@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { InjectionKey, Ref } from 'vue'
 import type { Bank } from './project'
 import type { SampleHitParams, SampleLoopParams } from './instruments/types'

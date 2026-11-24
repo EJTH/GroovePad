@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { MAX_LOOP_CLIP_INDEX, type LoopAutomation, type LoopNote, type LoopRow, type SequencedLoopSettings } from './grid'
 
 export function rowKey(row: LoopRow, bankId = '') {

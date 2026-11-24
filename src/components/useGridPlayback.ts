@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
 import { effectiveControls } from '../modulation'

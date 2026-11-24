@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { ADSREnvelope, InstrumentType } from './types'
 
 export function defaultEnvelope(type: InstrumentType): ADSREnvelope {

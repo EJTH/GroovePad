@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter } from '@zip.js/zip.js'
 import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 import { samplesInBanks, type SampleAsset } from './sampleAssets'

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { copyControl, type Connection, type GridItem, type GridLayout } from './grid'
 import { applySelectInput, inputs, outputs, selectedSelectorWire, type ParameterMetadata } from './parameters'
 

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 export type InstrumentType = 'sample-hit' | 'sample-loop' | '303' | '808' | '909'
 export type DrumKitType = '808' | '909'
 export type DrumType = 'kick' | 'snare' | 'closed-hat' | 'open-hat' | 'rim' | 'tom'

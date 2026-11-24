@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import * as Tone from 'tone'
 import type { InstrumentInstance, SampleHitParams, SampleLoopParams } from './types'
 import { createSampleRegion, oneShotGateDuration } from './sampleRegion'

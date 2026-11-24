@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 export function encodeWav(samples: Float32Array[], sampleRate: number, channels = 1): Blob {
   const length = samples.reduce((total, chunk) => total + chunk.length, 0)
   if (!length) throw new Error('The recording was empty. Please try again.')

@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { InstrumentType } from './instruments/types'
 import { InstrumentFactory } from './instruments'
 import { PIANO_ROOT_NOTES, scaleNote, scales, type PianoRootNote } from './music'

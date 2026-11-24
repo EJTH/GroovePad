@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { copyControl, validPianoRollSettings, type GridItem } from './grid'
 import { inputs, rateModes, scales, tempoDivisions, waveforms, arpStyles } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'

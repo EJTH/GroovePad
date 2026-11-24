@@ -1,3 +1,6 @@
+// Copyright (C) 2026 DON:E (Elias Toft Hansen)
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacement, LOOP_WIDGET_BUTTONS, MAX_LOOP_CLIP_INDEX, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
 import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'
