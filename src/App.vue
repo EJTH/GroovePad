@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
+import * as Tone from 'tone'
 import GrooveGrid from './components/GrooveGrid.vue'
 import SampleAssetsDialog from './components/SampleAssetsDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
@@ -15,6 +16,7 @@ import { replaceSampleInBanks, sampleAssetKey, samplesInBanks, type SampleAsset 
 import { BankEventBus } from './sequencedLoop'
 import { keepScreenAwake } from './screenWakeLock'
 import { useTransport } from './composables/useTransport'
+import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, type RecordingFormat } from './audio/sessionRecording'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -26,6 +28,9 @@ const selectedBankId = ref('A')
 const bpm = ref(120)
 const infoText = ref('')
 const infoScrollSpeed = ref(DEFAULT_INFO_SCROLL_SPEED)
+const supportedFormats = supportedRecordingFormats()
+const defaultRecordingFormat: RecordingFormat = supportedFormats[0] ?? 'wav'
+const recordingFormat = ref<RecordingFormat>(defaultRecordingFormat)
 const infoScroll = ref<HTMLElement | null>(null)
 const infoScrollWidth = ref(0)
 const infoScrollDuration = computed(() => infoScrollWidth.value ? infoScrollWidth.value / infoScrollSpeed.value : 30)
@@ -75,6 +80,7 @@ async function initializeStorage() {
     bpm.value = data.bpm
     infoText.value = data.infoText ?? ''
     infoScrollSpeed.value = data.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
+    recordingFormat.value = data.recordingFormat ?? defaultRecordingFormat
     assets.value = data.assets ?? []
     for (const asset of samplesInBanks(data.banks)) addAsset(asset)
   } catch (error) {
@@ -90,7 +96,7 @@ function saveLocalProject() {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = undefined
   if (!storageReady.value || storageBlocked.value) return
-  const project = { version: 1 as const, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value,
+  const project = { version: 1 as const, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value, recordingFormat: recordingFormat.value,
     banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value }
   saveQueue = saveQueue.then(async () => {
     await saveStoredProject(project)
@@ -105,7 +111,7 @@ function replaceInvalidProject() {
   saveLocalProject()
 }
 
-watch([banks, selectedBankId, bpm, infoText, infoScrollSpeed, assets], () => {
+watch([banks, selectedBankId, bpm, infoText, infoScrollSpeed, recordingFormat, assets], () => {
   if (!storageReady.value || storageBlocked.value) return
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
   saveTimer = window.setTimeout(saveLocalProject, 300)
@@ -146,6 +152,57 @@ const gridSettingsOpen = ref(false)
 const projectSettingsOpen = ref(false)
 const assetsOpen = ref(false)
 const projectError = ref('')
+const recordingError = ref('')
+const recordingState = ref<'idle' | 'starting' | 'recording' | 'stopping'>('idle')
+let sessionRecording: Awaited<ReturnType<typeof startSessionRecording>> | undefined
+let appUnmounted = false
+
+function downloadSession(audio: Blob, format: RecordingFormat) {
+  const extension = RECORDING_FORMATS.find((item) => item.id === format)!.extension
+  const url = URL.createObjectURL(audio)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `groovepad-session.${extension}`
+    link.click()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+  }
+}
+
+async function toggleSessionRecording() {
+  if (recordingState.value === 'recording') {
+    recordingState.value = 'stopping'
+    sessionRecording?.stop()
+    return
+  }
+  if (recordingState.value !== 'idle') return
+  recordingError.value = ''
+  recordingState.value = 'starting'
+  try {
+    await Tone.start()
+    if (appUnmounted) return
+    const format = recordingFormat.value
+    const session = await startSessionRecording(Tone.getContext(), Tone.getDestination(), format, (audio) => {
+      sessionRecording = undefined
+      recordingState.value = 'idle'
+      try { downloadSession(audio, format) } catch (error) {
+        recordingError.value = `Could not download session recording: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }, (error) => {
+      sessionRecording = undefined
+      recordingState.value = 'idle'
+      recordingError.value = error.message
+    })
+    if (appUnmounted) { session.dispose(); return }
+    sessionRecording = session
+    recordingState.value = 'recording'
+  } catch (error) {
+    recordingState.value = 'idle'
+    recordingError.value = `Could not start session recording: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
 const { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput } = useTransport({
   banks,
   bpm,
@@ -260,7 +317,7 @@ async function saveProject() {
   projectError.value = ''
   try {
     const blob = await saveProjectToFile(JSON.parse(JSON.stringify({
-      version: 1, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value,
+      version: 1, bpm: bpm.value, infoText: infoText.value, infoScrollSpeed: infoScrollSpeed.value, recordingFormat: recordingFormat.value,
       banks: banks.value, selectedBankId: selectedBankId.value, assets: assets.value,
     })))
     const url = URL.createObjectURL(blob)
@@ -294,6 +351,7 @@ async function loadProject(event: Event) {
     bpm.value = project.bpm
     infoText.value = project.infoText ?? ''
     infoScrollSpeed.value = project.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
+    recordingFormat.value = project.recordingFormat ?? defaultRecordingFormat
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
@@ -376,6 +434,7 @@ async function newProject() {
     bpm.value = project.bpm
     infoText.value = project.infoText ?? ''
     infoScrollSpeed.value = project.infoScrollSpeed ?? DEFAULT_INFO_SCROLL_SPEED
+    recordingFormat.value = project.recordingFormat ?? defaultRecordingFormat
     assets.value = project.assets ?? []
     for (const asset of samplesInBanks(project.banks)) addAsset(asset)
     workspaceRevision.value++
@@ -389,6 +448,8 @@ async function newProject() {
 }
 
 onUnmounted(() => {
+  appUnmounted = true
+  sessionRecording?.dispose()
   stopKeepingScreenAwake?.()
   window.removeEventListener('pagehide', saveLocalProject)
   document.removeEventListener('fullscreenchange', syncFullScreen)
@@ -408,7 +469,13 @@ onUnmounted(() => {
   <main v-else class="app">
     <header class="header">
       <section class="transport" aria-label="Transport">
-        <button class="transport-button record" type="button" disabled aria-label="Record (not yet available)">
+        <button class="transport-button record" type="button"
+          :disabled="recordingState === 'starting' || recordingState === 'stopping'"
+          :class="{ 'is-recording': recordingState === 'recording' }"
+          :aria-label="recordingState === 'recording' ? 'Stop session recording' : 'Record session'"
+          :aria-pressed="recordingState === 'recording'"
+          :title="recordingState === 'recording' ? 'Stop and download session recording' : 'Record session'"
+          @click="toggleSessionRecording">
           <span class="record-icon" aria-hidden="true"></span>
         </button>
         <button
@@ -500,6 +567,10 @@ onUnmounted(() => {
       {{ storageError }}
       <button v-if="storageBlocked" type="button" @click="replaceInvalidProject">Replace saved project</button>
     </div>
+    <div v-if="recordingError" class="storage-error" role="alert">
+      {{ recordingError }}
+      <button type="button" @click="recordingError = ''">Dismiss</button>
+    </div>
     <div v-if="projectError" class="storage-error" role="alert">
       {{ projectError }}
       <button type="button" @click="projectError = ''">Dismiss</button>
@@ -576,6 +647,7 @@ onUnmounted(() => {
         </button>
       </div>
     </SettingsDialog>
-    <TempoDialog v-if="projectSettingsOpen" v-model:bpm="bpm" v-model:info-text="infoText" v-model:info-scroll-speed="infoScrollSpeed" @close="projectSettingsOpen = false" />
+    <TempoDialog v-if="projectSettingsOpen" v-model:bpm="bpm" v-model:info-text="infoText" v-model:info-scroll-speed="infoScrollSpeed"
+      v-model:recording-format="recordingFormat" :supported-formats="supportedFormats" @close="projectSettingsOpen = false" />
   </main>
 </template>

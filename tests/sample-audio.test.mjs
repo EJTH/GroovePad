@@ -228,6 +228,21 @@ test('recording processor flushes the last partial chunk on stop', async () => {
   assert.equal(processor.process([]), false)
 })
 
+test('recording processor interleaves stereo channels', async () => {
+  const source = await readFile(new URL('../src/audio/recording-processor.js', import.meta.url), 'utf8')
+  const messages = []
+  let Processor
+  class Worklet { port = { postMessage: (message) => messages.push(message) } }
+  vm.runInNewContext(source, {
+    AudioWorkletProcessor: Worklet, Float32Array,
+    registerProcessor: (_, implementation) => { Processor = implementation },
+  })
+  const processor = new Processor({ processorOptions: { channels: 2 } })
+  processor.process([[Float32Array.of(0.25, -0.5), Float32Array.of(-0.25, 0.5)]])
+  processor.port.onmessage({ data: 'stop' })
+  assert.deepEqual([...messages[0].samples], [0.25, -0.25, -0.5, 0.5])
+})
+
 test('sample hit loop playback migrates and validates without changing sample loops', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -304,7 +319,7 @@ test('project archives preserve unused assets and reject invalid asset lists', a
     const asset = { name: 'unused.wav', source: 'data:audio/wav;base64,YQ==' }
     const hit = createControl('hit', 0, 0, 'instrument-pad', 'sample-hit')
     Object.assign(hit.settings.instrumentParams, { sample: asset.source, sampleName: asset.name })
-    const project = { version: 1, bpm: 120, infoText: '  Archive   project info  ', infoScrollSpeed: 12.5, selectedBankId: 'A', assets: [asset, { name: 'unused.wav', source: 'data:audio/webm;codecs=opus;base64,Yg==' }],
+    const project = { version: 1, bpm: 120, infoText: '  Archive   project info  ', infoScrollSpeed: 12.5, recordingFormat: 'ogg', selectedBankId: 'A', assets: [asset, { name: 'unused.wav', source: 'data:audio/webm;codecs=opus;base64,Yg==' }],
       banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
         layout: { columns: 4, rows: 4, items: [hit], connections: [] } }] }
     const archive = await saveProjectToFile(project)
@@ -322,12 +337,15 @@ test('project archives preserve unused assets and reject invalid asset lists', a
     const loaded = await loadProjectFromFile(archive)
     assert.equal(loaded.infoText, project.infoText)
     assert.equal(loaded.infoScrollSpeed, project.infoScrollSpeed)
+    assert.equal(loaded.recordingFormat, 'ogg')
     assert.deepEqual(loaded.assets, project.assets)
     assert.equal(loaded.banks[0].layout.items[0].settings.instrumentParams.sample, asset.source)
     assert.equal(isSavedProject({ ...project, assets: undefined }), true)
     assert.equal(isSavedProject({ ...project, infoText: undefined }), true)
     assert.equal(isSavedProject({ ...project, infoText: 123 }), false)
     assert.equal(isSavedProject({ ...project, infoScrollSpeed: undefined }), true)
+    assert.equal(isSavedProject({ ...project, recordingFormat: undefined }), true)
+    assert.equal(isSavedProject({ ...project, recordingFormat: 'unknown' }), false)
     for (const speed of [0, 101, NaN, '20']) {
       assert.equal(isSavedProject({ ...project, infoScrollSpeed: speed }), false)
     }

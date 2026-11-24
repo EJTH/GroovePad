@@ -24,7 +24,7 @@ async function createDialog() {
     HTMLInputElement: Input,
   })
   const events = []
-  const props = { bpm: 120, infoText: 'Project notes', infoScrollSpeed: 20 }
+  const props = { bpm: 120, infoText: 'Project notes', infoScrollSpeed: 20, recordingFormat: 'wav', supportedFormats: ['wav', 'ogg'] }
   const api = module.exports.default.setup(props, { expose() {}, emit: (...args) => {
     events.push(args)
     if (args[0].startsWith('update:')) props[args[0].slice(7)] = args[1]
@@ -75,4 +75,12 @@ test('project settings retain precise input and clamp invalid numbers on blur', 
   speed.value = '-2'
   api.updateNumber({ target: speed }, 'speed', true)
   assert.equal(props.infoScrollSpeed, 1)
+})
+
+test('project settings accept only supported recording formats', async () => {
+  const { api, props } = await createDialog()
+  api.updateRecordingFormat({ target: { value: 'ogg' } })
+  assert.equal(props.recordingFormat, 'ogg')
+  api.updateRecordingFormat({ target: { value: 'mp3' } })
+  assert.equal(props.recordingFormat, 'ogg')
 })

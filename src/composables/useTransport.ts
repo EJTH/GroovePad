@@ -28,7 +28,7 @@ export function useTransport(options: {
         oscillator: { type: 'sine' },
         envelope: { attack: 0.001, decay: 0.025, sustain: 0, release: 0.01 },
         volume: -14,
-      }).toDestination()
+      }).connect(Tone.getContext().rawContext.destination)
       clickSynth.triggerAttackRelease(currentBeat % 4 === 0 ? 'C6' : 'G5', 0.03)
     } catch (error) {
       options.projectError.value = `Metronome audio failed: ${error instanceof Error ? error.message : String(error)}`

@@ -1,7 +1,8 @@
 class RecordingProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super()
-    this.samples = new Float32Array(4096)
+    this.channels = options?.processorOptions?.channels ?? 1
+    this.samples = new Float32Array(4096 * this.channels)
     this.length = 0
     this.stopped = false
     this.port.onmessage = (event) => {
@@ -22,10 +23,12 @@ class RecordingProcessor extends AudioWorkletProcessor {
 
   process(inputs) {
     if (this.stopped) return false
-    const input = inputs[0]?.[0]
-    if (input) {
-      for (const sample of input) {
-        this.samples[this.length++] = sample
+    const input = inputs[0]
+    if (input?.[0]) {
+      for (let frame = 0; frame < input[0].length; frame++) {
+        for (let channel = 0; channel < this.channels; channel++) {
+          this.samples[this.length++] = input[channel]?.[frame] ?? 0
+        }
         if (this.length === this.samples.length) this.flush()
       }
     }

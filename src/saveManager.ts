@@ -41,6 +41,7 @@ export async function saveProjectToFile(project: SavedProject): Promise<Blob> {
   const bankFiles = project.banks.map((_, index) => `banks/bank-${index + 1}.json`)
   const manifest = JSON.stringify({
     version: project.version, bpm: project.bpm, infoText: project.infoText, infoScrollSpeed: project.infoScrollSpeed,
+    recordingFormat: project.recordingFormat,
     selectedBankId: project.selectedBankId, bankFiles,
     assets: files.map(({ asset, path }) => ({
       name: asset.name, path, type: asset.source.slice(5, asset.source.indexOf(';base64,')),

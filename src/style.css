@@ -233,6 +233,15 @@ button:focus-visible {
   background: #94625e;
 }
 
+.record.is-recording {
+  border-color: #ef6b62;
+}
+
+.record.is-recording .record-icon {
+  border-radius: 2px;
+  background: #ef6b62;
+}
+
 .display {
   min-width: 0;
   height: 44px;

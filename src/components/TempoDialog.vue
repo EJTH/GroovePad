@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { MAX_INFO_SCROLL_SPEED, MIN_INFO_SCROLL_SPEED } from '../project'
+import { RECORDING_FORMATS, type RecordingFormat } from '../audio/sessionRecording'
 import SettingsDialog from './SettingsDialog.vue'
 
-const props = defineProps<{ bpm: number; infoText: string; infoScrollSpeed: number }>()
-const emit = defineEmits<{ close: []; 'update:bpm': [value: number]; 'update:infoText': [value: string]; 'update:infoScrollSpeed': [value: number] }>()
+const props = defineProps<{ bpm: number; infoText: string; infoScrollSpeed: number; recordingFormat: RecordingFormat; supportedFormats: RecordingFormat[] }>()
+const emit = defineEmits<{ close: []; 'update:bpm': [value: number]; 'update:infoText': [value: string]; 'update:infoScrollSpeed': [value: number]; 'update:recordingFormat': [value: RecordingFormat] }>()
 const error = ref('')
 let taps: number[] = []
 
@@ -48,6 +49,12 @@ function close() {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   emit('close')
 }
+
+function updateRecordingFormat(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  const format = props.supportedFormats.find((item) => item === value)
+  if (format) emit('update:recordingFormat', format)
+}
 </script>
 
 <template>
@@ -59,6 +66,13 @@ function close() {
       <label>Info scroll speed (pixels per second)
         <input :value="infoScrollSpeed" type="number" :min="MIN_INFO_SCROLL_SPEED" :max="MAX_INFO_SCROLL_SPEED" step="any" required @input="updateNumber($event, 'speed')" @blur="updateNumber($event, 'speed', true)">
       </label>
+      <label>Session recording format
+        <select :value="recordingFormat" :disabled="!supportedFormats.length" @change="updateRecordingFormat">
+          <option v-if="!supportedFormats.includes(recordingFormat)" :value="recordingFormat" disabled>{{ recordingFormat.toUpperCase() }} (not supported in this browser)</option>
+          <option v-for="format in RECORDING_FORMATS.filter((item) => supportedFormats.includes(item.id))" :key="format.id" :value="format.id">{{ format.label }}</option>
+        </select>
+      </label>
+      <p v-if="!supportedFormats.includes(recordingFormat)" class="grid-message" role="status">Choose a supported recording format before recording.</p>
       <p v-if="error" class="grid-message" role="alert">{{ error }}</p>
     </form>
   </SettingsDialog>

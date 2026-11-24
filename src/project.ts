@@ -2,6 +2,7 @@ import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacemen
 import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
+import { RECORDING_FORMATS, type RecordingFormat } from './audio/sessionRecording'
 
 export const DEFAULT_INFO_SCROLL_SPEED = 20
 export const MIN_INFO_SCROLL_SPEED = 1
@@ -20,6 +21,7 @@ export interface SavedProject {
   bpm: number
   infoText?: string
   infoScrollSpeed?: number
+  recordingFormat?: RecordingFormat
   banks: Bank[]
   selectedBankId: string
   assets?: SampleAsset[]
@@ -287,6 +289,7 @@ export function isSavedProject(value: unknown): value is SavedProject {
   if (!object(value) || value.version !== 1 || typeof value.selectedBankId !== 'string' ||
     !within(value.bpm, 1, 300) || (value.infoText !== undefined && typeof value.infoText !== 'string') ||
     (value.infoScrollSpeed !== undefined && !within(value.infoScrollSpeed, MIN_INFO_SCROLL_SPEED, MAX_INFO_SCROLL_SPEED)) ||
+    (value.recordingFormat !== undefined && !oneOf(value.recordingFormat, RECORDING_FORMATS.map((format) => format.id))) ||
     !Array.isArray(value.banks) || !value.banks.length) return false
   if (value.assets !== undefined && (!Array.isArray(value.assets) ||
     !value.assets.every((asset: unknown) => object(asset) && typeof asset.name === 'string' &&
