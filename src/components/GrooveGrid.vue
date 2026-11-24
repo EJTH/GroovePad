@@ -200,7 +200,7 @@ function openSettings(item: GridItem) {
   message.value = ''
 }
 
-const { interaction, dropAction, canCopyDrop, startInteraction, updateInteraction, endInteraction, completeDrop, itemStyle } =
+const { interaction, dropAction, canCopyDrop, startInteraction, updateInteraction, endInteraction, clickInteraction, completeDrop, itemStyle } =
   useGridInteraction({
     getLayout: () => props.layout,
     isEditing: () => props.editing,
@@ -673,7 +673,7 @@ function removeItem() {
             @pointermove="updateInteraction"
             @pointerup="endInteraction($event)"
             @pointercancel="endInteraction($event, true)"
-            @click="editing && $event.detail === 0 && openSettings(original)"
+            @click="clickInteraction($event, original)"
           ><span :class="{ 'vertical-edit-label': original.orientation === 'vertical' }">{{ original.label }}</span></button>
           <span v-if="!editing && selectorFlash?.targetId === item.id" :key="selectorFlash.sequence"
             class="selector-receiver-flash" aria-hidden="true"></span>
@@ -686,7 +686,7 @@ function removeItem() {
             @pointermove="updateInteraction"
             @pointerup="endInteraction($event)"
             @pointercancel="endInteraction($event, true)"
-            @click="$event.detail === 0 && openSettings(original)"
+            @click="clickInteraction($event, original)"
           ><span aria-hidden="true">◢</span></button>
           <button v-if="wiring" type="button" class="wire-control" :class="{ selected: wireFirst === item.id }"
             :data-wire-id="item.id" :aria-label="`Wire ${item.label}`"

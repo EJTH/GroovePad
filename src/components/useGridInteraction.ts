@@ -27,6 +27,7 @@ export function useGridInteraction(options: {
 }) {
   const interaction = ref<Interaction | null>(null)
   const dropAction = ref<DropAction | null>(null)
+  let settingsClickItemId: string | null = null
   const canCopyDrop = computed(() => {
     const drop = dropAction.value
     return !!drop && isValidPlacement(options.getLayout(), copyControl(drop.candidate, options.nextControlId()))
@@ -34,6 +35,7 @@ export function useGridInteraction(options: {
 
   function startInteraction(event: PointerEvent, item: GridItem, mode: 'move' | 'resize') {
     if (!options.isEditing() || interaction.value || event.button !== 0) return
+    settingsClickItemId = null
     event.preventDefault()
     const target = event.currentTarget
     if (!(target instanceof HTMLElement)) return
@@ -78,7 +80,7 @@ export function useGridInteraction(options: {
     interaction.value = null
     if (cancelled) return
     if (!current.moved) {
-      options.openSettings(current.original)
+      settingsClickItemId = current.original.id
     } else if (current.mode === 'move') {
       const grid = options.grid.value
       if (!grid) return
@@ -112,6 +114,12 @@ export function useGridInteraction(options: {
     } else {
       options.message.value = 'The control must fit inside the grid without overlapping another control.'
     }
+  }
+
+  function clickInteraction(event: MouseEvent, item: GridItem) {
+    const shouldOpen = options.isEditing() && (event.detail === 0 || settingsClickItemId === item.id)
+    settingsClickItemId = null
+    if (shouldOpen) options.openSettings(item)
   }
 
   function completeDrop(action: 'move' | 'copy' | 'swap') {
@@ -157,5 +165,5 @@ export function useGridInteraction(options: {
     }
   }
 
-  return { interaction, dropAction, canCopyDrop, startInteraction, updateInteraction, endInteraction, completeDrop, itemStyle }
+  return { interaction, dropAction, canCopyDrop, startInteraction, updateInteraction, endInteraction, clickInteraction, completeDrop, itemStyle }
 }

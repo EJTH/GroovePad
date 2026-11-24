@@ -4,6 +4,55 @@ import { createSSRApp, h } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
 
+test('control settings open after the tap click, not on pointer release or drag', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  const previousHTMLElement = globalThis.HTMLElement
+  const previousWindow = globalThis.window
+  try {
+    const { ref } = await import('vue')
+    const { useGridInteraction } = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    class Element {
+      setPointerCapture() {}
+      getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 } }
+    }
+    globalThis.HTMLElement = Element
+    globalThis.window = { getComputedStyle: () => ({ columnGap: '0', rowGap: '0' }) }
+    const item = createControl('control', 0, 0, 'instrument-pad')
+    const layout = { columns: 1, rows: 1, items: [item], connections: [] }
+    const opened = []
+    const handlers = useGridInteraction({
+      getLayout: () => layout, isEditing: () => true, grid: ref(new Element()), message: ref(''),
+      openSettings: (selected) => opened.push(selected.id), nextControlId: () => 'copy',
+    })
+    const pointer = (x = 10) => ({
+      pointerId: 1, button: 0, clientX: x, clientY: 10, currentTarget: new Element(), preventDefault() {},
+    })
+    handlers.startInteraction(pointer(), item, 'move')
+    handlers.endInteraction(pointer())
+    assert.deepEqual(opened, [])
+    handlers.clickInteraction({ detail: 1 }, item)
+    assert.deepEqual(opened, ['control'])
+
+    handlers.startInteraction(pointer(), item, 'move')
+    handlers.endInteraction(pointer(20))
+    handlers.clickInteraction({ detail: 1 }, item)
+    assert.deepEqual(opened, ['control'])
+
+    handlers.startInteraction(pointer(), item, 'resize')
+    handlers.endInteraction(pointer(), true)
+    handlers.clickInteraction({ detail: 1 }, item)
+    assert.deepEqual(opened, ['control'])
+
+    handlers.clickInteraction({ detail: 0 }, item)
+    assert.deepEqual(opened, ['control', 'control'])
+  } finally {
+    globalThis.HTMLElement = previousHTMLElement
+    globalThis.window = previousWindow
+    await server.close()
+  }
+})
+
 test('control summaries start collapsed and show each control name, size and color', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
