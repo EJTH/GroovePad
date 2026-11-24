@@ -37,9 +37,13 @@ export function pasteRow(settings: SequencedLoopSettings, index: number, copied:
   if (copied.muted) ((settings.mutedRows ??= {})[index] ??= []).push({ ...copied.row })
 }
 
-export function cloneClip(settings: SequencedLoopSettings, index: number) {
-  const target = Array.from({ length: MAX_LOOP_CLIP_INDEX + 1 }, (_, i) => i)
+export function nextUnusedClipIndex(settings: SequencedLoopSettings) {
+  return Array.from({ length: MAX_LOOP_CLIP_INDEX + 1 }, (_, i) => i)
     .find((i) => !(String(i) in settings.clips) && !(String(i) in settings.automation) && !(String(i) in (settings.mutedRows ?? {})))
+}
+
+export function cloneClip(settings: SequencedLoopSettings, index: number) {
+  const target = nextUnusedClipIndex(settings)
   if (target === undefined) return undefined
   settings.clips[target] = (settings.clips[index] ?? []).map((note) => ({ ...note }))
   settings.automation[target] = (settings.automation[index] ?? []).map((event) => ({ ...event }))

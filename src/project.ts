@@ -1,4 +1,4 @@
-import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
+import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacement, LOOP_WIDGET_BUTTONS, MAX_LOOP_CLIP_INDEX, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
 import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
@@ -112,6 +112,7 @@ function isItem(value: unknown): value is GridItem {
       (s.muted === undefined || typeof s.muted === 'boolean') && integer(s.barLength, 1, 64) && integer(s.clipIndex, 0, MAX_LOOP_CLIP_INDEX) &&
       typeof s.armed === 'boolean' && (s.playing === undefined || typeof s.playing === 'boolean') &&
       typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
+      (s.widgetButtons === undefined || (object(s.widgetButtons) && LOOP_WIDGET_BUTTONS.every((button) => typeof (s.widgetButtons as Record<string, unknown>)[button.id] === 'boolean'))) &&
       oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
       (s.mutedRows === undefined || (object(s.mutedRows) && Object.entries(s.mutedRows).every(([index, rows]) =>
         /^(0|[1-9]\d{0,2})$/.test(index) && Number(index) <= MAX_LOOP_CLIP_INDEX && Array.isArray(rows) &&

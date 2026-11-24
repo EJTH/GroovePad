@@ -32,6 +32,7 @@ export function useGridPlayback(options: {
   let automationSequence = 0
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
+  const loopEditorPlayheads = ref(new Map<string, { index: number; position: number }>())
   const silentVoices = new Set<number>()
   const loopEngine = new SequencedLoopEngine(
     () => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop'),
@@ -63,13 +64,17 @@ export function useGridPlayback(options: {
   function updateLoopStatus() {
     const next = new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>()
     const playheads = new Map<string, number>()
+    const editorPlayheads = new Map<string, { index: number; position: number }>()
     for (const item of options.layout().items) if (item.type === 'sequenced-loop') {
       next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id), counting: loopEngine.isCounting(item.id) })
       const displayed = displayItems.value.find((entry) => entry.id === item.id)
       const position = loopEngine.playhead(item.id, displayed?.type === 'sequenced-loop' ? displayed.settings.clipIndex : item.settings.clipIndex)
       if (position !== undefined) playheads.set(item.id, position * 100)
+      const editorPosition = loopEngine.playhead(item.id, item.settings.clipIndex)
+      if (editorPosition !== undefined) editorPlayheads.set(item.id, { index: item.settings.clipIndex, position: editorPosition })
     }
     loopPlayheads.value = playheads
+    loopEditorPlayheads.value = editorPlayheads
     if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
       status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending ||
       status.counting !== loopStatus.value.get(id)?.counting)) loopStatus.value = next
@@ -490,6 +495,7 @@ export function useGridPlayback(options: {
     liveControls,
     loopStatus,
     loopPlayheads,
+    loopEditorPlayheads,
     playbackAutomation,
     effectiveSignals,
     displayItems,

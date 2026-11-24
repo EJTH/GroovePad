@@ -162,6 +162,52 @@ test('loop tiles preview the selected clip and expose separate arm and play cont
   } finally { await server.close() }
 })
 
+test('loop widget button settings persist, copy independently and control the visible actions', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { createControl, copyControl, defaultLoopWidgetButtons, nextLoopQuantize } = await server.ssrLoadModule('/src/grid.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    const layout = { columns: 1, rows: 1, items: [loop], connections: [] }
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
+    const render = () => renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+      layout, editing: false, wiring: false, settingsOpen: false, bpm: 120, playing: false,
+    }) }))
+    const initial = await render()
+    assert.match(initial, /aria-label="Arm Loop sequencer for recording"/)
+    assert.match(initial, /aria-label="Play Loop sequencer when playback starts"/)
+    assert.match(initial, /aria-label="Clear clip 0 in Loop sequencer"/)
+    assert.doesNotMatch(initial, /aria-label="Open Loop sequencer editor"/)
+    const settings = await renderToString(createSSRApp({ render: () => h(Panel, { draft: loop, layout }) }))
+    for (const label of ['Play/Pause', 'Arm Recording', 'Clear clip', 'Clone clip', 'Next clip', 'Previous clip', 'Open Editor', 'Quantization']) {
+      assert.ok(settings.includes(label), label)
+    }
+    loop.settings.widgetButtons = { ...defaultLoopWidgetButtons(), play: false, arm: false, clear: false,
+      clone: true, next: true, previous: true, editor: true, quantize: true }
+    const enabled = await render()
+    assert.doesNotMatch(enabled, /aria-label="Arm Loop sequencer for recording"/)
+    assert.doesNotMatch(enabled, /aria-label="Play Loop sequencer when playback starts"/)
+    assert.doesNotMatch(enabled, /aria-label="Clear clip 0 in Loop sequencer"/)
+    for (const label of ['Clone clip 0 in Loop sequencer', 'Next clip in Loop sequencer',
+      'Previous clip in Loop sequencer', 'Open Loop sequencer editor']) assert.ok(enabled.includes(`aria-label="${label}"`), label)
+    assert.ok(enabled.indexOf('aria-label="Previous clip in Loop sequencer"') < enabled.indexOf('aria-label="Next clip in Loop sequencer"'))
+    assert.match(enabled, /Q OFF/)
+    assert.match(enabled, /disabled[^>]*aria-label="Previous clip in Loop sequencer"/)
+    assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
+    const copy = copyControl(loop, 'copy')
+    copy.settings.widgetButtons.editor = false
+    assert.equal(loop.settings.widgetButtons.editor, true)
+    loop.settings.widgetButtons.editor = 'yes'
+    assert.equal(isSavedProject(project), false)
+    let quantize = 'off'
+    const cycle = []
+    for (let i = 0; i < 5; i++) { quantize = nextLoopQuantize(quantize); cycle.push(quantize) }
+    assert.deepEqual(cycle, ['1/4', '1/8', '1/16', '1/32', 'off'])
+  } finally { await server.close() }
+})
+
 test('loop preview colors events by their source control and bank', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -866,6 +912,64 @@ test('empty muted rows remain accessible in the sequence editor', async () => {
     }) }))
     assert.match(html, /muted, row actions/)
   } finally { await server.close() }
+})
+
+test('sequence editor shows the active playhead at the correct timeline position', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    const layout = { columns: 1, rows: 1, items: [loop], connections: [] }
+    const render = (playhead) => renderToString(createSSRApp({ render: () => h(Panel, { draft: loop, layout, playhead }) }))
+    assert.doesNotMatch(await render(), /class="sequence-playhead"/)
+    assert.match(await render(0), /class="sequence-playhead"[^>]*left:calc\(130px \+ 0px\)/)
+    assert.match(await render(0.5), /class="sequence-playhead"[^>]*left:calc\(130px \+ 224px\)/)
+  } finally { await server.close() }
+})
+
+test('editor playhead tracks only the playing clip', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  let app
+  try {
+    const { useGridPlayback } = await server.ssrLoadModule('/src/components/useGridPlayback.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.syncMode = 'sync'
+    const layout = reactive({ columns: 1, rows: 1, items: [loop], connections: [] })
+    const playing = ref(false)
+    let beat = 0
+    let playback
+    app = testRenderer().createApp({
+      setup() {
+        playback = useGridPlayback({
+          layout: () => layout, banks: () => undefined, bankId: 'A', bankEvents: new BankEventBus(),
+          clock: { position: () => beat }, playing: () => playing.value, editing: () => false,
+          transportStartImmediate: () => true, triggeredByInput: () => false,
+          startOnInput: () => undefined, signals: new Map(), routeNote() {},
+        })
+        return () => h('div')
+      },
+    })
+    app.mount({})
+    playback.toggleLoopPlayback('loop')
+    playing.value = true
+    beat = 1
+    playback.loopEngine.tick()
+    playback.updateLoopStatus()
+    assert.deepEqual(playback.loopEditorPlayheads.value.get('loop'), { index: 0, position: 0.25 })
+    layout.items[0].settings.clipIndex = 1
+    playback.loopEngine.tick()
+    playback.updateLoopStatus()
+    assert.equal(playback.loopEditorPlayheads.value.has('loop'), false)
+    beat = 4
+    playback.loopEngine.tick()
+    playback.updateLoopStatus()
+    assert.deepEqual(playback.loopEditorPlayheads.value.get('loop'), { index: 1, position: 0 })
+    playing.value = false
+    assert.equal(playback.loopEditorPlayheads.value.has('loop'), false)
+  } finally { app?.unmount(); await server.close() }
 })
 
 test('muted rows suppress playback, release active notes and automation, and remain clip-specific', async () => {

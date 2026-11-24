@@ -31,6 +31,7 @@ const props = defineProps<{
   message: string
   banks?: Bank[]
   bankId?: string
+  loopPlayhead?: number
 }>()
 const emit = defineEmits<{
   save: [item: GridItem]
@@ -258,7 +259,8 @@ function canSetModulationAmount(connection: Connection) {
         <ModWheelSettingsPanel v-else-if="liveItem.type === 'mod-wheel'" :draft="liveItem" />
         <PianoRollSettingsPanel v-else-if="liveItem.type === 'piano-roll' && draft.type === 'piano-roll'" :draft="liveItem" :base-draft="draft" />
         <ArpeggiatorSettingsPanel v-else-if="liveItem.type === 'arpeggiator'" :draft="liveItem" />
-        <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId" @arm-change="emit('armChange', $event)" />
+        <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId"
+          :playhead="loopPlayhead" @arm-change="emit('armChange', $event)" />
       </section>
 
       <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">

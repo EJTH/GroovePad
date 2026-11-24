@@ -84,6 +84,28 @@ export interface LoopAutomation { bankId?: string; sourceId: string; parameter: 
 export type LoopRow = { kind: 'note'; bankId?: string; instrumentId: string; note: number } |
   { kind: 'automation'; bankId?: string; sourceId: string; parameter: string }
 export type LoopQuantize = 'off' | '1/4' | '1/8' | '1/16' | '1/32'
+export const LOOP_QUANTIZE_VALUES: LoopQuantize[] = ['off', '1/4', '1/8', '1/16', '1/32']
+export function nextLoopQuantize(value: LoopQuantize): LoopQuantize {
+  return LOOP_QUANTIZE_VALUES[(LOOP_QUANTIZE_VALUES.indexOf(value) + 1) % LOOP_QUANTIZE_VALUES.length]!
+}
+export const LOOP_WIDGET_BUTTONS = [
+  { id: 'play', label: 'Play/Pause', defaultVisible: true },
+  { id: 'arm', label: 'Arm Recording', defaultVisible: true },
+  { id: 'clear', label: 'Clear clip', defaultVisible: true },
+  { id: 'clone', label: 'Clone clip', defaultVisible: false },
+  { id: 'next', label: 'Next clip', defaultVisible: false },
+  { id: 'previous', label: 'Previous clip', defaultVisible: false },
+  { id: 'editor', label: 'Open Editor', defaultVisible: false },
+  { id: 'quantize', label: 'Quantization', defaultVisible: false },
+] as const
+export type LoopWidgetButton = typeof LOOP_WIDGET_BUTTONS[number]['id']
+export type LoopWidgetButtons = Record<LoopWidgetButton, boolean>
+export function defaultLoopWidgetButtons(): LoopWidgetButtons {
+  return Object.fromEntries(LOOP_WIDGET_BUTTONS.map((button) => [button.id, button.defaultVisible])) as LoopWidgetButtons
+}
+export function loopWidgetButtonVisible(settings: SequencedLoopSettings, id: LoopWidgetButton) {
+  return settings.widgetButtons?.[id] ?? LOOP_WIDGET_BUTTONS.find((button) => button.id === id)!.defaultVisible
+}
 export const MAX_LOOP_CLIP_INDEX = 15
 export interface SequencedLoopSettings {
   color: string
@@ -101,6 +123,7 @@ export interface SequencedLoopSettings {
   clips: Record<string, LoopNote[]>
   automation: Record<string, LoopAutomation[]>
   mutedRows?: Record<string, LoopRow[]>
+  widgetButtons?: LoopWidgetButtons
 }
 
 export type GridItem = GridItemBase & (
@@ -223,6 +246,7 @@ export function copyControl(item: GridItem, id: string): GridItem {
     case 'sequenced-loop': return { ...item, id, settings: { ...item.settings,
       clips: Object.fromEntries(Object.entries(item.settings.clips).map(([index, notes]) => [index, notes.map((note) => ({ ...note }))])),
       automation: Object.fromEntries(Object.entries(item.settings.automation).map(([index, events]) => [index, events.map((event) => ({ ...event }))])),
+      ...(item.settings.widgetButtons ? { widgetButtons: { ...item.settings.widgetButtons } } : {}),
       ...(item.settings.mutedRows ? { mutedRows: Object.fromEntries(Object.entries(item.settings.mutedRows).map(([index, rows]) => [index, rows.map((row) => ({ ...row }))])) } : {}) } }
     case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
   }
