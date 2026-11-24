@@ -113,6 +113,11 @@ function isItem(value: unknown): value is GridItem {
       typeof s.armed === 'boolean' && (s.playing === undefined || typeof s.playing === 'boolean') &&
       typeof s.countIn === 'boolean' && typeof s.metronome === 'boolean' && oneOf(s.syncMode, ['immediate', 'sync']) &&
       oneOf(s.quantize, ['off', '1/4', '1/8', '1/16', '1/32']) && oneOf(s.recordScope, ['bank', 'all']) && object(s.clips) &&
+      (s.mutedRows === undefined || (object(s.mutedRows) && Object.entries(s.mutedRows).every(([index, rows]) =>
+        /^(0|[1-9]\d{0,2})$/.test(index) && Number(index) <= MAX_LOOP_CLIP_INDEX && Array.isArray(rows) &&
+        rows.every((row: unknown) => object(row) && (row.bankId === undefined || (typeof row.bankId === 'string' && !!row.bankId)) &&
+          (row.kind === 'note' ? typeof row.instrumentId === 'string' && !!row.instrumentId && integer(row.note, 0, 127)
+            : row.kind === 'automation' && typeof row.sourceId === 'string' && !!row.sourceId && typeof row.parameter === 'string' && !!row.parameter))))) &&
       Array.isArray(s.clips[String(s.clipIndex)]) &&
       object(s.automation) && Object.entries(s.automation).every(([index, events]) =>
         /^(0|[1-9]\d{0,2})$/.test(index) && Array.isArray(events) &&

@@ -35,6 +35,7 @@ test('held repeats follow the transport and division changes and record separate
           clock: () => ({ repeatPosition: () => beat }),
           send: (note, on) => { sent.push([beat, on]); engine.record('piano', note, 100, undefined, on) },
         })
+
         return () => h('div')
       },
     })
@@ -765,5 +766,148 @@ test('clip selection permits indices 0 to 15 and the settings input exposes the 
     assert.equal(isSavedProject(project), false)
     loop.settings.clipIndex = -1
     assert.equal(isSavedProject(project), false)
+  } finally { await server.close() }
+})
+
+test('row copy, paste, removal and cloning preserve identities and mute state independently', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl, copyControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { copyRow, pasteRow, removeRow, cloneClip } = await server.ssrLoadModule('/src/loopRows.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    const row = { kind: 'note', instrumentId: 'piano', note: 60 }
+    loop.settings.clips[0] = [
+      { instrumentId: 'piano', note: 60, velocity: 80, position: 0, duration: 1 },
+      { instrumentId: 'piano', bankId: 'B', note: 60, velocity: 90, position: 1, duration: 1 },
+    ]
+    loop.settings.mutedRows = { 0: [row] }
+    const copied = copyRow(loop.settings, 0, row, 'A')
+    loop.settings.clips[1] = [{ instrumentId: 'piano', bankId: 'A', note: 60, velocity: 10, position: 2, duration: 1 }]
+    pasteRow(loop.settings, 1, copied, 'A')
+    assert.deepEqual(loop.settings.clips[1], [loop.settings.clips[0][0]])
+    assert.notEqual(loop.settings.clips[1][0], loop.settings.clips[0][0])
+    assert.deepEqual(loop.settings.mutedRows[1], [row])
+    assert.equal(cloneClip(loop.settings, 1), 2)
+    loop.settings.clips[2][0].velocity = 20
+    loop.settings.mutedRows[2][0].note = 61
+    assert.equal(loop.settings.clips[1][0].velocity, 80)
+    assert.equal(loop.settings.mutedRows[1][0].note, 60)
+    removeRow(loop.settings, 0, row, 'A')
+    assert.equal(loop.settings.clips[0].length, 1)
+    assert.equal(loop.settings.clips[0][0].bankId, 'B')
+    const automationRow = { kind: 'automation', sourceId: 'knob', parameter: 'value' }
+    loop.settings.automation[0] = [{ sourceId: 'knob', parameter: 'value', position: 0.5, value: 42, active: true }]
+    pasteRow(loop.settings, 1, copyRow(loop.settings, 0, automationRow, 'A'), 'A')
+    assert.deepEqual(loop.settings.automation[1], loop.settings.automation[0])
+    removeRow(loop.settings, 1, automationRow, 'A')
+    assert.deepEqual(loop.settings.automation[1], [])
+    const clone = copyControl(loop, 'copy')
+    clone.settings.mutedRows[1][0].note = 62
+    assert.equal(loop.settings.mutedRows[1][0].note, 60)
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 1, rows: 1, items: [loop], connections: [] },
+    }] }
+    assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
+    loop.settings.mutedRows[1][0].note = 128
+    assert.equal(isSavedProject(project), false)
+    for (let i = 3; i <= 15; i++) loop.settings.clips[i] = []
+    assert.equal(cloneClip(loop.settings, 0), undefined)
+  } finally { await server.close() }
+})
+
+test('row mute releases only its own routed automation', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  let app
+  try {
+    const { useGridPlayback } = await server.ssrLoadModule('/src/components/useGridPlayback.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.syncMode = 'immediate'
+    loop.settings.automation[0] = [
+      { sourceId: 'one', parameter: 'value', position: 0, value: 1 },
+      { sourceId: 'two', parameter: 'value', position: 0, value: 2 },
+    ]
+    const layout = reactive({ columns: 1, rows: 1, items: [loop], connections: [] })
+    let playback
+    app = testRenderer().createApp({
+      setup() {
+        playback = useGridPlayback({
+          layout: () => layout, banks: () => undefined, bankId: 'A', bankEvents: new BankEventBus(),
+          clock: { position: () => 0 }, playing: () => true, editing: () => false,
+          transportStartImmediate: () => true, triggeredByInput: () => false,
+          startOnInput: () => undefined, signals: new Map(), routeNote() {},
+        })
+        return () => h('div')
+      },
+    })
+    app.mount({})
+    playback.loopEngine.toggle(layout.items[0], 0, true)
+    playback.loopEngine.tick()
+    assert.equal(playback.playbackAutomation.value.size, 2)
+    layout.items[0].settings.mutedRows = { 0: [{ kind: 'automation', sourceId: 'one', parameter: 'value' }] }
+    playback.loopEngine.tick()
+    assert.equal(playback.playbackAutomation.value.has('one:value'), false)
+    assert.equal(playback.playbackAutomation.value.has('two:value'), true)
+  } finally { app?.unmount(); await server.close() }
+})
+
+test('empty muted rows remain accessible in the sequence editor', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.mutedRows = { 0: [{ kind: 'note', instrumentId: 'piano', note: 60 }] }
+    const html = await renderToString(createSSRApp({ render: () => h(Panel, {
+      draft: loop, layout: { columns: 1, rows: 1, items: [loop], connections: [] }, bankId: 'A',
+    }) }))
+    assert.match(html, /muted, row actions/)
+  } finally { await server.close() }
+})
+
+test('muted rows suppress playback, release active notes and automation, and remain clip-specific', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { SequencedLoopEngine } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    loop.settings.syncMode = 'immediate'
+    loop.settings.clips[0] = [
+      { instrumentId: 'piano', note: 60, velocity: 100, position: 0, duration: 3 },
+      { instrumentId: 'piano', note: 61, velocity: 100, position: 0, duration: 3 },
+    ]
+    loop.settings.automation[0] = [
+      { sourceId: 'knob', parameter: 'value', value: 10, position: 0 },
+      { sourceId: 'other', parameter: 'value', value: 20, position: 0 },
+    ]
+    let beat = 0
+    const notes = []
+    const automation = []
+    const engine = new SequencedLoopEngine(() => [loop], () => beat,
+      (id, note, on) => notes.push([note.note, on]),
+      (id, event, remove) => automation.push([event?.sourceId, remove]), 'A')
+    engine.toggle(loop, 0, true)
+    engine.tick()
+    loop.settings.mutedRows = { 0: [
+      { kind: 'note', instrumentId: 'piano', note: 60 },
+      { kind: 'automation', sourceId: 'knob', parameter: 'value' },
+    ] }
+    beat = 0.1
+    engine.tick()
+    assert.deepEqual(notes.filter(([, on]) => !on), [[60, false]])
+    assert.deepEqual(automation.filter(([, remove]) => remove), [['knob', true]])
+    beat = 4
+    engine.tick()
+    assert.equal(notes.filter(([note, on]) => note === 60 && on).length, 1)
+    assert.equal(notes.filter(([note, on]) => note === 61 && on).length, 2)
+    assert.equal(automation.filter(([source, remove]) => source === 'knob' && !remove).length, 1)
+    loop.settings.mutedRows[0] = []
+    beat = 8
+    engine.tick()
+    assert.equal(notes.filter(([note, on]) => note === 60 && on).length, 2)
+    assert.equal(automation.filter(([source, remove]) => source === 'knob' && !remove).length, 2)
   } finally { await server.close() }
 })

@@ -81,6 +81,8 @@ export interface HeldNote { note: number; velocity: number; count: number; bend?
 export interface OutputSelectorSettings { index: number; baseIndex?: number }
 export interface LoopNote { bankId?: string; instrumentId: string; note: number; velocity: number; bend?: number; position: number; duration: number }
 export interface LoopAutomation { bankId?: string; sourceId: string; parameter: string; value: number; active?: boolean; position: number }
+export type LoopRow = { kind: 'note'; bankId?: string; instrumentId: string; note: number } |
+  { kind: 'automation'; bankId?: string; sourceId: string; parameter: string }
 export type LoopQuantize = 'off' | '1/4' | '1/8' | '1/16' | '1/32'
 export const MAX_LOOP_CLIP_INDEX = 15
 export interface SequencedLoopSettings {
@@ -98,6 +100,7 @@ export interface SequencedLoopSettings {
   recordScope: 'bank' | 'all'
   clips: Record<string, LoopNote[]>
   automation: Record<string, LoopAutomation[]>
+  mutedRows?: Record<string, LoopRow[]>
 }
 
 export type GridItem = GridItemBase & (
@@ -219,7 +222,8 @@ export function copyControl(item: GridItem, id: string): GridItem {
     case 'output-selector': return { ...item, id, settings: { ...item.settings } }
     case 'sequenced-loop': return { ...item, id, settings: { ...item.settings,
       clips: Object.fromEntries(Object.entries(item.settings.clips).map(([index, notes]) => [index, notes.map((note) => ({ ...note }))])),
-      automation: Object.fromEntries(Object.entries(item.settings.automation).map(([index, events]) => [index, events.map((event) => ({ ...event }))])) } }
+      automation: Object.fromEntries(Object.entries(item.settings.automation).map(([index, events]) => [index, events.map((event) => ({ ...event }))])),
+      ...(item.settings.mutedRows ? { mutedRows: Object.fromEntries(Object.entries(item.settings.mutedRows).map(([index, rows]) => [index, rows.map((row) => ({ ...row }))])) } : {}) } }
     case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
   }
 }

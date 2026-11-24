@@ -45,8 +45,8 @@ export function useGridPlayback(options: {
       if (!on && silentVoices.delete(id)) return
       options.bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? options.bankId, voiceId: JSON.stringify([options.bankId, id]), note, on })
     },
-    (id, event) => {
-      options.bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([options.bankId, id]), bankId: event ? (event.bankId ?? options.bankId) : undefined, event })
+    (id, event, remove) => {
+      options.bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([options.bankId, id]), bankId: event ? (event.bankId ?? options.bankId) : undefined, event, remove })
     },
     options.bankId,
     (loop) => {
@@ -259,6 +259,7 @@ export function useGridPlayback(options: {
     const index = String(displayItem.settings.clipIndex)
     item.settings.clips[index] = []
     item.settings.automation[index] = []
+    if (item.settings.mutedRows) delete item.settings.mutedRows[index]
   }
 
   let inputStart: Promise<boolean> | undefined
@@ -306,6 +307,10 @@ export function useGridPlayback(options: {
     } else if (event.kind === 'loop-automation') {
       if (!event.event) { loopAutomation.delete(event.owner); return }
       if (event.bankId !== options.bankId) return
+      if (event.remove) {
+        loopAutomation.get(event.owner)?.delete(`${event.event.sourceId}:${event.event.parameter}`)
+        return
+      }
       let values = loopAutomation.get(event.owner)
       if (!values) { loopAutomation.set(event.owner, new Map()); values = loopAutomation.get(event.owner)! }
       values.set(`${event.event.sourceId}:${event.event.parameter}`, {

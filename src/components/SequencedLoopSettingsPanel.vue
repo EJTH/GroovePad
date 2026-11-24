@@ -1,12 +1,42 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type LoopAutomation, type LoopNote } from '../grid'
+import { computed, ref, watch } from 'vue'
+import { MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type LoopAutomation, type LoopNote, type LoopRow } from '../grid'
+import { cloneClip, copyRow, pasteRow, removeRow, rowKey, type RowClipboard } from '../loopRows'
 import NumericSetting from './NumericSetting.vue'
 import SequenceEditor from './SequenceEditor.vue'
 import type { Bank } from '../project'
 
 const props = defineProps<{ draft: Extract<GridItem, { type: 'sequenced-loop' }>; layout: GridLayout; banks?: Bank[]; bankId?: string }>()
 const emit = defineEmits<{ 'arm-change': [armed: boolean] }>()
+const clipboard = ref<RowClipboard | null>(null)
+const message = ref('')
+const mutedRows = computed(() => props.draft.settings.mutedRows?.[props.draft.settings.clipIndex] ?? [])
+const canClone = computed(() => Array.from({ length: MAX_LOOP_CLIP_INDEX + 1 }, (_, i) => String(i))
+  .some((index) => !(index in props.draft.settings.clips) && !(index in props.draft.settings.automation) && !(index in (props.draft.settings.mutedRows ?? {}))))
+function toggleMute(row: LoopRow) {
+  const settings = props.draft.settings
+  const index = settings.clipIndex
+  const key = rowKey(row, props.bankId)
+  const rows = mutedRows.value
+  ;(settings.mutedRows ??= {})[index] = rows.some((entry) => rowKey(entry, props.bankId) === key)
+    ? rows.filter((entry) => rowKey(entry, props.bankId) !== key) : [...rows, { ...row }]
+}
+function remove(row: LoopRow, all: boolean) {
+  const settings = props.draft.settings
+  const indices = all ? new Set([...Object.keys(settings.clips), ...Object.keys(settings.automation), ...Object.keys(settings.mutedRows ?? {})].map(Number))
+    : new Set([settings.clipIndex])
+  for (const index of indices) removeRow(settings, index, row, props.bankId)
+}
+function copy(row: LoopRow) { clipboard.value = copyRow(props.draft.settings, props.draft.settings.clipIndex, row, props.bankId) }
+function paste() {
+  if (clipboard.value) pasteRow(props.draft.settings, props.draft.settings.clipIndex, clipboard.value, props.bankId)
+}
+function clone() {
+  const index = cloneClip(props.draft.settings, props.draft.settings.clipIndex)
+  if (index === undefined) { message.value = 'No unused clip index is available.'; return }
+  props.draft.settings.clipIndex = index
+  message.value = `Sequence cloned to clip ${index}.`
+}
 const validIndex = computed(() => Number.isSafeInteger(props.draft.settings.clipIndex) &&
   props.draft.settings.clipIndex >= 0 && props.draft.settings.clipIndex <= MAX_LOOP_CLIP_INDEX)
 watch(() => props.draft.settings.clipIndex, (index) => {
@@ -48,7 +78,10 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
       <NumericSetting v-model="draft.settings.clipIndex" label="Clip index" :min="0" :max="MAX_LOOP_CLIP_INDEX" integer />
     </div>
     <SequenceEditor v-if="validIndex" :key="draft.settings.clipIndex" v-model="notes" v-model:automation="automation" v-model:quantize="draft.settings.quantize"
-      :bar-length="draft.settings.barLength" :instruments="instruments" :sources="sources" :bank-id="bankId" />
+      :bar-length="draft.settings.barLength" :instruments="instruments" :sources="sources" :bank-id="bankId"
+      :muted-rows="mutedRows" :clipboard-row="clipboard?.row" :can-paste="!!clipboard" :can-clone="canClone"
+      @toggle-mute="toggleMute" @remove-row="remove" @copy-row="copy" @paste-row="paste" @clone-sequence="clone" />
+    <p v-if="message" role="status">{{ message }}</p>
     <label class="inline-checkbox"><input :checked="draft.settings.armed" type="checkbox" @change="emit('arm-change', ($event.target as HTMLInputElement).checked)"> Armed for record</label>
     <label class="inline-checkbox"><input v-model="draft.settings.countIn" type="checkbox"> One-bar count-in before recording</label>
     <label>Record from <select v-model="draft.settings.recordScope">

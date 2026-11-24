@@ -1,4 +1,5 @@
 import type { GridItem, LoopAutomation, LoopNote, LoopQuantize } from './grid'
+import { automationRow, noteRow, rowKey } from './loopRows'
 
 export type BankEvent =
   | { kind: 'live-note'; bankId: string; instrumentId: string; note: number; velocity: number; bend?: number; on: boolean }
@@ -6,7 +7,7 @@ export type BankEvent =
   | { kind: 'live-automation-start'; bankId: string; sourceId: string; parameter: string; value: number }
   | { kind: 'live-automation-end'; bankId: string; sourceId: string; parameter: string }
   | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean }
-  | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation }
+  | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation; remove?: boolean }
   | { kind: 'count-in-click'; beat: number }
 
 export class BankEventBus {
@@ -84,7 +85,7 @@ export class Metronome {
 
 type Loop = Extract<GridItem, { type: 'sequenced-loop' }>
 type Voice = { id: number; note: LoopNote; end: number }
-type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; countInUntil?: number; lastCountBeat?: number; voices: Voice[] }
+type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; countInUntil?: number; lastCountBeat?: number; voices: Voice[]; automation: Map<string, LoopAutomation> }
 type Recording = { index: number; start: number; origin: number; quantize: LoopQuantize; note: Omit<LoopNote, 'position' | 'duration'> }
 type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; event: LoopAutomation; pending?: LoopAutomation; last: number; recorded: Map<LoopAutomation, number> }
 
@@ -96,7 +97,7 @@ export class SequencedLoopEngine {
   private loops: () => Loop[]
   private position: () => number
   private send: (id: number, note: LoopNote, on: boolean, loopId: string) => void
-  private sendAutomation: (loopId: string, event?: LoopAutomation) => void
+  private sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void
   private bankId: string
   private clipIndex: (loop: Loop) => number
   private countInClick: (beat: number) => void
@@ -105,7 +106,7 @@ export class SequencedLoopEngine {
     loops: () => Loop[],
     position: () => number,
     send: (id: number, note: LoopNote, on: boolean, loopId: string) => void,
-    sendAutomation: (loopId: string, event?: LoopAutomation) => void = () => {},
+    sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void = () => {},
     bankId = '',
     clipIndex: (loop: Loop) => number = (loop) => loop.settings.clipIndex,
     countInClick: (beat: number) => void = () => {},
@@ -142,12 +143,13 @@ export class SequencedLoopEngine {
     const index = this.clipIndex(loop)
     this.states.set(loop.id, { id: loop.id, enabled: true, index, origin: at,
       last: at - 1e-8, pending: at > now ? { index, at } : undefined,
-      ...(counting ? { countInUntil: at, lastCountBeat: at - 5 } : {}), voices: [] })
+      ...(counting ? { countInUntil: at, lastCountBeat: at - 5 } : {}), voices: [], automation: new Map() })
   }
 
   private release(state: State) {
     this.silence(state.id)
     this.sendAutomation(state.id)
+    state.automation.clear()
   }
 
   silence(id: string) {
@@ -177,6 +179,19 @@ export class SequencedLoopEngine {
       const loop = loops.find((item) => item.id === id)
       if (!loop) { this.release(state); this.states.delete(id); continue }
       const { barLength, syncMode, clips, automation } = loop.settings
+      const muted = new Set((loop.settings.mutedRows?.[state.index] ?? []).map((row) => rowKey(row, this.bankId)))
+      const activeNotes = new Set((clips[state.index] ?? []).map((note) => rowKey(noteRow(note), this.bankId)))
+      state.voices = state.voices.filter((voice) => {
+        const key = rowKey(noteRow(voice.note), this.bankId)
+        if (!muted.has(key) && activeNotes.has(key)) return true
+        this.send(voice.id, voice.note, false, state.id)
+        return false
+      })
+      const activeRows = new Set((automation[state.index] ?? []).map((event) => rowKey(automationRow(event), this.bankId)))
+      for (const [key, event] of state.automation) if (muted.has(key) || !activeRows.has(key)) {
+        this.sendAutomation(state.id, event, true)
+        state.automation.delete(key)
+      }
       const clipIndex = this.clipIndex(loop)
       const length = barLength * 4
       if (state.countInUntil !== undefined) {
@@ -230,8 +245,10 @@ export class SequencedLoopEngine {
         events.push({ ...event, order, at: state.origin + cycle * length + position })
       }
     }
-    for (const note of notes) addDue(note.position, { note }, 0)
-    for (const event of automation) addDue(event.position, { automation: event }, 1)
+    const loop = this.loops().find((item) => item.id === state.id)
+    const muted = new Set((loop?.settings.mutedRows?.[state.index] ?? []).map((row) => rowKey(row, this.bankId)))
+    for (const note of notes) if (!muted.has(rowKey(noteRow(note), this.bankId))) addDue(note.position, { note }, 0)
+    for (const event of automation) if (!muted.has(rowKey(automationRow(event), this.bankId))) addDue(event.position, { automation: event }, 1)
     events.sort((a, b) => a.at - b.at || a.order - b.order)
     const releaseUntil = (at: number) => {
       let active = 0
@@ -243,7 +260,11 @@ export class SequencedLoopEngine {
     }
     for (const event of events) {
       releaseUntil(event.at)
-      if ('automation' in event) { this.sendAutomation(state.id, event.automation); continue }
+      if ('automation' in event) {
+        state.automation.set(rowKey(automationRow(event.automation), this.bankId), event.automation)
+        this.sendAutomation(state.id, event.automation)
+        continue
+      }
       const voice = { id: ++this.voiceId, note: event.note, end: event.at + event.note.duration }
       state.voices.push(voice)
       this.send(voice.id, voice.note, true, state.id)

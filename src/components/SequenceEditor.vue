@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { LoopAutomation, LoopNote, LoopQuantize } from '../grid'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import type { LoopAutomation, LoopNote, LoopQuantize, LoopRow } from '../grid'
+import { rowKey as loopRowKey } from '../loopRows'
 import { noteName } from '../music'
 
 interface Source { id: string; bankId?: string; label: string; color?: string }
-type Row = { kind: 'note'; bankId?: string; instrumentId: string; note: number } |
-  { kind: 'automation'; bankId?: string; sourceId: string; parameter: string }
+type Row = LoopRow
 
 const props = defineProps<{
   modelValue: LoopNote[]
@@ -15,14 +15,59 @@ const props = defineProps<{
   barLength: number
   quantize: LoopQuantize
   bankId?: string
+  mutedRows: LoopRow[]
+  clipboardRow?: LoopRow
+  canPaste: boolean
+  canClone: boolean
 }>()
-const emit = defineEmits<{ 'update:modelValue': [notes: LoopNote[]]; 'update:automation': [events: LoopAutomation[]]; 'update:quantize': [value: LoopQuantize] }>()
+const emit = defineEmits<{ 'update:modelValue': [notes: LoopNote[]]; 'update:automation': [events: LoopAutomation[]]; 'update:quantize': [value: LoopQuantize];
+  'toggle-mute': [row: Row]; 'remove-row': [row: Row, all: boolean]; 'copy-row': [row: Row]; 'paste-row': []; 'clone-sequence': [] }>()
 const stepLength = 0.25
 const stepWidth = ref(28)
 const instrumentId = ref('')
 const pitch = ref(60)
 const extraRows = ref<{ bankId?: string; instrumentId: string; note: number }[]>([])
 const selected = ref<{ kind: 'note' | 'automation'; index: number } | null>(null)
+const menuRow = ref<Row | null>(null)
+let pressTimer: ReturnType<typeof setTimeout> | undefined
+let pressPosition: { x: number; y: number } | undefined
+let suppressClick = false
+function cancelPress() {
+  if (pressTimer !== undefined) clearTimeout(pressTimer)
+  pressTimer = undefined
+  pressPosition = undefined
+}
+function beginPress(event: PointerEvent, row: Row) {
+  if (event.button !== 0) return
+  cancelPress()
+  suppressClick = false
+  pressPosition = { x: event.clientX, y: event.clientY }
+  pressTimer = setTimeout(() => { menuRow.value = row; suppressClick = true; cancelPress() }, 600)
+}
+function movePress(event: PointerEvent) {
+  if (pressPosition && Math.hypot(event.clientX - pressPosition.x, event.clientY - pressPosition.y) > 10) cancelPress()
+}
+function openMenu(row: Row) {
+  if (suppressClick) { suppressClick = false; return }
+  menuRow.value = row
+}
+function removeMenuRow(all: boolean) {
+  const row = menuRow.value
+  if (!row) return
+  extraRows.value = extraRows.value.filter((entry) => rowKey({ kind: 'note', ...entry }) !== rowKey(row))
+  selected.value = null
+  emit('remove-row', row, all)
+  menuRow.value = null
+}
+function paste() {
+  const row = props.clipboardRow
+  selected.value = null
+  emit('paste-row')
+  if (row?.kind === 'note' && !rows.value.some((entry) => rowKey(entry) === rowKey(row))) extraRows.value.push({ ...row })
+  menuRow.value = null
+}
+function isMuted(row: Row) { return props.mutedRows.some((entry) => rowKey(entry) === rowKey(row)) }
+onBeforeUnmount(cancelPress)
 const steps = computed(() => Number.isSafeInteger(props.barLength) && props.barLength >= 1 && props.barLength <= 64
   ? props.barLength * 16 : 0)
 const length = computed(() => steps.value * stepLength)
@@ -37,6 +82,9 @@ const rows = computed<Row[]>(() => {
     if (!result.some((row) => row.kind === 'automation' && sameBank(row.bankId, event.bankId) && row.sourceId === event.sourceId && row.parameter === event.parameter)) {
       result.push({ kind: 'automation', bankId: event.bankId, sourceId: event.sourceId, parameter: event.parameter })
     }
+  }
+  for (const row of props.mutedRows) {
+    if (!result.some((entry) => rowKey(entry) === rowKey(row))) result.push({ ...row })
   }
   return result
 })
@@ -61,8 +109,7 @@ function rowColor(row: Row) {
   return source(row.kind === 'note' ? row.instrumentId : row.sourceId, row.bankId)?.color ?? '#83c9bb'
 }
 function rowKey(row: Row) {
-  return row.kind === 'note' ? JSON.stringify(['note', effectiveBank(row.bankId), row.instrumentId, row.note])
-    : JSON.stringify(['automation', effectiveBank(row.bankId), row.sourceId, row.parameter])
+  return loopRowKey(row, props.bankId)
 }
 const indexedEvents = computed(() => {
   const index = new Map<string, Map<number, { index: number; value: number }[]>>()
@@ -169,6 +216,17 @@ function chooseCell(row: Row, step: number) {
       <button type="button" aria-label="Zoom out timeline" :disabled="stepWidth <= 16" @click="stepWidth = Math.max(16, stepWidth - 8)">−</button>
       <button type="button" aria-label="Zoom in timeline" :disabled="stepWidth >= 64" @click="stepWidth = Math.min(64, stepWidth + 8)">+</button>
     </div>
+    <div v-if="menuRow" class="row-menu" role="group" :aria-label="`Actions for ${rowLabel(menuRow)}`" @keydown.esc.stop="menuRow = null">
+      <strong>{{ rowLabel(menuRow) }}</strong>
+      <button type="button" @click="emit('toggle-mute', menuRow); menuRow = null">{{ isMuted(menuRow) ? 'Unmute' : 'Mute' }}</button>
+      <button type="button" @click="removeMenuRow(false)">Remove from sequence</button>
+      <button type="button" @click="removeMenuRow(true)">Remove from all sequences</button>
+      <button type="button" @click="emit('copy-row', menuRow); menuRow = null">Copy</button>
+      <button v-if="canPaste" type="button" @click="paste">Paste</button>
+      <button type="button" :disabled="!canClone" :title="canClone ? '' : 'All clip indices are in use'" @click="emit('clone-sequence'); menuRow = null">Clone sequence</button>
+      <button type="button" @click="menuRow = null">Close</button>
+    </div>
+    <button v-if="canPaste && !rows.length" type="button" @click="paste">Paste row</button>
     <div v-if="steps" class="sequence-scroll" tabindex="0" aria-label="Sequence timeline">
       <div class="sequence-track" :style="{ '--step-width': `${stepWidth}px`, '--step-count': steps }">
         <div class="sequence-label header">Bar</div>
@@ -176,8 +234,11 @@ function chooseCell(row: Row, step: number) {
           <div v-for="step in steps" :key="step" class="time-step" :class="{ bar: (step - 1) % 16 === 0 }">{{ (step - 1) % 16 === 0 ? (step - 1) / 16 + 1 : '' }}</div>
         </div>
         <template v-for="row in rows" :key="rowKey(row)">
-          <div class="sequence-label" :style="{ borderLeftColor: rowColor(row) }" :title="rowLabel(row)">{{ rowLabel(row) }}</div>
-          <div class="sequence-steps">
+          <button type="button" class="sequence-label row-label" :class="{ muted: isMuted(row) }" :style="{ borderLeftColor: rowColor(row) }"
+            :title="`${rowLabel(row)} — row actions`" :aria-label="`${rowLabel(row)}${isMuted(row) ? ', muted' : ''}, row actions`"
+            @pointerdown="beginPress($event, row)" @pointermove="movePress" @pointerup="cancelPress" @pointercancel="cancelPress" @pointerleave="cancelPress"
+            @contextmenu.prevent="cancelPress(); menuRow = row" @click="openMenu(row)">{{ rowLabel(row) }}{{ isMuted(row) ? ' (muted)' : '' }}</button>
+          <div class="sequence-steps" :class="{ muted: isMuted(row) }">
             <div v-for="step in steps" :key="step" class="sequence-cell" :class="{ bar: (step - 1) % 16 === 0 }">
               <button v-if="entries(row, step - 1).length" type="button" class="sequence-event"
                 :class="{ selected: selected?.kind === row.kind && entries(row, step - 1).some((entry) => selected?.index === entry.index) }"
@@ -192,7 +253,7 @@ function chooseCell(row: Row, step: number) {
       </div>
     </div>
     <p v-if="!rows.length">No events yet. Add a note row or record into this clip.</p>
-    <p v-else>Choose an event to edit it. A single event can be tapped again to delete it. Recorded timing is preserved until edited.</p>
+    <p v-else>Tap, long-press or right-click a row label for actions. Choose an event to edit it; tap a single event again to delete it. Recorded timing is preserved until edited.</p>
     <label v-if="selected && selectedPeers.length > 1">Event in step
       <select :value="selected.index" @change="selected = { kind: selected!.kind, index: Number(($event.target as HTMLSelectElement).value) }">
         <option v-for="(entry, order) in selectedPeers" :key="entry.index" :value="entry.index">{{ order + 1 }}: {{ Number(entry.value.toPrecision(4)) }}</option>
@@ -228,6 +289,12 @@ function chooseCell(row: Row, step: number) {
 .sequence-track { display: grid; grid-template-columns: 130px max-content; width: max-content; }
 .sequence-label { position: sticky; left: 0; z-index: 1; width: 130px; padding: 6px; overflow: hidden; border-left: 4px solid #83c9bb; background: #30322e; color: #ecece8; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .sequence-label.header { border-left-color: transparent; }
+.row-label { border-top: 0; border-right: 0; border-bottom: 0; text-align: left; cursor: pointer; touch-action: pan-y; }
+.row-label:focus-visible { outline: 2px solid white; outline-offset: -2px; }
+.muted { opacity: 0.5; }
+.row-menu { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; margin-bottom: 8px; background: #30322e; }
+.row-menu strong { flex-basis: 100%; font-size: 12px; }
+.row-menu button { min-height: 36px; }
 .sequence-steps { display: grid; grid-template-columns: repeat(var(--step-count), var(--step-width)); }
 .time-step { height: 24px; padding: 3px; border-left: 1px solid #41433e; color: #ccc; font-size: 11px; }
 .sequence-cell { min-height: 30px; display: flex; border-left: 1px solid #333630; border-top: 1px solid #333630; }
