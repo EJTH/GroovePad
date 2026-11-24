@@ -19,6 +19,7 @@ import { useTransport } from './composables/useTransport'
 import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, type RecordingFormat } from './audio/sessionRecording'
 import { version } from '../package.json'
 import { isBeta } from './appChannel'
+import { registerSW } from 'virtual:pwa-register'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -54,6 +55,24 @@ const storageBlocked = ref(false)
 const storageReady = ref(false)
 let saveTimer: number | undefined
 let saveQueue = Promise.resolve()
+const updateAvailable = ref(false)
+const updateError = ref('')
+const updating = ref(false)
+let updateActivated = false
+let updateServiceWorker: (() => Promise<void>) | undefined
+
+function registerUpdates() {
+  updateServiceWorker = registerSW({
+    immediate: true,
+    onNeedRefresh: () => { updateAvailable.value = true },
+    onNeedReload: () => {
+      updateActivated = true
+      if (updating.value) window.location.reload()
+      else updateAvailable.value = true
+    },
+    onRegisterError: (error: unknown) => console.warn('Could not register the app service worker:', error),
+  })
+}
 
 async function initializeStorage() {
   storageReady.value = false
@@ -113,6 +132,31 @@ function replaceInvalidProject() {
   saveLocalProject()
 }
 
+async function applyUpdate() {
+  if (updating.value || recordingState.value !== 'idle') return
+  updateError.value = ''
+  updating.value = true
+  try {
+    if (!storageReady.value || storageBlocked.value) throw new Error('Project storage is not ready.')
+    await nextTick()
+    do {
+      saveLocalProject()
+      await saveQueue
+      if (storageError.value) throw new Error('The project could not be saved.')
+      await nextTick()
+    } while (saveTimer !== undefined)
+    if (updateActivated) {
+      window.location.reload()
+    } else {
+      if (!updateServiceWorker) throw new Error('The update is not ready yet.')
+      await updateServiceWorker()
+    }
+  } catch (error) {
+    updateError.value = `Could not apply the update: ${error instanceof Error ? error.message : String(error)}`
+    updating.value = false
+  }
+}
+
 watch([banks, selectedBankId, bpm, infoText, infoScrollSpeed, recordingFormat, assets], () => {
   if (!storageReady.value || storageBlocked.value) return
   if (saveTimer !== undefined) window.clearTimeout(saveTimer)
@@ -141,6 +185,7 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', syncFullScreen)
   syncFullScreen()
   stopKeepingScreenAwake = keepScreenAwake(document, navigator)
+  registerUpdates()
 })
 const selectedBank = computed(() => banks.value.find((bank) => bank.id === selectedBankId.value)!)
 const bankEvents = new BankEventBus()
@@ -472,7 +517,7 @@ onUnmounted(() => {
     <header class="header">
       <section class="transport" aria-label="Transport">
         <button class="transport-button record" type="button"
-          :disabled="recordingState === 'starting' || recordingState === 'stopping'"
+          :disabled="updating || recordingState === 'starting' || recordingState === 'stopping'"
           :class="{ 'is-recording': recordingState === 'recording' }"
           :aria-label="recordingState === 'recording' ? 'Stop session recording' : 'Record session'"
           :aria-pressed="recordingState === 'recording'"
@@ -562,6 +607,13 @@ onUnmounted(() => {
       </div>
       </div>
     </header>
+    <div v-if="updateAvailable" class="update-banner" role="status">
+      <span>{{ recordingState === 'idle' ? 'An update is ready. Updating reloads the app and stops playback.' : 'An update is ready. Stop recording before updating.' }}</span>
+      <button type="button" :disabled="updating || recordingState !== 'idle'" @click="applyUpdate">
+        {{ updating ? 'Updating…' : 'Update' }}
+      </button>
+      <span v-if="updateError" role="alert">{{ updateError }}</span>
+    </div>
     <div id="repeat-banner"></div>
     <input ref="projectInput" type="file" accept=".zip,.gpz,application/zip" hidden @change="loadProject">
     <input ref="bankInput" type="file" accept=".json,.zip,.gpz,application/json,application/zip" hidden @change="loadBank">

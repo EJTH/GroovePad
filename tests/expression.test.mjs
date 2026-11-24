@@ -1179,6 +1179,116 @@ test('beta startup leaves stable legacy project data untouched', async () => {
   }
 })
 
+test('updates wait for project saving and do not interrupt recording or other tabs', async () => {
+  const project = {
+    version: 1, bpm: 123, selectedBankId: 'A',
+    banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+  }
+  let callbacks
+  let updates = 0
+  let reloads = 0
+  let finishSave
+  let savingStarted
+  const started = new Promise((resolve) => { savingStarted = resolve })
+  const app = await setupComponent('App', {}, {
+    'virtual:pwa-register': { registerSW: (options) => { callbacks = options; return async () => { updates++ } } },
+    './defaultProject': { loadDefaultProject: async () => project },
+    './projectStorage': { loadStoredProject: async () => undefined, saveStoredProject: () => {
+      savingStarted()
+      return new Promise((resolve) => { finishSave = resolve })
+    } },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20 },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: () => null },
+    window: { clearTimeout, setTimeout, removeEventListener() {}, location: { reload: () => { reloads++ } } },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await app.api.initializeStorage()
+    app.api.registerUpdates()
+    callbacks.onNeedRefresh()
+    assert.equal(app.api.updateAvailable.value, true)
+    app.api.recordingState.value = 'recording'
+    await app.api.applyUpdate()
+    assert.equal(updates, 0)
+    app.api.recordingState.value = 'idle'
+    const applying = app.api.applyUpdate()
+    await started
+    assert.equal(updates, 0)
+    finishSave()
+    await applying
+    assert.equal(updates, 1)
+    callbacks.onNeedReload()
+    assert.equal(reloads, 1)
+  } finally {
+    app.dispose()
+  }
+
+  let otherCallbacks
+  let otherReloads = 0
+  const other = await setupComponent('App', {}, {
+    'virtual:pwa-register': { registerSW: (options) => { otherCallbacks = options; return async () => {} } },
+    './defaultProject': { loadDefaultProject: async () => project },
+    './projectStorage': { loadStoredProject: async () => undefined, saveStoredProject: async () => {} },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20 },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: () => null },
+    window: { clearTimeout, setTimeout, removeEventListener() {}, location: { reload: () => { otherReloads++ } } },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await other.api.initializeStorage()
+    other.api.registerUpdates()
+    otherCallbacks.onNeedReload()
+    assert.equal(otherReloads, 0)
+    assert.equal(other.api.updateAvailable.value, true)
+    await other.api.applyUpdate()
+    assert.equal(otherReloads, 1)
+  } finally {
+    other.dispose()
+  }
+})
+
+test('updates do not reload when saving the project fails', async () => {
+  const project = {
+    version: 1, bpm: 123, selectedBankId: 'A',
+    banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+  }
+  let updates = 0
+  const app = await setupComponent('App', {}, {
+    'virtual:pwa-register': { registerSW: () => async () => { updates++ } },
+    './defaultProject': { loadDefaultProject: async () => project },
+    './projectStorage': { loadStoredProject: async () => undefined, saveStoredProject: async () => { throw new Error('disk full') } },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20 },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: () => null },
+    window: { clearTimeout, setTimeout, removeEventListener() {} },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await app.api.initializeStorage()
+    app.api.registerUpdates()
+    await app.api.applyUpdate()
+    assert.equal(updates, 0)
+    assert.equal(app.api.updating.value, false)
+    assert.match(app.api.storageError.value, /disk full/)
+    assert.match(app.api.updateError.value, /could not be saved/i)
+  } finally {
+    app.dispose()
+  }
+})
+
 test('tapping a resize handle opens settings without preventing resize drags', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {

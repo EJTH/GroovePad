@@ -97,6 +97,10 @@ button:focus-visible {
 .repeat-banner span { color: var(--muted); font-size: 12px; }
 .repeat-banner button { min-width: 46px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: inherit; cursor: pointer; }
 .repeat-banner button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.update-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.update-banner button { padding: 5px 10px; border: 1px solid var(--accent); border-radius: 4px; background: var(--surface); color: var(--accent); cursor: pointer; }
+.update-banner button:disabled { opacity: .5; cursor: default; }
+.update-banner [role="alert"] { color: #f0b5a9; }
 .mode-indicator { animation: mode-blink 1.2s steps(2, start) infinite; }
 @keyframes mode-blink { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .mode-indicator { animation: none; } }
