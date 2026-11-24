@@ -1,5 +1,6 @@
 import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 import { samplesInBanks } from './sampleAssets'
+import { isBeta } from './appChannel'
 
 interface StoredProject {
   project: unknown
@@ -10,7 +11,7 @@ const blobs = new Map<string, Blob>()
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('groovepad', 1)
+    const request = indexedDB.open(isBeta ? 'groovepad-beta' : 'groovepad', 1)
     let blocked = false
     request.onupgradeneeded = () => request.result.createObjectStore('projects')
     request.onsuccess = () => {

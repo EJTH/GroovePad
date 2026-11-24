@@ -1,24 +1,30 @@
-name: Release from main
+name: Release stable
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: pages-publish
   cancel-in-progress: false
+  queue: max
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Run the release workflow on main." >&2
+          exit 1
+
+      - name: Check out current main
         uses: actions/checkout@v6
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -30,37 +36,58 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Bump minor version
+        id: version
+        run: |
+          npm version minor --no-git-tag-version --ignore-scripts
+          tag="v$(node -p "require('./package.json').version")"
+          printf '%s\n' "$tag" > .github/stable-ref
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Run tests
         run: npm test
 
-      - name: Build application
-        run: npm run build
-
-      - name: Read release version
-        id: version
+      - name: Build stable and beta
         run: |
-          node <<'NODE'
-          const fs = require('node:fs')
-          const version = require('./package.json').version
-          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
-          if (typeof version !== 'string' || !semver.test(version)) {
-            throw new Error(`Invalid package.json version: ${version}`)
-          }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=v${version}\n`)
-          NODE
+          npm run build -- --base=./
+          mkdir -p site
+          cp -a dist/. site/
+          VITE_APP_CHANNEL=beta npm run build -- --base=./
+          mkdir -p site/beta
+          cp -a dist/. site/beta/
 
-      - name: Create tag and GitHub Release
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Commit and tag release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json .github/stable-ref
+          git commit -m "Release $TAG"
+          git tag "$TAG"
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag "$TAG" "$GITHUB_SHA"
-            git push origin "$TAG"
-          fi
+        run: gh release create "$TAG" --title "$TAG" --generate-notes
 
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes
-          fi
+  deploy:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

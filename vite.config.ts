@@ -2,16 +2,30 @@ import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const isBeta = process.env.VITE_APP_CHANNEL === 'beta'
+const iconPrefix = isBeta ? 'beta-' : ''
+
 export default defineConfig({
   plugins: [
     vue(),
+    {
+      name: 'beta-branding',
+      transformIndexHtml(html) {
+        return isBeta
+          ? html.replace('/favicon.svg', '/beta-favicon.svg')
+            .replace('./pwa-192.png', './beta-pwa-192.png')
+            .replace('<title>GroovePad.io</title>', '<title>GroovePad (Beta)</title>')
+          : html
+      },
+    },
     VitePWA({
       registerType: 'prompt',
-      includeAssets: ['favicon.svg'],
+      workbox: isBeta ? undefined : { navigateFallbackDenylist: [/\/beta(?:\/|$)/] },
+      includeAssets: [`${iconPrefix}favicon.svg`],
       manifest: {
         id: './',
-        name: 'GroovePad.js',
-        short_name: 'GroovePad',
+        name: isBeta ? 'GroovePad (Beta)' : 'GroovePad.js',
+        short_name: isBeta ? 'GroovePad Beta' : 'GroovePad',
         description: 'A mobile groovebox',
         start_url: './',
         scope: './',
@@ -19,8 +33,8 @@ export default defineConfig({
         background_color: '#171816',
         theme_color: '#171816',
         icons: [
-          { src: 'pwa-192.png', sizes: '192x192', type: 'image/png' },
-          { src: 'pwa-512.png', sizes: '512x512', type: 'image/png' },
+          { src: `${iconPrefix}pwa-192.png`, sizes: '192x192', type: 'image/png' },
+          { src: `${iconPrefix}pwa-512.png`, sizes: '512x512', type: 'image/png' },
         ],
       },
     }),

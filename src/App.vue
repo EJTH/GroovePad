@@ -18,6 +18,7 @@ import { keepScreenAwake } from './screenWakeLock'
 import { useTransport } from './composables/useTransport'
 import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, type RecordingFormat } from './audio/sessionRecording'
 import { version } from '../package.json'
+import { isBeta } from './appChannel'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -47,7 +48,7 @@ watch(infoScroll, (element, _previous, onCleanup) => {
   onCleanup(() => observer.disconnect())
 }, { flush: 'post' })
 const assets = ref<SampleAsset[]>([])
-const storageKey = 'groovepad.project.v1'
+const storageKey = isBeta ? 'groovepad.beta.project.v1' : 'groovepad.project.v1'
 const storageError = ref('')
 const storageBlocked = ref(false)
 const storageReady = ref(false)

@@ -1,16 +1,22 @@
-name: Build
+name: Build and publish beta
 
 on:
   push:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'pages-publish' || format('build-{0}', github.ref) }}
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      stable-ref: ${{ steps.stable.outputs.ref }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -27,29 +33,74 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build application
+      - name: Build beta
         run: npm run build -- --base=./
+        env:
+          VITE_APP_CHANNEL: beta
+
+      - name: Read stable revision
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: stable
+        run: echo "ref=$(cat .github/stable-ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out stable revision
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.stable.outputs.ref }}
+          path: .stable
+
+      - name: Build stable and combine sites
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          STABLE_REF: ${{ steps.stable.outputs.ref }}
+        run: |
+          cd .stable
+          npm ci
+          # The initial stable revision predates beta's service-worker exclusion.
+          if [ "$STABLE_REF" = "39a2da8a5622c5b6263d0dfaebed3ac105b6f7f9" ]; then
+            npm run build -- --base=./ --config ../vite.config.ts
+          else
+            npm run build -- --base=./
+          fi
+          cd ..
+          mkdir -p site/beta
+          cp -a .stable/dist/. site/
+          cp -a dist/. site/beta/
 
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5
         with:
-          path: dist
+          path: site
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Check that the stable revision has not changed
+        id: stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ needs.build.outputs.stable-ref }}
+        run: |
+          current=$(gh api "repos/$REPOSITORY/contents/.github/stable-ref?ref=main" --jq .content | base64 --decode)
+          if [ "$current" = "$EXPECTED_REF" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping a deployment built against an outdated stable release."
+          fi
+
       - name: Deploy to GitHub Pages
+        if: steps.stable.outputs.deploy == 'true'
         id: deployment
         uses: actions/deploy-pages@v5

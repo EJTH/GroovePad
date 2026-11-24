@@ -10,6 +10,8 @@ Pads and piano keys react on pointer-down and disable browser touch gestures on 
 
 Run `npm run dev` to start the development server. Run `npm run build` to type-check and create a production build.
 
+Run `npm run setup-hooks` once per clone to enable automatic patch-version bumps on local commits. The hook updates and stages both `package.json` and `package-lock.json`; stage any changes to those files before committing. Hooks can be bypassed with `--no-verify` and do not run for commits created outside the clone. The setup refuses to replace an existing hooks configuration.
+
 ## Install and offline use
 
 The production build can be installed from a supported browser. On iPhone and iPad, use the browser's Share menu and choose **Add to Home Screen**. Other browsers may offer an Install option; availability varies by browser. Visit the app online first and allow it to finish loading before using it offline. Updates are applied when the old app is no longer open and the new version is loaded.
@@ -18,7 +20,9 @@ Projects and sample audio are saved in the browser's IndexedDB. Browser storage 
 
 ## GitHub Pages
 
-Set the repository's **Settings > Pages > Build and deployment > Source** to **GitHub Actions**. The build workflow tests and builds the site on every push and pull request, and deploys `dist` to Pages after successful pushes to `main`. It can also be run manually on `main`. The Pages build uses relative asset paths so it works under a repository subpath.
+Set the repository's **Settings > Pages > Build and deployment > Source** to **GitHub Actions**. Pushes and pull requests are tested and built; successful pushes to `main` publish the beta at the site's `beta/` path while preserving the stable site. Beta has its own installable app name, icon and project storage; use project export/import to transfer projects. Before the first release, stable is built from the revision recorded in `.github/stable-ref`. If an older installed stable service worker intercepts beta, close all stable tabs and reopen the site to let the updated service worker take over.
+
+To publish stable, run **Actions > Release stable > Run workflow** on `main`. The workflow bumps the minor version and resets the patch, tests and builds both sites, commits and tags the release, creates a GitHub Release, and deploys Pages. The workflow token needs permission to push to `main` and create tags; branch protection must allow this. Pull the release commit before your next push. If a release fails after the commit and tag are pushed, inspect the workflow and repository state before retrying.
 
 ## Current functionality
 

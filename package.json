@@ -1,13 +1,14 @@
 {
   "name": "groovepad-js",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "test": "node --test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "setup-hooks": "node scripts/setup-hooks.mjs"
   },
   "dependencies": {
     "@tonejs/midi": "^2.0.28",

@@ -1147,6 +1147,38 @@ test('startup loads the default project only when no saved project exists', asyn
   }
 })
 
+test('beta startup leaves stable legacy project data untouched', async () => {
+  const project = (id) => ({
+    version: 1, bpm: 123, selectedBankId: id,
+    banks: [{ id, title: id, icon: 'A', color: '#ffffff',
+      layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+  })
+  const legacy = JSON.stringify(project('stable'))
+  const storage = new Map([['groovepad.project.v1', legacy]])
+  const saved = []
+  const app = await setupComponent('App', {}, {
+    './appChannel': { isBeta: true },
+    './defaultProject': { loadDefaultProject: async () => project('beta') },
+    './projectStorage': { loadStoredProject: async () => undefined, saveStoredProject: async (value) => saved.push(value) },
+    './project': { DEFAULT_INFO_SCROLL_SPEED: 20, migrateSavedProject: () => {}, isSavedProject: () => true },
+    './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
+    './sequencedLoop': { BankEventBus: class {} },
+    './composables/useTransport': { useTransport: () => ({}) },
+  }, {
+    localStorage: { getItem: (key) => storage.get(key) ?? null, removeItem: (key) => storage.delete(key) },
+    window: { clearTimeout, setTimeout, removeEventListener() {} },
+    document: { removeEventListener() {} },
+  })
+  try {
+    await app.api.initializeStorage()
+    assert.equal(app.api.selectedBank.value.id, 'beta')
+    assert.equal(storage.get('groovepad.project.v1'), legacy)
+    assert.equal(saved.length, 0)
+  } finally {
+    app.dispose()
+  }
+})
+
 test('tapping a resize handle opens settings without preventing resize drags', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {

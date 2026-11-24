@@ -40,6 +40,7 @@ test('IndexedDB stores sample blobs and restores projects and shared samples', a
       request.onsuccess = () => resolve(request.result)
       request.onerror = () => reject(request.error)
     })
+
     const stored = await new Promise((resolve, reject) => {
       const request = db.transaction('projects').objectStore('projects').get('current')
       request.onsuccess = () => resolve(request.result)
@@ -63,5 +64,27 @@ test('IndexedDB stores sample blobs and restores projects and shared samples', a
     assert.deepEqual(updated.assets, [])
   } finally {
     await server.close()
+  }
+})
+
+test('stable and beta projects use separate databases', async () => {
+  const options = { configFile: false, server: { middlewareMode: true }, logLevel: 'silent' }
+  const stable = await createServer({ ...options, define: { 'import.meta.env.VITE_APP_CHANNEL': '"stable"' } })
+  const beta = await createServer({ ...options, define: { 'import.meta.env.VITE_APP_CHANNEL': '"beta"' } })
+  try {
+    const stableStorage = await stable.ssrLoadModule('/src/projectStorage.ts')
+    const betaStorage = await beta.ssrLoadModule('/src/projectStorage.ts')
+    const project = {
+      version: 1, bpm: 120, selectedBankId: 'A',
+      banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+        layout: { columns: 4, rows: 4, items: [], connections: [] } }],
+    }
+    await stableStorage.saveStoredProject(project)
+    await betaStorage.saveStoredProject({ ...project, bpm: 140 })
+    assert.equal((await stableStorage.loadStoredProject()).bpm, 120)
+    assert.equal((await betaStorage.loadStoredProject()).bpm, 140)
+  } finally {
+    await stable.close()
+    await beta.close()
   }
 })
