@@ -17,6 +17,7 @@ import { BankEventBus } from './sequencedLoop'
 import { keepScreenAwake } from './screenWakeLock'
 import { useTransport } from './composables/useTransport'
 import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, type RecordingFormat } from './audio/sessionRecording'
+import { version } from '../package.json'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -538,7 +539,7 @@ onUnmounted(() => {
         <template v-if="menuOpen">
           <div class="menu-dismiss" @click="menuOpen = false"></div>
           <nav id="main-menu" class="menu" aria-label="Main menu">
-            <div class="brand">GroovePad<span>.io</span></div>
+            <div class="brand">GroovePad<span>.io</span> <span class="brand-version">v{{ version }}</span></div>
             <p>Project</p>
             <button type="button" @click="newProject(); menuOpen = false">New project</button>
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>

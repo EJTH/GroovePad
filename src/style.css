@@ -123,6 +123,11 @@ button:focus-visible {
   font-weight: 400;
 }
 
+.brand .brand-version {
+  font-size: 11px;
+  letter-spacing: normal;
+}
+
 .menu-container {
   position: relative;
 }
