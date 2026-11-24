@@ -16,11 +16,9 @@ const repeat = useNoteRepeat({
 })
 function gate(on: boolean) { repeat.change('gate', 1, on) }
 
-function press(event: PointerEvent) {
-  if (event.button !== 0 || pointerId.value !== null || keyboardPressed.value) return
-  const target = event.currentTarget
-  if (!(target instanceof HTMLElement)) return
-  event.preventDefault()
+function beginPress(event: PointerEvent, target: HTMLElement, beforePress?: () => void) {
+  if (pointerId.value !== null || keyboardPressed.value || (target instanceof HTMLButtonElement && target.disabled)) return
+  beforePress?.()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
   const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.rotated ? 'x' : 'y', props.rotated)
@@ -29,8 +27,27 @@ function press(event: PointerEvent) {
   gate(true)
 }
 
+function press(event: PointerEvent) {
+  if ((event.pointerType !== 'touch' && event.button !== 0) || !(event.currentTarget instanceof HTMLElement)) return
+  if (pointerId.value !== null || keyboardPressed.value) return
+  event.preventDefault()
+  beginPress(event, event.currentTarget)
+}
+
+function swipe(event: Event) {
+  if (!(event instanceof CustomEvent) || !(event.currentTarget instanceof HTMLElement)) return
+  const { pointer, releasePrevious } = event.detail as { pointer: PointerEvent; releasePrevious: () => void }
+  beginPress(pointer, event.currentTarget, releasePrevious)
+}
+
 function move(event: PointerEvent) {
   if (pointerId.value !== event.pointerId || !(event.currentTarget instanceof HTMLElement)) return
+  const grid = event.currentTarget.closest('.groove-grid')
+  const target = event.currentTarget.ownerDocument.elementFromPoint(event.clientX, event.clientY)?.closest('.pad')
+  if (grid && target instanceof HTMLElement && target !== event.currentTarget && target.closest('.groove-grid') === grid) {
+    target.dispatchEvent(new CustomEvent('pad-swipe', { detail: { pointer: event, releasePrevious: () => release(event) } }))
+    if (pointerId.value !== event.pointerId) return
+  }
   emit('output', { parameter: 'pressure', value: expression.updatePointer(event.pointerId, event, event.currentTarget.getBoundingClientRect(),
     props.rotated ? 'x' : 'y', props.rotated) })
 }
@@ -78,13 +95,14 @@ onBeforeUnmount(() => {
 <template>
   <button
     type="button"
-    class="pad"
+    class="pad mpc-surface"
     :class="{ active: pointerId !== null || keyboardPressed || wiredActive, 'input-muted': inputMuted }"
-    :style="{ '--pad-color': settings.color }"
+    :style="{ '--mpc-color': settings.color }"
     :aria-label="inputMuted === undefined ? `Pad: ${label}` : `Pad: ${label}, input connections ${inputMuted ? 'muted' : 'unmuted'}`"
     :aria-pressed="inputMuted ?? (pointerId !== null || keyboardPressed)"
     :title="inputMuted === undefined ? undefined : `Input connections ${inputMuted ? 'muted' : 'unmuted'}`"
     @pointerdown="press"
+    @pad-swipe="swipe"
     @pointermove="move"
     @pointerup="release"
     @pointercancel="release"
@@ -103,20 +121,9 @@ onBeforeUnmount(() => {
   min-height: 0;
   padding: 8px;
   overflow: hidden;
-  border: 2px solid var(--pad-color);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--pad-color) 75%, #171816);
-  color: #171816;
-  font-weight: 700;
   text-overflow: ellipsis;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
-  cursor: pointer;
-}
-
-.pad.active {
-  background: var(--pad-color);
-  box-shadow: inset 0 2px 6px #0006;
 }
 
 .pad.input-muted {

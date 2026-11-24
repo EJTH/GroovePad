@@ -44,6 +44,30 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+.mpc-surface {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--mpc-color) 45%, #292b2a);
+  border-radius: 6px;
+  background: linear-gradient(160deg,
+    color-mix(in srgb, var(--mpc-color) 16%, var(--mpc-base, #303230)),
+    color-mix(in srgb, var(--mpc-color) 8%, var(--mpc-base, #232523)));
+  box-shadow: inset 0 1px 0 #ffffff20, inset 0 -3px 0 #0005, 0 2px 3px #0008;
+  color: #f3f4ee;
+  font-weight: 700;
+  text-shadow: 0 1px 2px #0009;
+  cursor: pointer;
+}
+
+.mpc-surface.active {
+  border-color: var(--mpc-color);
+  background: color-mix(in srgb, var(--mpc-color) 32%, #222523);
+  box-shadow: inset 0 2px 5px #0008, 0 0 5px color-mix(in srgb, var(--mpc-color) 30%, transparent);
+}
+
+.mpc-surface:focus-visible {
+  outline-offset: -3px;
+}
+
 .app {
   width: min(100% - 24px, 720px);
   height: 100vh;

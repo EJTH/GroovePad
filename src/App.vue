@@ -538,7 +538,7 @@ onUnmounted(() => {
         <template v-if="menuOpen">
           <div class="menu-dismiss" @click="menuOpen = false"></div>
           <nav id="main-menu" class="menu" aria-label="Main menu">
-            <div class="brand">GroovePad<span>.js</span></div>
+            <div class="brand">GroovePad<span>.io</span></div>
             <p>Project</p>
             <button type="button" @click="newProject(); menuOpen = false">New project</button>
             <button type="button" :disabled="busy" @click="projectInput?.click(); menuOpen = false">Load project</button>

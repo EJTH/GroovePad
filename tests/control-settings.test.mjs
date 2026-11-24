@@ -338,7 +338,7 @@ test('piano roll migrates old settings and renders each style in the requested r
       assert.equal((html.match(/data-note="/g) ?? []).length, 36)
       const keyRows = html.match(/<div class="key-row"[\s\S]*?<\/div>/g) ?? []
       assert.deepEqual(keyRows.map((row) => (row.match(/data-note="/g) ?? []).length), [12, 12, 12])
-      if (style === 'pads') assert.match(html, /class="(?:key black|black key)"/)
+      if (style === 'pads') assert.match(html, /class="(?:[^"]*\s)?(?:key black|black key)"/)
       if (style === 'whites-blacks') {
         assert.match(html, /class="white key"/)
         assert.match(html, /class="black key"/)

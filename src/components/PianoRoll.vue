@@ -200,13 +200,14 @@ onBeforeUnmount(releaseAll)
 </script>
 
 <template>
-  <div class="piano" :class="[settings.orientation, settings.style || 'pads']" :style="{ '--piano-color': settings.color }"
+  <div class="piano" :class="[settings.orientation, settings.style || 'pads']" :style="{ '--piano-color': settings.color, '--mpc-color': settings.color }"
     :aria-label="label" @touchstart.prevent @touchmove.prevent>
     <div v-for="(row, rowIndex) in rows" :key="rowIndex" class="key-row"
       :style="settings.style === 'whites-blacks' ? pianoRowStyle(row) : undefined">
       <button v-for="item in row" :key="item.index" type="button" class="key"
         :class="[
           { active: [...pointers.values()].includes(item.note) || keys.has(item.note) },
+          (settings.style || 'pads') === 'pads' && 'mpc-surface',
           settings.style === 'whites-blacks' && (isWhiteKey(item.note) ? 'white' : 'black'),
           settings.style === 'pads' && !isWhiteKey(item.note) && 'black',
           settings.style === 'whites-blacks' && !isScaleNote(item.note) && 'out-of-scale'
@@ -227,11 +228,13 @@ onBeforeUnmount(releaseAll)
 .key-row { display: flex; flex: 1 0 24px; min-height: 24px; }
 .piano.vertical { flex-direction: row; }
 .vertical .key-row { flex-direction: column-reverse; min-width: 24px; }
-.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; border: 1px solid var(--piano-color); border-radius: 2px; background: color-mix(in srgb, var(--piano-color) 35%, #e2e8dd); color: #252820; touch-action: none; -webkit-tap-highlight-color: transparent; }
-.key.active { background: color-mix(in srgb, var(--piano-color) 65%, #e2e8dd); }
+.key { flex: 1 0 24px; min-width: 24px; min-height: 24px; padding: 2px; touch-action: none; -webkit-tap-highlight-color: transparent; }
+:where(.piano:not(.pads)) .key { border: 1px solid var(--piano-color); border-radius: 2px; background: color-mix(in srgb, var(--piano-color) 35%, #e2e8dd); color: #252820; }
+:where(.piano:not(.pads)) .key.active { background: color-mix(in srgb, var(--piano-color) 65%, #e2e8dd); }
 .key span { font-size: 9px; }
-.pads .key.black { background: color-mix(in srgb, var(--piano-color) 35%, #c8cec3); }
-.pads .key.black.active { background: color-mix(in srgb, var(--piano-color) 65%, #c8cec3); }
+.pads { gap: 3px; padding: 3px; border-radius: 7px; background: #181a19; box-shadow: inset 0 1px 4px #000b; }
+.pads .key-row { gap: 3px; }
+.pads .key.black { --mpc-base: #1d201f; }
 .whites-blacks .key-row { position: relative; }
 .whites-blacks .key { position: absolute; min-width: 0; min-height: 0; overflow: hidden; }
 .whites-blacks.horizontal .key { top: 0; height: 100%; }

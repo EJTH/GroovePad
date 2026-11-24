@@ -8,7 +8,11 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import { createServer } from 'vite'
 
 class Element {
-  constructor(note) { this.dataset = { note: String(note) }; this.parentElement = { contains: () => true } }
+  constructor(note) {
+    this.dataset = { note: String(note) }
+    this.parentElement = { contains: () => true }
+    this.ownerDocument = { elementFromPoint: () => null }
+  }
   getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 } }
   setPointerCapture() {}
   closest() { return this }
@@ -20,11 +24,13 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
   const vueMock = { ...vue, provide: () => {}, inject: name === 'NumericSetting' ? () => undefined : vue.inject,
     onMounted: () => {}, onBeforeUnmount: (callback) => cleanup.push(callback), onUnmounted: (callback) => cleanup.push(callback) }
   if (name === 'GrooveGrid' && !dependencies['../sequencedLoop']) {
-    const source = await readFile(new URL('../src/sequencedLoop.ts', import.meta.url), 'utf8')
-    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
-    const loopModule = { exports: {} }
-    vm.runInNewContext(code, { module: loopModule, exports: loopModule.exports, performance })
-    dependencies['../sequencedLoop'] = loopModule.exports
+    const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+    try {
+      dependencies['../sequencedLoop'] = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    } finally { await server.close() }
+  }
+  if (name === 'App' && !dependencies['./audio/sessionRecording']) {
+    dependencies['./audio/sessionRecording'] = { RECORDING_FORMATS: [], supportedRecordingFormats: () => [], startSessionRecording: async () => ({}) }
   }
   if (!dependencies['../pointerTap']) {
     const source = await readFile(new URL('../src/pointerTap.ts', import.meta.url), 'utf8')
@@ -94,7 +100,8 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
   const script = compileScript(parse(source).descriptor, { id: name }).content
   const { outputText } = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
   const module = { exports: {} }
-  vm.runInNewContext(outputText, { module, exports: module.exports, HTMLElement: Element,
+  vm.runInNewContext(outputText, { module, exports: module.exports, HTMLElement: Element, HTMLButtonElement: Element,
+    CustomEvent: class CustomEvent { constructor(type, options) { this.type = type; this.detail = options.detail } },
     require: (path) => path === 'vue' ? vueMock : dependencies[path] ?? { default: {} }, ...environment })
   const emitted = []
   const scope = vue.effectScope()
@@ -166,6 +173,57 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
       [0, 64, 76, 50, 0, 0])
     assert.equal(piano.emitted.at(-1).active, false)
     piano.dispose()
+  } finally {
+    await server.close()
+  }
+})
+
+test('swiping between pads transfers the pointer, expression and gate without disturbing other contacts', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const expression = await server.ssrLoadModule('/src/expression.ts')
+    const dependencies = { '../expression': expression }
+    class SwipeEvent { constructor(type, options) { this.type = type; this.detail = options.detail } }
+    const environment = { CustomEvent: SwipeEvent }
+    const outputs = []
+    const first = await setupComponent('MPCPad', { label: 'First', settings: { color: '#fff' } }, dependencies, environment,
+      (_event, output) => outputs.push(['first', output.parameter, output.value]))
+    const second = await setupComponent('MPCPad', { label: 'Second', settings: { color: '#fff' } }, dependencies, environment,
+      (_event, output) => outputs.push(['second', output.parameter, output.value]))
+    const grid = {}
+    const a = new Element(0)
+    const b = new Element(1)
+    let underPointer = a
+    for (const [element, pad] of [[a, first], [b, second]]) {
+      element.ownerDocument = { elementFromPoint: () => underPointer }
+      element.closest = (selector) => selector === '.groove-grid' ? grid : element
+      element.dispatchEvent = (event) => { event.currentTarget = element; pad.api.swipe(event) }
+      element.setPointerCapture = (id) => { element.captured = id }
+    }
+
+    first.api.press(pointer(1, a, 'touch', 0.5, 0, 25))
+    second.api.press(pointer(2, b, 'touch', 0.5, 0, 60))
+    underPointer = b
+    first.api.move(pointer(1, a, 'touch', 0.5, 0, 70))
+    assert.deepEqual(outputs.filter((entry) => entry[1] === 'gate'), [['first', 'gate', 1], ['second', 'gate', 1]])
+    second.api.release(pointer(2, b, 'touch', 0, 0, 60))
+    first.api.move(pointer(1, a, 'touch', 0.5, 0, 70))
+    assert.equal(b.captured, 1)
+    assert.deepEqual(outputs.filter((entry) => entry[1] === 'gate'),
+      [['first', 'gate', 1], ['second', 'gate', 1], ['second', 'gate', 0], ['first', 'gate', 0], ['second', 'gate', 1]])
+    assert.deepEqual(second.emitted.filter((entry) => entry.parameter === 'velocity').map((entry) => entry.value), [76, 89])
+    first.api.release(pointer(1, a, 'touch', 0, 0, 70)) // lost capture on the old pad
+    underPointer = null
+    second.api.move(pointer(1, b, 'touch', 0.5, 0, 80))
+    underPointer = a
+    second.api.move(pointer(1, b, 'touch', 0.5, 0, 30))
+    assert.equal(a.captured, 1)
+    first.api.release(pointer(1, a, 'touch', 0, 0, 30)) // pointerup or cancellation
+    assert.deepEqual(outputs.filter((entry) => entry[1] === 'gate').slice(-3),
+      [['second', 'gate', 0], ['first', 'gate', 1], ['first', 'gate', 0]])
+    assert.equal(first.emitted.at(-2).active, false)
+    first.dispose()
+    second.dispose()
   } finally {
     await server.close()
   }
@@ -1418,9 +1476,10 @@ test('tracker edits note steps and groups automation without losing recorded tim
     const props = vue.reactive({ modelValue: [], automation: [
       { sourceId: 'knob', parameter: 'value', value: 10, position: 0.02 },
       { sourceId: 'knob', parameter: 'value', value: 20, position: 0.12 },
-    ], instruments: [sources[0]], sources, barLength: 1 })
+    ], mutedRows: [], instruments: [sources[0]], sources, barLength: 1 })
     const music = await server.ssrLoadModule('/src/music.ts')
-    const editor = await setupComponent('SequenceEditor', props, { '../music': music },
+    const loopRows = await server.ssrLoadModule('/src/loopRows.ts')
+    const editor = await setupComponent('SequenceEditor', props, { '../music': music, '../loopRows': loopRows },
       { HTMLInputElement: Input, HTMLSelectElement: Select })
     try {
       editor.api.addRow()
@@ -1628,7 +1687,7 @@ test('global metronome follows playback and can be toggled without an armed loop
     }
     const clicks = []
     class Synth {
-      toDestination() { return this }
+      connect() { return this }
       triggerAttackRelease(note) { clicks.push(note) }
       dispose() {}
     }
@@ -1644,7 +1703,7 @@ test('global metronome follows playback and can be toggled without an armed loop
     const app = await setupComponent('App', {}, {
       './grid': gridModule,
       './sequencedLoop': { ...loopModule, TransportClock: Clock },
-      tone: { start: async () => {}, Synth },
+      tone: { start: async () => {}, Synth, getContext: () => ({ rawContext: { destination: {} } }) },
       './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
     }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
     try {
@@ -1695,7 +1754,7 @@ test('transport count-in precedes playback while input start bypasses it', async
     }
     const clicks = []
     class Synth {
-      toDestination() { return this }
+      connect() { return this }
       triggerAttackRelease(note) { clicks.push(note) }
       dispose() {}
     }
@@ -1711,7 +1770,7 @@ test('transport count-in precedes playback while input start bypasses it', async
     const app = await setupComponent('App', {}, {
       './grid': gridModule,
       './sequencedLoop': { ...loopModule, TransportClock: Clock },
-      tone: { start: async () => {}, Synth },
+      tone: { start: async () => {}, Synth, getContext: () => ({ rawContext: { destination: {} } }) },
       './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
     }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
     try {
