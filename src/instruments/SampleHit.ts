@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { SamplePlayer } from './SamplePlayer'
+import type { InputNode } from 'tone'
 import { defaultEnvelope } from './defaultEnvelope'
 import type { SampleHitParams } from './types'
 
@@ -9,8 +10,8 @@ export class SampleHit extends SamplePlayer {
   readonly type = 'sample-hit' as const
   readonly params: SampleHitParams
 
-  constructor(params: Partial<SampleHitParams>) {
-    super()
+  constructor(params: Partial<SampleHitParams>, output?: InputNode) {
+    super(output)
     this.params = {
       sample: params.sample ?? '',
       sampleName: params.sampleName ?? '',

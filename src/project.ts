@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { canResizeGrid, DEFAULT_GRID_COLOR, DEFAULT_PIANO_COLOR, isValidPlacement, LOOP_WIDGET_BUTTONS, MAX_LOOP_CLIP_INDEX, validPianoRollNoteRange, type Connection, type GridItem, type GridLayout } from './grid'
-import { createsCycle, scales as scaleChoices, selectorConnectionsCompatible, tempoDivisions } from './parameters'
+import { createsCycle, inputs, outputs, scales as scaleChoices, selectorConnectionsCompatible, selectorRoutingCompatible, tempoDivisions } from './parameters'
 import { PIANO_ROOT_NOTES } from './music'
 import type { SampleAsset } from './sampleAssets'
 import { RECORDING_FORMATS, type RecordingFormat } from './audio/sessionRecording'
+import type { SubGridPreset } from './presets'
+import { AudioRouteError, validateAudioRoutes } from './audio/audioRoutes'
 
 export const DEFAULT_INFO_SCROLL_SPEED = 20
 export const MIN_INFO_SCROLL_SPEED = 1
@@ -28,6 +30,7 @@ export interface SavedProject {
   banks: Bank[]
   selectedBankId: string
   assets?: SampleAsset[]
+  subGridPresets?: SubGridPreset[]
 }
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -140,6 +143,48 @@ function isItem(value: unknown): value is GridItem {
           (note.bend === undefined || finite(note.bend)) &&
           within(note.position, 0, s.barLength as number * 4) && note.position < (s.barLength as number) * 4 &&
           finite(note.duration) && note.duration > 0 && note.duration <= (s.barLength as number) * 4))
+    case 'sub-grid':
+      return typeof s.layout === 'object' && s.layout !== null &&
+        isLayout(s.layout) &&
+        (s.presetId === undefined || (typeof s.presetId === 'string' && !!s.presetId)) &&
+        Array.isArray(s.exposedPorts) &&
+        s.exposedPorts.every((port: unknown) => object(port) &&
+          typeof port.id === 'string' && !!port.id &&
+          typeof port.name === 'string' && !!port.name &&
+          oneOf(port.kind, ['audio', 'note', 'numeric']) &&
+          oneOf(port.direction, ['input', 'output']) &&
+          ((port.itemId === undefined && port.parameterId === undefined) ||
+            (typeof port.itemId === 'string' && typeof port.parameterId === 'string' &&
+              port.id !== 'audio' &&
+              (() => {
+                const item = (s.layout as GridLayout).items.find((entry) => entry.id === port.itemId)
+                return !!item &&
+                  (port.direction === 'input' ? inputs(item) : outputs(item))
+                  .some((parameter) => parameter.id === port.parameterId && parameter.kind === (port.kind === 'numeric' ? 'number' : port.kind))
+              })()))) &&
+        new Set(s.exposedPorts.map((port: { id: string }) => port.id)).size === s.exposedPorts.length &&
+        Array.isArray(s.surfaceItemIds) &&
+        s.surfaceItemIds.every((id: unknown) => typeof id === 'string')
+    case 'tone-element':
+      return oneOf(s.elementType, ['oscillator', 'noise', 'filter', 'gain', 'delay', 'reverb', 'envelope', 'mixer']) &&
+        color(s.color) && finite(s.frequency) && finite(s.detune) &&
+        within(s.cutoff, 20, 20000) && within(s.gain, 0, 2) &&
+        within(s.delayTime, 0, 5) && within(s.feedback, 0, 1) &&
+        within(s.decay, 0.01, 10) && within(s.attack, 0.001, 5) &&
+        within(s.sustain, 0, 1) &&
+        within(s.release, 0.01, 10) &&
+        (s.showVisualizer === undefined || typeof s.showVisualizer === 'boolean') &&
+        (s.showKnobs === undefined || typeof s.showKnobs === 'boolean') &&
+        oneOf(s.oscillatorType, ['sine', 'triangle', 'square', 'sawtooth']) &&
+        oneOf(s.noiseType, ['white', 'pink', 'brown']) &&
+        oneOf(s.noteMode, ['gated', 'continuous', 'always-on']) &&
+        oneOf(s.notePriority, ['last', 'highest', 'lowest']) &&
+        integer(s.polyphony, 1, 16) &&
+        oneOf(s.audioFrom, ['auto', 'wires', 'bank-pre-fx', 'bank-post-fx', 'main-pre-fx', 'main-post-fx']) &&
+        oneOf(s.audioTo, ['auto', 'wires', 'bank-out', 'main-out']) &&
+        oneOf(s.routeMode, ['insert', 'parallel']) &&
+        (s.mixerChannels === undefined || (object(s.mixerChannels) && Object.values(s.mixerChannels).every((channel) =>
+          object(channel) && within(channel.volume, -60, 6) && within(channel.pan, -1, 1) && typeof channel.solo === 'boolean')))
     default: return false
   }
 }
@@ -178,15 +223,61 @@ function isLayout(value: unknown): value is GridLayout {
         entry.targetParameter === connection.targetParameter))) return false
     seen.push(connection)
   }
+  if (!selectorRoutingCompatible(layout)) return false
+  try {
+    validateAudioRoutes(layout)
+  } catch (error) {
+    if (error instanceof AudioRouteError) return false
+    throw error
+  }
   return true
 }
 
 export function migrateSavedProject(value: unknown): void {
   if (!object(value) || value.version !== 1 || !Array.isArray(value.banks)) return
   if (value.bpm === undefined) value.bpm = 120
+  function migrateLayout(layout: unknown) {
+    if (!object(layout) || !Array.isArray(layout.items)) return
+    for (const item of layout.items) {
+      if (!object(item)) continue
+      if (item.orientation === undefined) item.orientation = 'horizontal'
+      if (item.type === 'sub-grid' && object(item.settings) && object(item.settings.layout)) {
+        if (!Array.isArray(item.settings.exposedPorts)) item.settings.exposedPorts = []
+        if (!Array.isArray(item.settings.surfaceItemIds)) item.settings.surfaceItemIds = []
+        migrateLayout(item.settings.layout)
+      }
+      if (item.type === 'tone-element' && object(item.settings)) {
+        if (item.settings.elementType === undefined) item.settings.elementType = 'oscillator'
+        if (item.settings.color === undefined) item.settings.color = '#83c9bb'
+        if (item.settings.frequency === undefined) item.settings.frequency = 440
+        if (item.settings.detune === undefined) item.settings.detune = 0
+        if (item.settings.cutoff === undefined) item.settings.cutoff = 1000
+        if (item.settings.gain === undefined) item.settings.gain = 0.8
+        if (item.settings.delayTime === undefined) item.settings.delayTime = 0.25
+        if (item.settings.feedback === undefined) item.settings.feedback = 0.25
+        if (item.settings.decay === undefined) item.settings.decay = 0.5
+        if (item.settings.attack === undefined) item.settings.attack = 0.01
+        if (item.settings.sustain === undefined) item.settings.sustain = 1
+        if (item.settings.release === undefined) item.settings.release = 0.25
+        if (item.settings.oscillatorType === undefined) item.settings.oscillatorType = 'sine'
+        if (item.settings.noiseType === undefined) item.settings.noiseType = 'white'
+        if (item.settings.noteMode === undefined) item.settings.noteMode = 'gated'
+        if (item.settings.alwaysOn === true && item.settings.elementType === 'oscillator') item.settings.noteMode = 'always-on'
+        delete item.settings.alwaysOn
+        if (item.settings.notePriority === undefined) item.settings.notePriority = 'last'
+        if (item.settings.polyphony === undefined) item.settings.polyphony = 1
+        if (item.settings.audioFrom === undefined) item.settings.audioFrom = 'wires'
+        if (item.settings.audioTo === undefined) item.settings.audioTo = 'wires'
+        if (item.settings.routeMode === undefined) item.settings.routeMode = 'insert'
+        if (item.settings.showVisualizer === undefined) item.settings.showVisualizer = true
+        if (item.settings.showKnobs === undefined) item.settings.showKnobs = true
+      }
+    }
+  }
   let armedLoopFound = false
   for (const bank of value.banks) {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
+    migrateLayout(bank.layout)
     for (const item of bank.layout.items) {
       if (object(item) && item.orientation === undefined) item.orientation = 'horizontal'
       if (object(item) && item.type === 'sequenced-loop' && item.label === 'Sequenced Loop') item.label = 'Loop sequencer'
@@ -286,6 +377,9 @@ export function migrateSavedProject(value: unknown): void {
       }
     }
   }
+  if (Array.isArray(value.subGridPresets)) {
+    for (const preset of value.subGridPresets) if (object(preset)) migrateLayout(preset.layout)
+  }
 }
 
 export function isSavedProject(value: unknown): value is SavedProject {
@@ -298,6 +392,14 @@ export function isSavedProject(value: unknown): value is SavedProject {
     !value.assets.every((asset: unknown) => object(asset) && typeof asset.name === 'string' &&
       typeof asset.source === 'string' && /^data:[^,]*;base64,/.test(asset.source)) ||
     new Set(value.assets.map((asset: SampleAsset) => asset.source)).size !== value.assets.length)) return false
+  if (value.subGridPresets !== undefined && (!Array.isArray(value.subGridPresets) ||
+    !value.subGridPresets.every((preset: unknown) => object(preset) &&
+      typeof preset.id === 'string' && !!preset.id &&
+      typeof preset.name === 'string' && !!preset.name &&
+      preset.schemaVersion === 1 && isLayout(preset.layout) &&
+      Array.isArray(preset.assets) &&
+      preset.assets.every((asset: unknown) => object(asset) &&
+        typeof asset.name === 'string' && typeof asset.source === 'string')))) return false
   if (!value.banks.every((bank: unknown) => object(bank) && typeof bank.id === 'string' && !!bank.id &&
     typeof bank.title === 'string' && typeof bank.icon === 'string' && color(bank.color) && isLayout(bank.layout))) return false
   const ids = value.banks.map((bank: Bank) => bank.id)

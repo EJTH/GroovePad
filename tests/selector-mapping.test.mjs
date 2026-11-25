@@ -24,6 +24,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'sequencedLoop']) {
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
+    dependencies['../audio/audioRoutes'] = await server.ssrLoadModule('/src/audio/audioRoutes.ts')
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
@@ -42,7 +43,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     const module = { exports: {} }
     class SelectElement { constructor(value) { this.value = value } }
     vm.runInNewContext(outputText, { module, exports: module.exports, setTimeout, clearTimeout,
-      require: (path) => path === 'vue' ? { ...vue, onBeforeUnmount() {} } : path === 'tone' ? {} : dependencies[path] ?? { default: {} } })
+      require: (path) => path === 'vue' ? { ...vue, onBeforeMount() {}, onMounted() {}, onUnmounted() {}, onBeforeUnmount() {} } : path === 'tone' ? {} : dependencies[path] ?? { default: {} } })
     const scope = vue.effectScope()
     const api = scope.run(() => module.exports.default.setup({ layout, editing: false, wiring: false, settingsOpen: false, bpm: 120 },
       { expose() {}, emit() {} }))
@@ -126,6 +127,7 @@ test('connection dialog drafts mappings until connect and resets them when ports
     for (const name of ['grid', 'parameters', 'modulation', 'music', 'instruments', 'sequencedLoop']) {
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
+    dependencies['../audio/audioRoutes'] = await server.ssrLoadModule('/src/audio/audioRoutes.ts')
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
@@ -143,7 +145,7 @@ test('connection dialog drafts mappings until connect and resets them when ports
     }
     const gridModule = { exports: {} }
     vm.runInNewContext(await compile('GrooveGrid'), { module: gridModule, exports: gridModule.exports, setTimeout, clearTimeout,
-      require: (path) => path === 'vue' ? { ...vue, onBeforeUnmount() {} } : path === 'tone' ? {} : dependencies[path] ?? { default: {} } })
+      require: (path) => path === 'vue' ? { ...vue, onBeforeMount() {}, onMounted() {}, onUnmounted() {}, onBeforeUnmount() {} } : path === 'tone' ? {} : dependencies[path] ?? { default: {} } })
     const scope = vue.effectScope()
     const api = scope.run(() => gridModule.exports.default.setup({ layout, editing: false, wiring: true, settingsOpen: false, bpm: 120 },
       { expose() {}, emit() {} }))

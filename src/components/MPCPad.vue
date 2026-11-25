@@ -10,18 +10,25 @@ const emit = defineEmits<{ output: [output: ParameterOutput] }>()
 const pointerId = ref<number | null>(null)
 const keyboardPressed = ref(false)
 const expression = new ExpressionTracker()
+const positionFullAt = 0.6
+const minVelocity = 0.1;
 const repeat = useNoteRepeat({
   division: () => props.repeatDivision, bpm: () => props.bpm ?? 120, playing: () => props.playing,
   clock: () => props.transportClock, send: (_value: number, on) => emit('output', { parameter: 'gate', value: on ? 1 : 0 }),
 })
 function gate(on: boolean) { repeat.change('gate', 1, on) }
 
+function pointerExpression(event: PointerEvent, target: HTMLElement) {
+  return expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.rotated ? 'x' : 'y',
+    props.rotated, true, positionFullAt, minVelocity)
+}
+
 function beginPress(event: PointerEvent, target: HTMLElement, beforePress?: () => void) {
   if (pointerId.value !== null || keyboardPressed.value || (target instanceof HTMLButtonElement && target.disabled)) return
   beforePress?.()
   target.setPointerCapture(event.pointerId)
   pointerId.value = event.pointerId
-  const velocity = expression.updatePointer(event.pointerId, event, target.getBoundingClientRect(), props.rotated ? 'x' : 'y', props.rotated)
+  const velocity = pointerExpression(event, target)
   emit('output', { parameter: 'velocity', value: velocity })
   emit('output', { parameter: 'pressure', value: velocity })
   gate(true)
@@ -48,8 +55,7 @@ function move(event: PointerEvent) {
     target.dispatchEvent(new CustomEvent('pad-swipe', { detail: { pointer: event, releasePrevious: () => release(event) } }))
     if (pointerId.value !== event.pointerId) return
   }
-  emit('output', { parameter: 'pressure', value: expression.updatePointer(event.pointerId, event, event.currentTarget.getBoundingClientRect(),
-    props.rotated ? 'x' : 'y', props.rotated) })
+  emit('output', { parameter: 'pressure', value: pointerExpression(event, event.currentTarget) })
 }
 
 function release(event: PointerEvent) {

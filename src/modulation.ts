@@ -25,6 +25,12 @@ export interface NumericSignal {
   source: GridItem
 }
 
+export interface BoundaryNumeric {
+  portId: string
+  wire: Connection
+  signal: NumericSignal
+}
+
 function hasMapping(wire: Connection): boolean {
   return wire.mappingMode !== undefined || wire.modulationMin !== undefined ||
     wire.modulationMax !== undefined || wire.modulationAmount !== undefined
@@ -162,14 +168,25 @@ export function numericSignal(
   wire: Connection,
   signals: ReadonlyMap<string, number>,
   getItem: (id: string) => GridItem | undefined = (id) => layout.items.find((item) => item.id === id),
+  boundary: BoundaryNumeric[] = [],
+  boundaryOutputs: ReadonlyMap<string, NumericSignal> = new Map(),
 ): NumericSignal | undefined {
   const source = getItem(wire.sourceId)
   if (!source) return undefined
+  if (source.type === 'sub-grid') {
+    const key = `${source.id}:${wire.sourceParameter}`
+    const signal = boundaryOutputs.get(key)
+    if (signal) {
+      const value = signals.get(key)
+      return value === undefined ? undefined : { ...signal, source, value }
+    }
+  }
   if (source.type === 'output-selector') {
     if (selectedSelectorWire(layout.connections, source)?.id !== wire.id) return undefined
-    const incoming = layout.connections.find((entry) => entry.targetId === source.id && entry.targetParameter === 'value')
+    const external = boundary.find((entry) => entry.wire.targetId === source.id && entry.wire.targetParameter === 'value')
+    const incoming = layout.connections.find((entry) => entry.targetId === source.id && entry.targetParameter === 'value') ?? external?.wire
     if (!incoming) return undefined
-    const signal = numericSignal(layout, incoming, signals, getItem)
+    const signal = external?.wire === incoming ? external.signal : numericSignal(layout, incoming, signals, getItem, boundary, boundaryOutputs)
     if (!signal) return undefined
     if (!hasMapping(incoming)) return signal
     const base = normalizeSignal(signal.value, signal.min, signal.max) * 127
@@ -200,6 +217,10 @@ function baseValue(item: GridItem, input: ParameterMetadata): number | undefined
     return typeof value === 'number' ? value : undefined
   }
   if (item.type === 'knob' && input.id === 'value') return item.settings.value
+  if (item.type === 'tone-element') {
+    const value = item.settings[input.id as keyof typeof item.settings]
+    return typeof value === 'number' ? value : undefined
+  }
   if (item.type === 'sequenced-loop' && input.id === 'clipIndex') {
     return (item.settings.clipIndex + 0.5) * 128 / input.choices!.length - 0.5
   }
@@ -241,6 +262,8 @@ function setInput(item: GridItem, input: ParameterMetadata, value: number) {
   } else if (item.type === 'knob' && input.id === 'value') {
     const { min, max, step } = item.settings
     item.settings.value = Number(Math.max(min, Math.min(max, min + Math.round((value - min) / step) * step)).toPrecision(12))
+  } else if (item.type === 'tone-element' && input.id in item.settings) {
+    Reflect.set(item.settings, input.id, value)
   } else if ((item.type === 'lfo' || item.type === 'mod-wheel') && input.id === 'depth') {
     item.settings.depth = value
   } else if (item.type === 'lfo' && input.id === 'offset') {
@@ -250,16 +273,24 @@ function setInput(item: GridItem, input: ParameterMetadata, value: number) {
   }
 }
 
-export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<string, number>): GridItem[] {
+export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<string, number>, boundary: BoundaryNumeric[] = [],
+  boundaryOutputs: ReadonlyMap<string, NumericSignal> = new Map()): GridItem[] {
   const resolved = new Map<string, GridItem>()
   const resolving = new Set<string>()
-  const incoming = new Map<string, Map<string, Connection[]>>()
+  const incoming = new Map<string, Map<string, { wire: Connection; signal?: NumericSignal }[]>>()
   for (const wire of layout.connections) {
     let parameters = incoming.get(wire.targetId)
     if (!parameters) { parameters = new Map(); incoming.set(wire.targetId, parameters) }
     let wires = parameters.get(wire.targetParameter)
     if (!wires) { wires = []; parameters.set(wire.targetParameter, wires) }
-    wires.push(wire)
+    wires.push({ wire })
+  }
+  for (const entry of boundary) {
+    let parameters = incoming.get(entry.wire.targetId)
+    if (!parameters) { parameters = new Map(); incoming.set(entry.wire.targetId, parameters) }
+    let wires = parameters.get(entry.wire.targetParameter)
+    if (!wires) { wires = []; parameters.set(entry.wire.targetParameter, wires) }
+    wires.push({ wire: entry.wire, signal: entry.signal })
   }
 
   function resolve(id: string): GridItem | undefined {
@@ -286,8 +317,9 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
       let absolute: number | undefined
       let adjustment = 0
       let driven = false
-      for (const wire of wires) {
-        const signal = numericSignal(layout, wire, signals, resolve)
+      for (const entry of wires) {
+        const { wire } = entry
+        const signal = entry.signal ?? numericSignal(layout, wire, signals, resolve, boundary, boundaryOutputs)
         if (!signal) continue
         driven = true
         const offset = modulationOffset(wire, signal)

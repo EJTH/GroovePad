@@ -5,7 +5,18 @@ import type { InstrumentType } from './instruments/types'
 import { InstrumentFactory } from './instruments'
 import { PIANO_ROOT_NOTES, scaleNote, scales, type PianoRootNote } from './music'
 
-export type GridItemType = 'pad' | 'knob' | 'lfo' | 'mod-wheel' | 'piano-roll' | 'arpeggiator' | 'instrument-pad' | 'output-selector' | 'sequenced-loop'
+export type GridItemType =
+  | 'pad'
+  | 'knob'
+  | 'lfo'
+  | 'mod-wheel'
+  | 'piano-roll'
+  | 'arpeggiator'
+  | 'instrument-pad'
+  | 'output-selector'
+  | 'sequenced-loop'
+  | 'sub-grid'
+  | 'tone-element'
 
 interface GridItemBase {
   id: string
@@ -129,6 +140,59 @@ export interface SequencedLoopSettings {
   widgetButtons?: LoopWidgetButtons
 }
 
+export interface ExposedPort {
+  id: string
+  name: string
+  kind: 'audio' | 'note' | 'numeric'
+  direction: 'input' | 'output'
+  sourceParameter?: string
+  targetParameter?: string
+  itemId?: string
+  parameterId?: string
+}
+
+export interface SubGridSettings {
+  presetId?: string
+  layout: GridLayout
+  exposedPorts: ExposedPort[]
+  surfaceItemIds: string[]
+}
+
+export type ToneElementKind = 'oscillator' | 'noise' | 'filter' | 'gain' | 'delay' | 'reverb' | 'envelope' | 'mixer'
+export type ToneNotePriority = 'last' | 'highest' | 'lowest'
+
+export interface ToneElementSettings {
+  elementType: ToneElementKind
+  color: string
+  frequency: number
+  detune: number
+  cutoff: number
+  gain: number
+  delayTime: number
+  feedback: number
+  decay: number
+  attack: number
+  sustain: number
+  release: number
+  oscillatorType: 'sine' | 'triangle' | 'square' | 'sawtooth'
+  noiseType: 'white' | 'pink' | 'brown'
+  noteMode: 'gated' | 'continuous' | 'always-on'
+  notePriority: ToneNotePriority
+  polyphony: number
+  audioFrom: 'auto' | 'wires' | 'bank-pre-fx' | 'bank-post-fx' | 'main-pre-fx' | 'main-post-fx'
+  audioTo: 'auto' | 'wires' | 'bank-out' | 'main-out'
+  routeMode: 'insert' | 'parallel'
+  mixerChannels?: Record<string, MixerChannelSettings>
+  showVisualizer?: boolean
+  showKnobs?: boolean
+}
+
+export interface MixerChannelSettings {
+  volume: number
+  pan: number
+  solo: boolean
+}
+
 export type GridItem = GridItemBase & (
   | { type: 'pad'; settings: PadSettings }
   | { type: 'knob'; settings: KnobSettings }
@@ -139,6 +203,8 @@ export type GridItem = GridItemBase & (
   | { type: 'instrument-pad'; settings: InstrumentPadSettings }
   | { type: 'output-selector'; settings: OutputSelectorSettings }
   | { type: 'sequenced-loop'; settings: SequencedLoopSettings }
+  | { type: 'sub-grid'; settings: SubGridSettings }
+  | { type: 'tone-element'; settings: ToneElementSettings }
 )
 
 export interface ParameterOutput {
@@ -167,6 +233,45 @@ export function createControl(id: string, x: number, y: number, type: GridItemTy
     case 'arpeggiator': return { ...base, type, label: 'Arpeggiator', settings: { color: DEFAULT_GRID_COLOR, enabled: true, style: 'up', rate: '1/8', distance: 12, steps: 0, gate: 0.5, scale: 'chromatic' } }
     case 'output-selector': return { ...base, type, label: 'Output Selector', settings: { index: 0 } }
     case 'sequenced-loop': return { ...base, type, label: 'Loop sequencer', settings: { color: DEFAULT_GRID_COLOR, barLength: 1, clipIndex: 0, armed: false, countIn: false, metronome: false, syncMode: 'sync', quantize: 'off', recordScope: 'bank', clips: { 0: [] }, automation: { 0: [] } } }
+    case 'sub-grid': return {
+      ...base,
+      type,
+      label: 'SubGrid',
+      settings: {
+        layout: { columns: 4, rows: 4, items: [], connections: [] },
+        exposedPorts: [],
+        surfaceItemIds: [],
+      },
+    }
+    case 'tone-element': return {
+      ...base,
+      type,
+      label: 'Oscillator',
+      settings: {
+        elementType: 'oscillator',
+        color: '#83c9bb',
+        frequency: 440,
+        detune: 0,
+        cutoff: 1000,
+        gain: 0.8,
+        delayTime: 0.25,
+        feedback: 0.25,
+        decay: 0.5,
+        attack: 0.01,
+        sustain: 1,
+        release: 0.25,
+        oscillatorType: 'sine',
+        noiseType: 'white',
+        noteMode: 'gated',
+        notePriority: 'last',
+        polyphony: 1,
+        audioFrom: 'auto',
+        audioTo: 'auto',
+        routeMode: 'insert',
+        showVisualizer: true,
+        showKnobs: true,
+      },
+    }
     case 'instrument-pad':
       const iType = instrumentType || 'sample-hit'
       return {
@@ -202,6 +307,72 @@ export interface GridLayout {
   rows: number
   items: GridItem[]
   connections: Connection[]
+}
+
+export function gridScopes(banks: { id: string; title: string; layout: GridLayout }[]) {
+  const scopes: { id: string; title: string; layout: GridLayout }[] = []
+  function collect(id: string, title: string, layout: GridLayout) {
+    scopes.push({ id, title, layout })
+    for (const item of layout.items) if (item.type === 'sub-grid') {
+      collect(`${id}/${item.id}`, `${title} / ${item.label}`, item.settings.layout)
+    }
+  }
+  for (const bank of banks) collect(bank.id, bank.title, bank.layout)
+  return scopes
+}
+
+export function copyGridLayout(layout: GridLayout): GridLayout {
+  const idMap = new Map<string, string>()
+  const items = layout.items.map((item) => {
+    let number = 1
+    let nextId = `${item.id}-copy`
+    while (idMap.has(nextId) || layout.items.some((candidate) => candidate.id === nextId)) {
+      nextId = `${item.id}-copy-${number++}`
+    }
+    idMap.set(item.id, nextId)
+    return copyControl(item, nextId)
+  })
+  for (const item of items) if (item.type === 'sequenced-loop') {
+    for (const notes of Object.values(item.settings.clips)) for (const note of notes) {
+      if (!note.bankId) note.instrumentId = idMap.get(note.instrumentId) ?? note.instrumentId
+    }
+    for (const events of Object.values(item.settings.automation)) for (const event of events) {
+      if (!event.bankId) event.sourceId = idMap.get(event.sourceId) ?? event.sourceId
+    }
+    for (const rows of Object.values(item.settings.mutedRows ?? {})) for (const row of rows) {
+      if (row.bankId) continue
+      if (row.kind === 'note') row.instrumentId = idMap.get(row.instrumentId) ?? row.instrumentId
+      else row.sourceId = idMap.get(row.sourceId) ?? row.sourceId
+    }
+  }
+  for (const item of items) if (item.type === 'tone-element' && item.settings.mixerChannels) {
+    item.settings.mixerChannels = Object.fromEntries(Object.entries(item.settings.mixerChannels).map(([key, settings]) => {
+      for (const [sourceId, copyId] of idMap) {
+        if (key === `item:${sourceId}:out`) return [`item:${copyId}:out`, settings]
+        try {
+          const parsed: unknown = JSON.parse(key)
+          if (Array.isArray(parsed) && parsed[0] === 'port' && parsed[1] === sourceId && parsed[3] === 'out') {
+            parsed[1] = copyId
+            return [JSON.stringify(parsed), settings]
+          }
+        } catch {
+          continue
+        }
+      }
+      return [key, settings]
+    }))
+  }
+  return {
+    columns: layout.columns,
+    rows: layout.rows,
+    items,
+    connections: layout.connections.map((connection) => ({
+      ...connection,
+      id: `${connection.id}-copy`,
+      sourceId: idMap.get(connection.sourceId) ?? connection.sourceId,
+      targetId: idMap.get(connection.targetId) ?? connection.targetId,
+    })),
+  }
 }
 
 export const MAX_GRID_COLUMNS = 8
@@ -252,6 +423,23 @@ export function copyControl(item: GridItem, id: string): GridItem {
       ...(item.settings.widgetButtons ? { widgetButtons: { ...item.settings.widgetButtons } } : {}),
       ...(item.settings.mutedRows ? { mutedRows: Object.fromEntries(Object.entries(item.settings.mutedRows).map(([index, rows]) => [index, rows.map((row) => ({ ...row }))])) } : {}) } }
     case 'instrument-pad': return { ...item, id, settings: { ...item.settings, instrumentParams: deepCopyInstrumentParams(item.settings.instrumentParams) } }
+    case 'sub-grid': {
+      const layout = copyGridLayout(item.settings.layout)
+      const ids = new Map(item.settings.layout.items.map((child, index) => [child.id, layout.items[index]!.id]))
+      return {
+        ...item, id,
+        settings: {
+          ...item.settings, layout,
+          exposedPorts: item.settings.exposedPorts.map((port) => ({
+            ...port, ...(port.itemId ? { itemId: ids.get(port.itemId) ?? port.itemId } : {}),
+          })),
+          surfaceItemIds: item.settings.surfaceItemIds.map((childId) => ids.get(childId) ?? childId),
+        },
+      }
+    }
+    case 'tone-element': return { ...item, id, settings: { ...item.settings,
+      ...(item.settings.mixerChannels ? { mixerChannels: Object.fromEntries(Object.entries(item.settings.mixerChannels)
+        .map(([key, settings]) => [key, { ...settings }])) } : {}) } }
   }
 }
 

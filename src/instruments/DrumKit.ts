@@ -26,7 +26,7 @@ export class DrumKit<T extends DrumKitType> implements InstrumentInstance {
   private envelopes: Tone.Envelope[] = []
   private pitchBend = 0
 
-  constructor(params: Partial<DrumKitParams>, type: T) {
+  constructor(params: Partial<DrumKitParams>, type: T, output?: Tone.InputNode) {
     this.type = type
     this.params = {
       drum: params.drum ?? 'kick',
@@ -37,7 +37,9 @@ export class DrumKit<T extends DrumKitType> implements InstrumentInstance {
       tone: params.tone ?? 0.7,
     }
 
-    this.masterGain = new Tone.Gain(10 ** (this.params.volume / 20)).toDestination()
+    this.masterGain = new Tone.Gain(10 ** (this.params.volume / 20))
+    if (output) this.masterGain.connect(output)
+    else this.masterGain.toDestination()
     this.voice = this.createVoice(this.params.drum)
     this.updateTone()
   }

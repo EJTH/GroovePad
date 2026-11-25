@@ -18,6 +18,10 @@ The grid control picker provides nine control families:
 
 Each control exposes outputs and/or inputs appropriate to its role. The settings dialog previews the live control while parameters are edited.
 
+For a Pad, position-based velocity and pressure reach their maximum in the bottom 20% of the pad. When rotated, this region is on the left. Pressure-sensitive input uses the reported pressure instead.
+
+Knob dragging uses at least 100 pixels for the full range, or one pixel per step when that requires more travel.
+
 ## Wiring controls
 
 Choose **Wire**, then select a source and destination control. GroovePad filters the available parameters to compatible connections. A connection can use:

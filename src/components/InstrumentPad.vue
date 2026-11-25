@@ -7,7 +7,7 @@ import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../instruments/types'
 import MPCPad from './MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean; audioOutput?: Tone.InputNode; audioUnavailable?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
 const error = ref('')
 const inputsMuted = ref(false)
@@ -67,6 +67,12 @@ function syncParameters() {
 }
 
 function syncNote() {
+  if (props.audioUnavailable) {
+    generation++
+    instrument?.release()
+    currentKey = ''
+    return
+  }
   if (props.settings.instrumentType === 'sample-hit' && props.settings.instrumentParams.polyphony > 1) {
     syncHitNotes()
     return
@@ -86,7 +92,7 @@ function syncNote() {
     try {
       await Tone.start()
       if (unmounted || request !== generation) return
-      instrument ??= InstrumentFactory.create(props.settings.instrumentType, props.settings.instrumentParams)
+      instrument ??= InstrumentFactory.create(props.settings.instrumentType, props.settings.instrumentParams, props.audioOutput)
       syncParameters()
       instrument.setPitchBend?.(localPressed ? 0 : incomingBend())
       await instrument.trigger(velocity, note)
@@ -122,7 +128,7 @@ function syncHitNotes() {
       try {
         await Tone.start()
         if (unmounted || request !== generation || hitNotes.get(id) !== note) return
-        instrument ??= InstrumentFactory.create('sample-hit', props.settings.instrumentParams)
+        instrument ??= InstrumentFactory.create('sample-hit', props.settings.instrumentParams, props.audioOutput)
         if (!(instrument instanceof SampleHit)) return
         syncParameters()
         if (!(instrument instanceof SampleHit) || hitNotes.get(id) !== note) return
@@ -175,6 +181,7 @@ watch(() => localPressed ? 0 : incomingBend(),
   })
 watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
 watch(() => props.settings.muted, syncParameters, { flush: 'sync' })
+watch(() => props.audioUnavailable, syncNote, { flush: 'sync' })
 onBeforeUnmount(() => {
   if (localPressed && props.settings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
   unmounted = true

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
-import { effectiveControls } from '../modulation'
+import { gridScopes, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
+import { effectiveControls, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { outputs } from '../parameters'
 import { applySettingsAutomation } from '../settingsAutomation'
 import { pointerTap } from '../pointerTap'
@@ -25,6 +25,9 @@ export function useGridPlayback(options: {
   startOnInput: () => ((bankId: string) => Promise<boolean>) | undefined
   signals: Map<string, number>
   routeNote: (sourceId: string, output: ParameterOutput) => void
+  boundaryNumeric?: () => BoundaryNumeric[]
+  modulationLayout?: () => GridLayout
+  boundaryOutputs?: ReadonlyMap<string, NumericSignal>
 }) {
   const loopVoices = reactive(new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>())
   const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
@@ -94,7 +97,7 @@ export function useGridPlayback(options: {
 
   function setLoopArmed(loop: SequencedLoop, armed: boolean) {
     if (armed) {
-      const layouts = options.banks()?.map((bank) => bank.layout) ?? []
+      const layouts = gridScopes(options.banks() ?? []).map((bank) => bank.layout)
       const layout = options.layout()
       if (!layouts.includes(layout)) layouts.push(layout)
       for (const bankLayout of layouts) for (const item of bankLayout.items) {
@@ -200,7 +203,7 @@ export function useGridPlayback(options: {
 
   function previewColor(sourceId: string, bankId?: string) {
     const layout = bankId && bankId !== options.bankId
-      ? options.banks()?.find((bank) => bank.id === bankId)?.layout
+      ? gridScopes(options.banks() ?? []).find((bank) => bank.id === bankId)?.layout
       : options.layout()
     const source = layout?.items.find((item) => item.id === sourceId)
     return source && 'color' in source.settings ? source.settings.color : 'var(--accent)'
@@ -373,8 +376,9 @@ export function useGridPlayback(options: {
       if (item && (item.type === 'knob' || item.type === 'mod-wheel')) {
         options.bankEvents.emit({ kind: 'live-automation-end', bankId: options.bankId, sourceId: id, parameter: 'value' })
       }
-      const layouts = options.banks()?.map((bank) => ({ bankId: bank.id, layout: bank.layout })) ??
-        [{ bankId: options.bankId, layout: options.layout() }]
+      const banks = options.banks()
+      const layouts = banks ? gridScopes(banks).map((bank) => ({ bankId: bank.id, layout: bank.layout }))
+        : [{ bankId: options.bankId, layout: options.layout() }]
       const recording = layouts.some(({ bankId, layout }) => layout.items.some((entry) => entry.type === 'sequenced-loop' &&
         entry.settings.armed && (bankId === options.bankId || entry.settings.recordScope === 'all')))
       if (item && (item.type === 'knob' || item.type === 'mod-wheel')) {
@@ -449,7 +453,8 @@ export function useGridPlayback(options: {
         ? { ...effective, settings: { ...effective.settings, enabled: enabled >= 0.5 } }
         : effective
     })
-    return effectiveControls({ ...layout, items }, effectiveSignals.value)
+    const modulationLayout = options.modulationLayout?.() ?? layout
+    return effectiveControls({ ...modulationLayout, items }, effectiveSignals.value, options.boundaryNumeric?.() ?? [], options.boundaryOutputs)
   })
   watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
     ({ id: item.id, index: item.settings.clipIndex })), (selections) => {

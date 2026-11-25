@@ -31,7 +31,17 @@ export async function saveProjectToFile(project: SavedProject): Promise<Blob> {
     ...bank,
     layout: {
       ...bank.layout,
-      items: bank.layout.items.map((item) => {
+      items: bank.layout.items.map(function serializeItem(item): typeof item {
+        if (item.type === 'sub-grid') return {
+          ...item,
+          settings: {
+            ...item.settings,
+            layout: {
+              ...item.settings.layout,
+              items: item.settings.layout.items.map(serializeItem),
+            },
+          },
+        }
         if (item.type !== 'instrument-pad' ||
           (item.settings.instrumentType !== 'sample-hit' && item.settings.instrumentType !== 'sample-loop') ||
           !item.settings.instrumentParams.sample) return item
@@ -108,12 +118,14 @@ export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
     if (entries.some((entry) => !entry.directory && entry.filename.startsWith('samples/') && !sources.has(entry.filename))) {
       throw new Error('Project contains an unlisted sample file.')
     }
-    for (const bank of banks) {
-      if (typeof bank !== 'object' || bank === null || !('layout' in bank) ||
-        typeof bank.layout !== 'object' || bank.layout === null || !('items' in bank.layout) ||
-        !Array.isArray(bank.layout.items)) continue
-      for (const item of bank.layout.items) {
-        if (typeof item !== 'object' || item === null || item.type !== 'instrument-pad' ||
+    function restoreLayout(layout: unknown) {
+      if (typeof layout !== 'object' || layout === null || !('items' in layout) ||
+        !Array.isArray(layout.items)) return
+      for (const item of layout.items) {
+        if (typeof item !== 'object' || item === null) continue
+        if (item.type === 'sub-grid' && typeof item.settings === 'object' && item.settings !== null &&
+          'layout' in item.settings) restoreLayout(item.settings.layout)
+        if (item.type !== 'instrument-pad' ||
           typeof item.settings !== 'object' || item.settings === null ||
           (item.settings.instrumentType !== 'sample-hit' && item.settings.instrumentType !== 'sample-loop') ||
           typeof item.settings.instrumentParams !== 'object' || item.settings.instrumentParams === null) continue
@@ -123,6 +135,9 @@ export async function loadProjectFromFile(blob: Blob): Promise<SavedProject> {
         if (!asset) throw new Error(`Missing project sample: ${params.sample}`)
         params.sample = asset.source
       }
+    }
+    for (const bank of banks) {
+      if (typeof bank === 'object' && bank !== null && 'layout' in bank) restoreLayout(bank.layout)
     }
     const project: unknown = { ...manifest, banks, assets }
     migrateSavedProject(project)

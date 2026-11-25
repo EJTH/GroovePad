@@ -1,16 +1,20 @@
 <script setup lang="ts">
+import { useId } from 'vue'
 import type { ADSREnvelope } from '../instruments/types'
 
 interface Props {
   envelope: ADSREnvelope
   width?: number
   height?: number
+  color?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   width: 200,
   height: 50,
+  color: '#b8d986',
 })
+const gradientId = `adsr-gradient-${useId()}`
 
 function getPathData(): string {
   const { attack, decay, sustain, release } = props.envelope
@@ -60,23 +64,23 @@ function getLabels(): Array<{ label: string; x: string; y: string }> {
 </script>
 
 <template>
-  <div class="adsr-visualizer">
+  <div class="adsr-visualizer" :style="{ '--adsr-color': color }">
     <svg :width="width" :height="height" :viewBox="`0 0 ${width} ${height}`" preserveAspectRatio="none">
       <defs>
-        <linearGradient id="adsr-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" style="stop-color: #b8d986; stop-opacity: 0.4" />
-          <stop offset="100%" style="stop-color: #b8d986; stop-opacity: 0.1" />
+        <linearGradient :id="gradientId" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" style="stop-color: var(--adsr-color); stop-opacity: 0.4" />
+          <stop offset="100%" style="stop-color: var(--adsr-color); stop-opacity: 0.1" />
         </linearGradient>
       </defs>
-      <path :d="getPathData()" fill="url(#adsr-gradient)" stroke="#b8d986" stroke-width="2" />
-      <line x1="0" :y1="height" :x2="width" :y2="height" stroke="#b8d986" stroke-width="1" opacity="0.3" />
+      <path :d="getPathData()" :fill="`url(#${gradientId})`" stroke="var(--adsr-color)" stroke-width="2" />
+      <line x1="0" :y1="height" :x2="width" :y2="height" stroke="var(--adsr-color)" stroke-width="1" opacity="0.3" />
       <text
         v-for="(label, idx) in getLabels()"
         :key="idx"
         :x="label.x"
         :y="label.y"
         font-size="10"
-        fill="#e9face"
+        fill="color-mix(in srgb, var(--adsr-color) 45%, white)"
         text-anchor="middle"
       >
         {{ label.label }}
@@ -93,7 +97,7 @@ function getLabels(): Array<{ label: string; x: string; y: string }> {
   width: 100%;
   background: #0a0a0a;
   border-radius: 4px;
-  border: 1px solid #b8d986;
+  border: 1px solid var(--adsr-color);
   padding: 8px;
   font-size: 11px;
 }

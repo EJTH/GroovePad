@@ -4,6 +4,8 @@
 import type { GridItemType } from '../grid'
 
 export const controlTypes: { type: GridItemType; label: string; description: string; icon: string }[] = [
+  { type: 'sub-grid', label: 'Sub Grid', description: 'Reusable nested grid', icon: 'M4 4h16v16H4z M4 12h16 M12 4v16' },
+  { type: 'tone-element', label: 'Tone.js', description: 'Oscillator, filter, effect or utility', icon: 'M3 12c2.5-8 4.5 8 7 0s4.5 8 7 0 3.5 0 4 0' },
   { type: 'instrument-pad', label: 'Instrument Pad', description: 'Play a sound', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M9 13l2 2 4-6' },
   { type: 'pad', label: 'Pad', description: 'Trigger a control', icon: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M12 8v8 M8 12h8' },
   { type: 'knob', label: 'Knob', description: 'Adjust a value', icon: 'M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9z M12 12l4-4' },

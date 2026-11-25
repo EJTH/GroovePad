@@ -1,17 +1,18 @@
 // Copyright (C) 2026 DON:E (Elias Toft Hansen)
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { MAX_LOOP_CLIP_INDEX, type Connection, type GridItem } from './grid'
+import { MAX_LOOP_CLIP_INDEX, type Connection, type GridItem, type GridLayout } from './grid'
 
 export interface ParameterMetadata {
   id: string
   label: string
-  kind: 'number' | 'note'
+  kind: 'number' | 'note' | 'audio'
   min?: number
   max?: number
   choices?: readonly string[]
 }
 
+// Common parameter metadata and utility functions for GroovePad components
 export const waveforms = ['sine', 'saw', 'square', 'random'] as const
 export const rateModes = ['free', 'sync'] as const
 export const scales = ['chromatic', 'major', 'minor', 'major-pentatonic', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'locrian', 'minor-pentatonic', 'blues'] as const
@@ -19,6 +20,11 @@ export const orientations = ['horizontal', 'vertical'] as const
 export const arpStyles = ['up', 'down', 'up-down', 'random'] as const
 export const tempoDivisions = ['1/1', '3/4', '1/2', '1/4', '1/8', '1/16', '1/32'] as const
 export const loopClipIndices = Array.from({ length: MAX_LOOP_CLIP_INDEX + 1 }, (_, index) => String(index))
+
+// Common parameter metadata and utility functions for GroovePad components
+export const filterTypes = ['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'notch', 'allpass', 'peaking'] as const
+
+
 const velocityOutput: ParameterMetadata = { id: 'velocity', label: 'Velocity', kind: 'number', min: 0, max: 127 }
 const pressureOutput: ParameterMetadata = { id: 'pressure', label: 'Pressure', kind: 'number', min: 0, max: 127 }
 
@@ -84,11 +90,29 @@ export function outputs(item: GridItem): ParameterMetadata[] {
       { id: 'value', label: 'Number', kind: 'number', min: 0, max: 127 },
       { id: 'note', label: 'Notes', kind: 'note' },
     ]
-    case 'instrument-pad':
+    case 'instrument-pad': return [
+      velocityOutput,
+      pressureOutput,
+      { id: 'gate', label: 'Gate', kind: 'number', min: 0, max: 1 },
+      { id: 'audio', label: 'Audio output', kind: 'audio' },
+    ]
     case 'pad': return [
       velocityOutput,
       pressureOutput,
       { id: 'gate', label: 'Gate', kind: 'number', min: 0, max: 1 },
+    ]
+    case 'tone-element': return [
+      { id: 'audio', label: 'Audio', kind: 'audio' },
+      ...(item.settings.elementType === 'oscillator'
+        ? [{ id: 'frequency', label: 'Frequency', kind: 'number' as const, min: 20, max: 20000 }]
+        : []),
+      ...(item.settings.elementType === 'envelope'
+        ? [{ id: 'value', label: 'Envelope', kind: 'number' as const, min: 0, max: 1 }]
+        : []),
+    ]
+    case 'sub-grid': return [
+      { id: 'audio', label: 'Audio output', kind: 'audio' },
+      ...exposedPorts(item, 'output'),
     ]
     default: return []
   }
@@ -122,8 +146,61 @@ export function inputs(item: GridItem): ParameterMetadata[] {
       select('style', 'Style', arpStyles), select('rate', 'Rate', tempoDivisions), select('scale', 'Scale', scales),
     ]
     case 'sequenced-loop': return [select('clipIndex', 'Clip index', loopClipIndices)]
+    case 'sub-grid': return [
+      { id: 'audio', label: 'Audio input', kind: 'audio' },
+      ...exposedPorts(item, 'input'),
+    ]
+    case 'tone-element': {
+      const numeric = (id: string, label: string, min: number, max: number): ParameterMetadata =>
+        ({ id, label, kind: 'number', min, max })
+      const ports: ParameterMetadata[] = []
+      if (item.settings.elementType !== 'oscillator' && item.settings.elementType !== 'noise') {
+        ports.push({ id: 'audio', label: 'Audio input', kind: 'audio' })
+      }
+      if (item.settings.elementType === 'oscillator') {
+        ports.push({ id: 'note', label: 'Note input', kind: 'note' },
+          numeric('frequency', 'Frequency', 20, 20000),
+          numeric('detune', 'Detune', -1200, 1200))
+      }
+      if (item.settings.elementType === 'noise') {
+        ports.push({ id: 'note', label: 'Note input', kind: 'note' }, numeric('gain', 'Gain', 0, 2))
+      }
+      if (item.settings.elementType === 'filter') {
+        ports.push(numeric('cutoff', 'Filter cutoff', 20, 20000), numeric('gain', 'Resonance', 0, 2))
+      }
+      if (item.settings.elementType === 'gain' || item.settings.elementType === 'mixer') {
+        ports.push(numeric('gain', 'Gain', 0, 2))
+      }
+      if (item.settings.elementType === 'delay') {
+        ports.push(numeric('delayTime', 'Delay time', 0, 5),
+          numeric('feedback', 'Feedback', 0, 1),
+          numeric('gain', 'Wet level', 0, 2))
+      }
+      if (item.settings.elementType === 'reverb') {
+        ports.push(numeric('decay', 'Decay', 0.01, 10), numeric('gain', 'Wet level', 0, 2))
+      }
+      if (item.settings.elementType === 'envelope') {
+        ports.push({ id: 'note', label: 'Note input', kind: 'note' },
+          numeric('attack', 'Attack', 0.001, 5),
+          numeric('decay', 'Decay', 0.01, 10),
+          numeric('sustain', 'Sustain', 0, 1),
+          numeric('release', 'Release', 0.01, 10))
+      }
+      return ports
+    }
     default: return []
   }
+}
+
+function exposedPorts(item: Extract<GridItem, { type: 'sub-grid' }>, direction: 'input' | 'output'): ParameterMetadata[] {
+  return item.settings.exposedPorts.flatMap((port) => {
+    if (port.direction !== direction || !port.itemId || !port.parameterId) return []
+    const child = item.settings.layout.items.find((entry) => entry.id === port.itemId)
+    if (!child) return []
+    const parameter = (direction === 'input' ? inputs(child) : outputs(child))
+      .find((entry) => entry.id === port.parameterId && entry.kind === (port.kind === 'numeric' ? 'number' : port.kind))
+    return parameter ? [{ ...parameter, id: port.id, label: port.name }] : []
+  })
 }
 
 export function applySelectInput(item: GridItem, parameter: string, index: number): void {
@@ -190,6 +267,49 @@ export function selectorConnectionsCompatible(items: GridItem[], connections: Co
     }
   }
   return true
+}
+
+export function selectorRoutingCompatible(
+  root: GridLayout,
+  replacement?: { layout: GridLayout; connections?: Connection[]; items?: GridItem[] },
+): boolean {
+  const selectors = new Map<string, { incoming: number; selection: number; kinds: Set<string> }>()
+  const current = (layout: GridLayout) => replacement?.layout === layout
+    ? { ...layout, items: replacement.items ?? layout.items, connections: replacement.connections ?? layout.connections }
+    : layout
+  function resolve(layout: GridLayout, path: string[], id: string, parameter: string, direction: 'input' | 'output'):
+    { key: string; item: GridItem; parameter: string } | undefined {
+    const item = current(layout).items.find((entry) => entry.id === id)
+    if (!item) return undefined
+    if (item.type === 'sub-grid' && parameter !== 'audio') {
+      const port = item.settings.exposedPorts.find((entry) => entry.id === parameter && entry.direction === direction)
+      if (!port?.itemId || !port.parameterId) return undefined
+      return resolve(item.settings.layout, [...path, item.id], port.itemId, port.parameterId, direction)
+    }
+    return { key: JSON.stringify([...path, item.id]), item, parameter }
+  }
+  function state(key: string) {
+    let value = selectors.get(key)
+    if (!value) { value = { incoming: 0, selection: 0, kinds: new Set() }; selectors.set(key, value) }
+    return value
+  }
+  function visit(layout: GridLayout, path: string[]) {
+    const grid = current(layout)
+    for (const wire of grid.connections) {
+      const source = resolve(layout, path, wire.sourceId, wire.sourceParameter, 'output')
+      const target = resolve(layout, path, wire.targetId, wire.targetParameter, 'input')
+      if (!source || !target) continue
+      if (source.item.type === 'output-selector') state(source.key).kinds.add(source.parameter)
+      if (target.item.type === 'output-selector') {
+        const entry = state(target.key)
+        if (target.parameter === 'selection') entry.selection++
+        else { entry.incoming++; entry.kinds.add(target.parameter) }
+      }
+    }
+    for (const item of grid.items) if (item.type === 'sub-grid') visit(item.settings.layout, [...path, item.id])
+  }
+  visit(root, [])
+  return [...selectors.values()].every((entry) => entry.incoming <= 1 && entry.selection <= 1 && entry.kinds.size <= 1)
 }
 
 export function selectedSelectorWire(connections: Connection[], item: GridItem): Connection | undefined {

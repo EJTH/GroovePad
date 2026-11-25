@@ -32,6 +32,10 @@ export abstract class SamplePlayer implements InstrumentInstance {
   private readonly noteGenerations = new Map<string, number>()
   private readonly noteBends = new Map<string, number>()
 
+  private readonly output?: Tone.InputNode
+
+  constructor(output?: Tone.InputNode) { this.output = output }
+
   async trigger(velocity: number, note = 60, id?: string, bend = 0): Promise<void> {
     if (!this.params.sample || !/^data:[^,]*;base64,/.test(this.params.sample)) {
       throw new Error('Choose a sample file in the pad settings.')
@@ -111,7 +115,9 @@ export abstract class SamplePlayer implements InstrumentInstance {
     const voiceBend = id === undefined ? undefined : (this.noteBends.get(id) ?? bend)
     const rate = 2 ** ((note - 60 + this.params.pitch + (voiceBend ?? this.pitchBend)) / 12)
     if (hit) this.limitVoices(hit.polyphony - 1)
-    const envelope = new Tone.AmplitudeEnvelope(this.params.envelope).toDestination()
+    const envelope = new Tone.AmplitudeEnvelope(this.params.envelope)
+    if (this.output) envelope.connect(this.output)
+    else envelope.toDestination()
     const player = new Tone.Player({
       url: source,
       playbackRate: rate,

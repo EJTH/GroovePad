@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed, provide } from 'vue'
-import { createControl, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollSettings, type Connection, type GridItem, type GridItemType, type GridLayout } from '../grid'
-import { isCompatible, inputs, outputs, selectorConnectionsCompatible } from '../parameters'
+import { createControl, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollSettings, type Connection, type GridItem, type GridItemType, type GridLayout, type SubGridSettings, type ToneElementKind, type ToneElementSettings } from '../grid'
+import { isCompatible, inputs, outputs, selectorConnectionsCompatible, selectorRoutingCompatible } from '../parameters'
 import { InstrumentFactory } from '../instruments'
 import type { InstrumentType } from '../instruments/types'
 import type ControlIdentitySettings from './ControlIdentitySettings.vue'
@@ -17,9 +17,13 @@ import SettingsDialog from './SettingsDialog.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
 import InstrumentPad from './InstrumentPad.vue'
 import LFO from './LFO.vue'
+import NumericSetting from './NumericSetting.vue'
+import ADSREnvelopeEditor from './ADSREnvelopeEditor.vue'
 import { controlTypes } from './gridControlTypes'
 import type { Bank } from '../project'
 import { captureSettings, settingGestureKey } from '../settingsAutomation'
+import { AudioRouteError, audioInput, audioOutput, isAudioSource, planAudioRoutes, validateAudioRoutes } from '../audio/audioRoutes'
+import type { BoundaryAudio } from '../audio/bankAudio'
 
 const props = defineProps<{
   draft: GridItem
@@ -27,11 +31,15 @@ const props = defineProps<{
   selectedId: string | null
   newControl: boolean
   layout: GridLayout
+  rootLayout?: GridLayout
   bpm: number
   message: string
   banks?: Bank[]
   bankId?: string
   loopPlayhead?: number
+  nested?: boolean
+  ownerSettings?: SubGridSettings
+  boundaryAudio?: BoundaryAudio[]
 }>()
 const emit = defineEmits<{
   save: [item: GridItem]
@@ -41,6 +49,7 @@ const emit = defineEmits<{
   armChange: [armed: boolean]
   settingChange: [change: { id: string; value: number; continuous: boolean }]
   settingActivity: [active: boolean]
+  openSubGrid: [id: string]
   'update:message': [message: string]
 }>()
 
@@ -49,6 +58,37 @@ const sampleLoading = ref(false)
 const message = computed({
   get: () => props.message,
   set: (value: string) => emit('update:message', value),
+})
+const effectiveAudioRoute = computed(() => {
+  const item = props.draft
+  if (item.type !== 'tone-element') return ''
+  try {
+    const edges = planAudioRoutes(props.layout, props.boundaryAudio?.map(({ port }) => port))
+    const name = (id: string) => {
+      if (id === 'bank-pre') return 'Bank pre-FX'
+      if (id === 'bank-post') return 'Bank output'
+      if (id === 'main-pre') return 'Main pre-FX'
+      if (id === 'main-post') return 'Main output'
+      for (const entry of props.layout.items) if (entry.type === 'sub-grid') {
+        const port = entry.settings.exposedPorts.find((candidate) => candidate.kind === 'audio' &&
+          (audioInput(entry.id, candidate.id) === id || audioOutput(entry.id, candidate.id) === id))
+        if (port) return `${entry.label} / ${port.name}`
+      }
+      const control = props.layout.items.find((entry) => audioInput(entry.id) === id || audioOutput(entry.id) === id)
+      return control?.label ?? id
+    }
+    const sources = edges.filter((edge) => edge.to === audioInput(item.id)).map((edge) => name(edge.from))
+    const targets = edges.filter((edge) => edge.from === audioOutput(item.id)).map((edge) => name(edge.to))
+    for (const { port } of props.boundaryAudio ?? []) {
+      if (port.itemId !== item.id || port.parameterId !== 'audio') continue
+      if (port.direction === 'input') sources.push(`Parent / ${port.name}`)
+      else targets.push(`Parent / ${port.name}`)
+    }
+    return `${isAudioSource(item) ? 'Source' : (sources.join(', ') || 'No audio input')} → ${targets.join(', ') || 'No audio output'}`
+  } catch (error) {
+    if (error instanceof AudioRouteError) return error.message
+    throw error
+  }
 })
 const settingPaths = computed(() => {
   const item = props.draft
@@ -119,12 +159,28 @@ watch(() => captureSettings(props.draft), (next, previous) => {
 
 function connectionsCompatible(item: GridItem) {
   const items = props.layout.items.map((entry) => entry.id === item.id ? item : entry)
-  return props.layout.connections.every((connection) => {
+  return selectorRoutingCompatible(props.rootLayout ?? props.layout, { layout: props.layout, items }) &&
+    (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.itemId === item.id).every((port) =>
+    (port.direction === 'input' ? inputs(item) : outputs(item))
+      .some((parameter) => parameter.id === port.parameterId && parameter.kind === (port.kind === 'numeric' ? 'number' : port.kind))) &&
+    props.layout.connections.every((connection) => {
     const source = items.find((entry) => entry.id === connection.sourceId)
     const target = items.find((entry) => entry.id === connection.targetId)
     return !!source && !!target && isCompatible(source, connection.sourceParameter, target, connection.targetParameter) &&
       selectorConnectionsCompatible(items, props.layout.connections, connection)
   })
+}
+
+function audioRoutesCompatible(item: GridItem) {
+  try {
+    validateAudioRoutes(props.rootLayout ?? props.layout,
+      { layout: props.layout, items: props.layout.items.map((entry) => entry.id === item.id ? item : entry) })
+    return true
+  } catch (error) {
+    if (!(error instanceof AudioRouteError)) throw error
+    message.value = error.message
+    return false
+  }
 }
 
 function changeType(event: Event) {
@@ -135,11 +191,43 @@ function changeType(event: Event) {
   const replacement = createControl(item.id, item.x, item.y, type)
   if (!connectionsCompatible(replacement)) {
     target.value = item.type
-    message.value = 'Remove incompatible wires before changing the control type.'
+    message.value = 'Remove incompatible wires or exposed ports before changing the control type.'
+    return
+  }
+  if (!audioRoutesCompatible(replacement)) {
+    target.value = item.type
     return
   }
   message.value = ''
   emit('changeType', type)
+}
+
+function changeAudioRoute(field: 'audioFrom' | 'audioTo' | 'routeMode', event: Event) {
+  const item = props.draft
+  const target = event.target
+  if (item.type !== 'tone-element' || !(target instanceof HTMLSelectElement)) return
+  if (props.nested && (target.value === 'main-pre-fx' || target.value === 'main-post-fx' || target.value === 'main-out')) {
+    target.value = item.settings[field]
+    message.value = 'SubGrid audio must route through its enclosing control.'
+    return
+  }
+  const choices: Record<typeof field, readonly string[]> = {
+    audioFrom: ['auto', 'wires', 'bank-pre-fx', 'bank-post-fx', 'main-pre-fx', 'main-post-fx'],
+    audioTo: ['auto', 'wires', 'bank-out', 'main-out'],
+    routeMode: ['insert', 'parallel'],
+  }
+  if (!choices[field].includes(target.value)) {
+    target.value = item.settings[field]
+    return
+  }
+  const settings: ToneElementSettings = { ...item.settings, [field]: target.value }
+  const replacement: GridItem = { ...item, settings }
+  if (!audioRoutesCompatible(replacement)) {
+    target.value = item.settings[field]
+    return
+  }
+  Object.assign(item.settings, { [field]: target.value })
+  message.value = ''
 }
 
 function changeInstrumentType(type: InstrumentType) {
@@ -148,7 +236,7 @@ function changeInstrumentType(type: InstrumentType) {
   const params = InstrumentFactory.getDefaultParams(type)
   const replacement: GridItem = { ...item, settings: { ...item.settings, instrumentType: type, instrumentParams: params } }
   if (!connectionsCompatible(replacement)) {
-    message.value = 'Remove incompatible wires before changing the instrument type.'
+    message.value = 'Remove incompatible wires or exposed ports before changing the instrument type.'
     return
   }
   suppressRecording = true
@@ -158,6 +246,34 @@ function changeInstrumentType(type: InstrumentType) {
   } finally {
     suppressRecording = false
   }
+  message.value = ''
+}
+
+const toneElementLabels: Record<ToneElementKind, string> = {
+  oscillator: 'Oscillator', noise: 'Noise', filter: 'Filter', gain: 'Gain',
+  delay: 'Delay', reverb: 'Reverb', envelope: 'Envelope', mixer: 'Mixer',
+}
+
+function changeToneElementType(event: Event) {
+  const item = props.draft
+  const target = event.target
+  if (item.type !== 'tone-element' || !(target instanceof HTMLSelectElement)) return
+  const type = (Object.keys(toneElementLabels) as ToneElementKind[]).find((key) => key === target.value)
+  if (!type || type === item.settings.elementType) return
+  const replacement: GridItem = { ...item, settings: { ...item.settings, elementType: type } }
+  if (!connectionsCompatible(replacement)) {
+    target.value = item.settings.elementType
+    message.value = 'Remove incompatible wires or exposed ports before changing the element.'
+    return
+  }
+  if (!audioRoutesCompatible(replacement)) {
+    target.value = item.settings.elementType
+    return
+  }
+  if (item.label === toneElementLabels[item.settings.elementType]) item.label = toneElementLabels[type]
+  item.settings.elementType = type
+  if (type === 'noise' && item.settings.noteMode === 'always-on') item.settings.noteMode = 'gated'
+  lastLabel = item.label
   message.value = ''
 }
 
@@ -213,11 +329,17 @@ function saveItem() {
     return
   }
   if (!connectionsCompatible(item)) {
-    message.value = 'Remove incompatible wires before changing the control type.'
+    message.value = 'Remove incompatible wires or exposed ports before changing the control type.'
     return
   }
   message.value = ''
   emit('save', item)
+  return true
+}
+
+function openSubGrid() {
+  const id = props.draft.id
+  if (saveItem()) emit('openSubGrid', id)
 }
 
 function connectionLabel(connection: Connection) {
@@ -261,6 +383,131 @@ function canSetModulationAmount(connection: Connection) {
         <ArpeggiatorSettingsPanel v-else-if="liveItem.type === 'arpeggiator'" :draft="liveItem" />
         <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId"
           :playhead="loopPlayhead" @arm-change="emit('armChange', $event)" />
+        <template v-else-if="liveItem.type === 'sub-grid'">
+          <h3>SubGrid</h3>
+          <p>{{ liveItem.settings.layout.columns }} × {{ liveItem.settings.layout.rows }} nested grid · {{ liveItem.settings.layout.items.length }} controls</p>
+          <div class="settings-actions"><button type="button" @click="openSubGrid">Open SubGrid</button></div>
+          <label>Exposed ports
+            <input :value="liveItem.settings.exposedPorts.map((port) => port.name).join(', ')"
+              readonly aria-label="Exposed SubGrid ports">
+          </label>
+        </template>
+        <template v-else-if="liveItem.type === 'tone-element'">
+          <h3>Tone.js element</h3>
+          <label>Element
+            <select :value="draft.type === 'tone-element' ? draft.settings.elementType : liveItem.settings.elementType" @change="changeToneElementType">
+              <option value="oscillator">Oscillator</option>
+              <option value="noise">Noise</option>
+              <option value="filter">Filter</option>
+              <option value="gain">Gain</option>
+              <option value="delay">Delay</option>
+              <option value="reverb">Reverb</option>
+              <option value="envelope">Envelope</option>
+              <option value="mixer">Mixer</option>
+            </select>
+          </label>
+          <template v-if="liveItem.settings.elementType === 'oscillator'">
+            <label>Waveform
+              <select v-model="liveItem.settings.oscillatorType">
+                <option value="sine">Sine</option>
+                <option value="triangle">Triangle</option>
+                <option value="square">Square</option>
+                <option value="sawtooth">Sawtooth</option>
+              </select>
+            </label>
+            <NumericSetting v-model="liveItem.settings.frequency" label="Frequency (Hz)" :min="20" :max="20000" :step="1" />
+            <NumericSetting v-model="liveItem.settings.detune" label="Detune (cents)" :min="-1200" :max="1200" :step="1" />
+            <template v-if="liveItem.settings.noteMode !== 'always-on'">
+              <NumericSetting v-model="liveItem.settings.attack" label="Attack (s)" :min="0.001" :max="5" :step="0.001" />
+              <NumericSetting v-model="liveItem.settings.release" label="Release (s)" :min="0.01" :max="10" :step="0.01" />
+            </template>
+            <label>Mode
+              <select v-model="liveItem.settings.noteMode">
+                <option value="gated">Gated oscillator</option>
+                <option value="continuous">Continuous oscillator</option>
+                <option value="always-on">Always on</option>
+              </select>
+            </label>
+            <NumericSetting v-model="liveItem.settings.polyphony" label="Polyphony" :min="1" :max="16" integer />
+            <label>Note priority
+              <select v-model="liveItem.settings.notePriority">
+                <option value="last">Last note</option>
+                <option value="highest">Highest note</option>
+                <option value="lowest">Lowest note</option>
+              </select>
+            </label>
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'noise'">
+            <label>Noise type
+              <select v-model="liveItem.settings.noiseType">
+                <option value="white">White</option>
+                <option value="pink">Pink</option>
+                <option value="brown">Brown</option>
+              </select>
+            </label>
+            <NumericSetting v-model="liveItem.settings.gain" label="Gain" :min="0" :max="2" :step="0.01" />
+            <label>Mode
+              <select v-model="liveItem.settings.noteMode">
+                <option value="gated">Gated noise</option>
+                <option value="continuous">Continuous noise</option>
+              </select>
+            </label>
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'filter'">
+            <NumericSetting v-model="liveItem.settings.cutoff" label="Filter cutoff (Hz)" :min="20" :max="20000" :step="1" />
+            <NumericSetting v-model="liveItem.settings.gain" label="Resonance" :min="0" :max="2" :step="0.01" />
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'gain'">
+            <NumericSetting v-model="liveItem.settings.gain" label="Gain" :min="0" :max="2" :step="0.01" />
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'delay'">
+            <NumericSetting v-model="liveItem.settings.delayTime" label="Delay time (s)" :min="0" :max="5" :step="0.01" />
+            <NumericSetting v-model="liveItem.settings.feedback" label="Feedback" :min="0" :max="1" :step="0.01" />
+            <NumericSetting v-model="liveItem.settings.gain" label="Wet level" :min="0" :max="1" :step="0.01" />
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'reverb'">
+            <NumericSetting v-model="liveItem.settings.decay" label="Decay (s)" :min="0.01" :max="10" :step="0.01" />
+            <NumericSetting v-model="liveItem.settings.gain" label="Wet level" :min="0" :max="1" :step="0.01" />
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'envelope'">
+            <label class="inline-checkbox"><input :checked="liveItem.settings.showVisualizer !== false" type="checkbox"
+              @change="liveItem.settings.showVisualizer = ($event.target as HTMLInputElement).checked" /> Show envelope visualizer</label>
+            <label class="inline-checkbox"><input :checked="liveItem.settings.showKnobs !== false" type="checkbox"
+              @change="liveItem.settings.showKnobs = ($event.target as HTMLInputElement).checked" /> Show envelope knobs</label>
+            <ADSREnvelopeEditor title="Envelope" :envelope="liveItem.settings" :color="liveItem.settings.color" :attack-max="5" :decay-min="0.01" :decay-max="10" />
+          </template>
+          <template v-else-if="liveItem.settings.elementType === 'mixer'">
+            <NumericSetting v-model="liveItem.settings.gain" label="Master level" :min="0" :max="2" :step="0.01" />
+          </template>
+          <label v-if="liveItem.settings.elementType !== 'oscillator' && liveItem.settings.elementType !== 'noise'">Audio source
+            <select :value="liveItem.settings.audioFrom" @change="changeAudioRoute('audioFrom', $event)">
+              <option value="auto">Automatic (wire or bank)</option>
+              <option value="wires">Wires</option>
+              <option value="bank-pre-fx">Bank pre-FX</option>
+              <option value="bank-post-fx">Bank post-FX</option>
+              <option v-if="!nested" value="main-pre-fx">Main pre-FX</option>
+              <option v-if="!nested" value="main-post-fx">Main post-FX</option>
+            </select>
+          </label>
+          <label>Audio destination
+            <select :value="liveItem.settings.audioTo" @change="changeAudioRoute('audioTo', $event)">
+              <option value="auto">Automatic (wire or bank)</option>
+              <option value="wires">Wires</option>
+              <option value="bank-out">Bank output</option>
+              <option v-if="!nested" value="main-out">Main output</option>
+            </select>
+          </label>
+          <label v-if="liveItem.settings.elementType !== 'oscillator' && liveItem.settings.elementType !== 'noise'">Route mode
+            <select :value="liveItem.settings.routeMode" @change="changeAudioRoute('routeMode', $event)">
+              <option value="insert">Insert</option>
+              <option value="parallel">Parallel send</option>
+            </select>
+          </label>
+          <p>Automatic routing uses connected audio wires, or the enclosing grid when unwired. Unwired inserts run in creation order.</p>
+          <p>Effective route: {{ effectiveAudioRoute }}</p>
+          <p v-if="liveItem.settings.elementType === 'oscillator'">Frequency modulation is added to played pitches; note priority determines which voices are used.</p>
+          <p v-if="liveItem.settings.elementType === 'envelope'">Wire notes to open the envelope.</p>
+        </template>
       </section>
 
       <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">

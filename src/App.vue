@@ -21,6 +21,7 @@ import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, ty
 import { version } from '../package.json'
 import { isBeta } from './appChannel'
 import { registerSW } from 'virtual:pwa-register'
+import { copyBankAsSubGrid, type SubGridClipboard } from './subGridClipboard'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -264,6 +265,8 @@ const projectInput = ref<HTMLInputElement | null>(null)
 const bankInput = ref<HTMLInputElement | null>(null)
 const bankSettingsId = ref<string | null>(null)
 const bankSettings = computed(() => banks.value.find((bank) => bank.id === bankSettingsId.value) ?? null)
+const subGridClipboard = ref<SubGridClipboard | null>(null)
+const bankCopyMessage = ref('')
 const removeBankOpen = ref(false)
 const importedBanks = ref<Bank[] | null>(null)
 const workspaceRevision = ref(0)
@@ -307,6 +310,21 @@ function editBank(bank?: Bank) {
     selectedBankId.value = bank.id
   }
   bankSettingsId.value = bank.id
+  bankCopyMessage.value = ''
+}
+
+function copyBank() {
+  if (!bankSettings.value) return
+  try {
+    subGridClipboard.value = copyBankAsSubGrid(bankSettings.value)
+    const warnings = [
+      subGridClipboard.value.adjustedAudioRoutes ? 'Main audio routes were changed to the enclosing grid.' : '',
+      subGridClipboard.value.externalReferences ? 'External bank references still point to their original banks.' : '',
+    ].filter(Boolean).join(' ')
+    bankCopyMessage.value = `Copied. Choose Paste SubGrid from Add control. ${warnings}`
+  } catch (error) {
+    bankCopyMessage.value = `Could not copy bank as SubGrid: ${error instanceof Error ? error.message : String(error)}`
+  }
 }
 
 function updateBankText(event: Event, field: 'title' | 'icon', finish = false) {
@@ -396,6 +414,7 @@ async function loadProject(event: Event) {
     gridSettingsOpen.value = false
     bankSettingsId.value = null
     banks.value = project.banks
+    subGridClipboard.value = null
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
     infoText.value = project.infoText ?? ''
@@ -479,6 +498,7 @@ async function newProject() {
     gridSettingsOpen.value = false
     bankSettingsId.value = null
     banks.value = project.banks
+    subGridClipboard.value = null
     selectedBankId.value = project.selectedBankId
     bpm.value = project.bpm
     infoText.value = project.infoText ?? ''
@@ -678,6 +698,7 @@ onUnmounted(() => {
         :start-on-input="startFromInput"
         :transport-start-immediate="true"
         :triggered-by-input="triggeredByInput"
+        :sub-grid-clipboard="subGridClipboard"
         @close-settings="gridSettingsOpen = false"
       />
     </section>
@@ -690,6 +711,8 @@ onUnmounted(() => {
         <label>Color <input v-model="bankSettings.color" type="color"></label>
         <NumericSetting v-model="bankSettings.layout.columns" label="Columns" :min="Math.max(1, ...bankSettings.layout.items.map((item) => item.x + item.width))" :max="MAX_GRID_COLUMNS" integer />
         <NumericSetting v-model="bankSettings.layout.rows" label="Rows" :min="Math.max(1, ...bankSettings.layout.items.map((item) => item.y + item.height))" :max="MAX_GRID_ROWS" integer />
+        <div class="settings-actions"><button type="button" @click="copyBank">Copy as SubGrid</button></div>
+        <p v-if="bankCopyMessage" role="status">{{ bankCopyMessage }}</p>
       </form>
     </SettingsDialog>
     <SettingsDialog v-if="removeBankOpen" title="Remove bank" @close="removeBankOpen = false">

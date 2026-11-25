@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { SamplePlayer } from './SamplePlayer'
+import type { InputNode } from 'tone'
 import { defaultEnvelope } from './defaultEnvelope'
 import type { SampleLoopParams } from './types'
 
@@ -9,8 +10,8 @@ export class SampleLoop extends SamplePlayer {
   readonly type = 'sample-loop' as const
   readonly params: SampleLoopParams
 
-  constructor(params: Partial<SampleLoopParams>) {
-    super()
+  constructor(params: Partial<SampleLoopParams>, output?: InputNode) {
+    super(output)
     this.params = {
       sample: params.sample ?? '',
       sampleName: params.sampleName ?? '',

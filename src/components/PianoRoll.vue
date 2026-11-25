@@ -117,7 +117,7 @@ function pointerExpression(event: PointerEvent, key: HTMLElement) {
   const vertical = props.settings.orientation === 'vertical'
   const axis = props.rotated ? (vertical ? 'y' : 'x') : (vertical ? 'x' : 'y')
   return expression.updatePointer(event.pointerId, event, key.getBoundingClientRect(), axis,
-    !!props.rotated && !vertical, props.settings.pressureMode !== 'position')
+    !!props.rotated && !vertical, props.settings.pressureMode !== 'position', 0.5, 0.25)
 }
 function down(event: PointerEvent, note: number) {
   if (props.settings.style === 'whites-blacks' && !isScaleNote(note)) return

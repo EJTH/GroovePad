@@ -498,6 +498,24 @@ button:focus-visible {
   flex-direction: column;
 }
 
+.subgrid-navigation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+}
+.subgrid-navigation strong { flex: 1; }
+.subgrid-navigation button {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+}
+.subgrid-navigation button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
 .settings-dialog {
   width: min(420px, calc(100% - 24px));
   max-height: calc(100% - 24px);
@@ -1041,4 +1059,48 @@ button:focus-visible {
   .bank-label {
     display: none;
   }
+}
+
+.sub-grid-control,
+.tone-element-control {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: #2d3028;
+  color: #ecece8;
+}
+
+.sub-grid-control small,
+.tone-element-control small {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.subgrid-open {
+  flex: 0 0 auto;
+  max-width: 100%;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #232720;
+  color: inherit;
+  cursor: pointer;
+}
+.subgrid-surface {
+  display: grid;
+  width: min(100%, calc((100cqh - 36px) * var(--surface-ratio)));
+  max-height: calc(100% - 36px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tone-element-control {
+  background: color-mix(in srgb, var(--tone-color) 18%, #222320);
 }

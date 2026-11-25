@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import vm from 'node:vm'
+import ts from 'typescript'
+import * as vue from 'vue'
 import { createSSRApp, h } from 'vue'
+import { compileScript, parse } from '@vue/compiler-sfc'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
 
@@ -421,4 +426,103 @@ test('piano roll renders the added scale intervals', async () => {
   } finally {
     await server.close()
   }
+})
+
+test('envelope widget visibility and colors persist and render correctly', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { default: EnvelopeEditor } = await server.ssrLoadModule('/src/components/ADSREnvelopeEditor.vue')
+    const { default: Visualizer } = await server.ssrLoadModule('/src/components/ADSRVisualizer.vue')
+    const { default: Dialog } = await server.ssrLoadModule('/src/components/GridControlSettingsDialog.vue')
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { migrateSavedProject, isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const envelope = createControl('envelope', 0, 0, 'tone-element')
+    envelope.settings.elementType = 'envelope'
+    envelope.label = 'Envelope'
+    delete envelope.settings.showVisualizer
+    delete envelope.settings.showKnobs
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff',
+      layout: { columns: 1, rows: 1, items: [envelope], connections: [] },
+    }] }
+    migrateSavedProject(project)
+    assert.equal(envelope.settings.showVisualizer, true)
+    assert.equal(envelope.settings.showKnobs, true)
+
+    for (const [showVisualizer, showKnobs] of [[true, true], [true, false], [false, true], [false, false]]) {
+      envelope.settings.showVisualizer = showVisualizer
+      envelope.settings.showKnobs = showKnobs
+      const html = await renderToString(createSSRApp({ render: () => h(GrooveGrid, {
+        layout: project.banks[0].layout, editing: false, wiring: false, settingsOpen: false, bpm: 120,
+      }) }))
+      assert.equal(html.includes('adsr-visualizer'), showVisualizer)
+      assert.equal(html.includes('envelope-compact-controls'), showKnobs)
+      assert.equal(html.includes('Open Envelope control settings'), !showVisualizer && !showKnobs)
+    }
+
+    envelope.settings.showVisualizer = false
+    envelope.settings.showKnobs = false
+    assert.equal(isSavedProject(project), true)
+    migrateSavedProject(project)
+    assert.equal(envelope.settings.showVisualizer, false)
+    assert.equal(envelope.settings.showKnobs, false)
+    envelope.settings.showKnobs = 'invalid'
+    assert.equal(isSavedProject(project), false)
+    envelope.settings.showKnobs = false
+    const editorHtml = await renderToString(createSSRApp({ render: () => h(EnvelopeEditor, {
+      title: envelope.label, envelope: envelope.settings, compact: true, color: '#ff1234',
+      showVisualizer: false, showKnobs: false,
+    }) }))
+    assert.match(editorHtml, /<button[^>]*aria-label="Open Envelope control settings"/)
+    assert.doesNotMatch(editorHtml, /adsr-visualizer|envelope-compact-controls/)
+
+    const visualizerHtml = await renderToString(createSSRApp({ render: () => h(Visualizer, {
+      envelope: envelope.settings, color: '#ff1234',
+    }) }))
+    assert.match(visualizerHtml, /--adsr-color:#ff1234/)
+    assert.match(visualizerHtml, /stop-color:var\(--adsr-color\)/)
+
+    const dialogHtml = await renderToString(createSSRApp({ render: () => h(Dialog, {
+      draft: envelope, selectedId: envelope.id, newControl: false,
+      layout: project.banks[0].layout, bpm: 120, message: '',
+    }) }))
+    assert.match(dialogHtml, /Show envelope visualizer/)
+    assert.match(dialogHtml, /Show envelope knobs/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('empty envelope widget emits a request to open settings when activated', async () => {
+  const source = await readFile(new URL('../src/components/ADSREnvelopeEditor.vue', import.meta.url), 'utf8')
+  const script = compileScript(parse(source).descriptor, { id: 'envelope', inlineTemplate: true }).content
+  const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+  const componentModule = { exports: {} }
+  vm.runInNewContext(code, { module: componentModule, exports: componentModule.exports,
+    require: (path) => path === 'vue' ? vue : { default: {} } })
+  const node = (type) => ({ type, children: [], props: {} })
+  const renderer = vue.createRenderer({
+    createElement: node,
+    createText: (text) => ({ type: 'text', text }),
+    createComment: (text) => ({ type: 'comment', text }),
+    setText: (el, text) => { el.text = text },
+    setElementText: (el, text) => { el.text = text },
+    patchProp: (el, key, _old, value) => { el.props[key] = value },
+    insert: (el, parent) => { el.parent = parent; parent.children.push(el) },
+    remove: () => {},
+    parentNode: (el) => el.parent,
+    nextSibling: () => null,
+  })
+  let opened = 0
+  const root = node('root')
+  const app = renderer.createApp(componentModule.exports.default, {
+    title: 'Envelope', envelope: { attack: 0.1, decay: 0.2, sustain: 0.5, release: 0.3 },
+    compact: true, showVisualizer: false, showKnobs: false, onOpenSettings: () => opened++,
+  })
+  app.mount(root)
+  assert.equal(root.children[0].type, 'button')
+  root.children[0].props.onClick()
+  assert.equal(opened, 1)
+  app.unmount()
 })

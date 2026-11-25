@@ -22,7 +22,7 @@ class Element {
 async function setupComponent(name, props, dependencies, environment = {}, onEmit = () => {}) {
   const cleanup = []
   const vueMock = { ...vue, provide: () => {}, inject: name === 'NumericSetting' ? () => undefined : vue.inject,
-    onMounted: () => {}, onBeforeUnmount: (callback) => cleanup.push(callback), onUnmounted: (callback) => cleanup.push(callback) }
+    onMounted: environment.onMounted ?? (() => {}), onBeforeMount: () => {}, onBeforeUnmount: (callback) => cleanup.push(callback), onUnmounted: (callback) => cleanup.push(callback) }
   if (name === 'GrooveGrid' && !dependencies['../sequencedLoop']) {
     const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
     try {
@@ -54,6 +54,8 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
       ['../grid', '/src/grid.ts'],
       ['../modulation', '/src/modulation.ts'],
       ['../parameters', '/src/parameters.ts'],
+      ['../audio/audioRoutes', '/src/audio/audioRoutes.ts'],
+      ['../audio/toneOscillator', '/src/audio/toneOscillator.ts'],
       ['../music', '/src/music.ts'],
       ['../settingsAutomation', '/src/settingsAutomation.ts'],
     ]
@@ -84,6 +86,10 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
     dependencies['./useGridInteraction'] = interactionModule.exports
   }
   if (name === 'App' && !dependencies['./composables/useTransport']) {
+    if (!dependencies['../grid']) {
+      const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+      try { dependencies['../grid'] = await server.ssrLoadModule('/src/grid.ts') } finally { await server.close() }
+    }
     const source = await readFile(new URL('../src/composables/useTransport.ts', import.meta.url), 'utf8')
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
     const transportModule = { exports: {} }
@@ -106,7 +112,7 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
   const emitted = []
   const scope = vue.effectScope()
   const api = scope.run(() => module.exports.default.setup(props, {
-    emit: (event, output) => { emitted.push(output); onEmit(event, output) }, expose: () => {},
+    emit: (event, ...args) => { emitted.push(args[0]); onEmit(event, ...args) }, expose: () => {},
   }))
   return { api, emitted, dispose: () => { cleanup.forEach((callback) => callback()); scope.stop() } }
 }
@@ -128,11 +134,11 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
     const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#ffffff' } }, dependencies)
     pad.api.press(pointer(1, first, 'mouse', 0.5, 0, 25))
     assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
-      [['velocity', 32], ['pressure', 32], ['gate', 1]])
+      [['velocity', 40], ['pressure', 40], ['gate', 1]])
     pad.api.move(pointer(1, first, 'mouse', 0.5, 0, 75))
     pad.api.release(pointer(1, first, 'mouse', 0, 0, 75))
     assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
-      [['velocity', 32], ['pressure', 32], ['gate', 1], ['pressure', 95], ['pressure', 0], ['gate', 0]])
+      [['velocity', 40], ['pressure', 40], ['gate', 1], ['pressure', 119], ['pressure', 0], ['gate', 0]])
     assert.equal(pad.emitted.at(-2).active, false)
     pad.dispose()
 
@@ -178,6 +184,38 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
   }
 })
 
+test('pad position reaches full signal in the bottom fifth without changing pressure-sensitive input', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const expression = await server.ssrLoadModule('/src/expression.ts')
+    const target = new Element(0)
+    for (const rotated of [false, true]) {
+      const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#fff' }, rotated },
+        { '../expression': expression })
+      const at = (id, type, pressure, position) => pointer(id, target, type, pressure,
+        rotated ? 100 - position : 50, rotated ? 50 : position)
+      for (const [position, value] of [[0, 0], [40, 64], [79, 125], [80, 127], [95, 127]]) {
+        pad.api.press(at(1, 'touch', 0.5, position))
+        assert.equal(pad.emitted.at(-3).value, value)
+        assert.equal(pad.emitted.at(-2).value, value)
+        pad.api.release(at(1, 'touch', 0, position))
+      }
+      pad.api.press(at(2, 'touch', 0.5, 40))
+      pad.api.move(at(2, 'touch', 0.5, 90))
+      assert.equal(pad.emitted.at(-1).value, 127)
+      pad.api.release(at(2, 'touch', 0, 90))
+      pad.api.press(at(3, 'pen', 0.3, 95))
+      assert.equal(pad.emitted.at(-3).value, 38)
+      pad.api.move(at(3, 'pen', 0.7, 95))
+      assert.equal(pad.emitted.at(-1).value, 89)
+      pad.api.release(at(3, 'pen', 0, 95))
+      pad.dispose()
+    }
+  } finally {
+    await server.close()
+  }
+})
+
 test('swiping between pads transfers the pointer, expression and gate without disturbing other contacts', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -211,7 +249,7 @@ test('swiping between pads transfers the pointer, expression and gate without di
     assert.equal(b.captured, 1)
     assert.deepEqual(outputs.filter((entry) => entry[1] === 'gate'),
       [['first', 'gate', 1], ['second', 'gate', 1], ['second', 'gate', 0], ['first', 'gate', 0], ['second', 'gate', 1]])
-    assert.deepEqual(second.emitted.filter((entry) => entry.parameter === 'velocity').map((entry) => entry.value), [76, 89])
+    assert.deepEqual(second.emitted.filter((entry) => entry.parameter === 'velocity').map((entry) => entry.value), [95, 111])
     first.api.release(pointer(1, a, 'touch', 0, 0, 70)) // lost capture on the old pad
     underPointer = null
     second.api.move(pointer(1, b, 'touch', 0.5, 0, 80))
@@ -329,7 +367,7 @@ test('rotated controls interpret pointer coordinates in their local orientation'
     const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#ffffff' }, rotated: true },
       { '../expression': expression })
     pad.api.press(pointer(1, target, 'mouse', 0.5, 75, 0))
-    assert.equal(pad.emitted.find((event) => event.parameter === 'velocity').value, 32)
+    assert.equal(pad.emitted.find((event) => event.parameter === 'velocity').value, 40)
     pad.dispose()
     const piano = await setupComponent('PianoRoll', { label: 'Piano', rotated: true, settings: {
       scale: 'chromatic', rootNote: 'C', octaveTranspose: 0, octaves: 1, numRows: 1, style: 'glide-strip',
@@ -763,6 +801,238 @@ test('wired chords through a selector trigger and release independent hit voices
   } finally {
     await server.close()
   }
+})
+
+test('piano notes and knob modulation drive the gated oscillator with last-note priority', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const dependencies = {}
+    for (const name of ['grid', 'parameters', 'modulation', 'music']) {
+      dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}.ts`)
+    }
+    const calls = []
+    class Synth {
+      constructor() {
+        this.oscillator = { type: 'sine' }
+        this.envelope = {}
+        this.detune = { rampTo: (value) => calls.push(['detune', value]) }
+      }
+      connect() { calls.push(['connect']); return this }
+      triggerAttack(frequency, _time, velocity) { calls.push(['attack', frequency, velocity]) }
+      setNote(frequency) { calls.push(['pitch', frequency]) }
+      triggerRelease() { calls.push(['release']) }
+      dispose() { calls.push(['dispose']) }
+    }
+    class Gain {
+      constructor() { this.gain = { rampTo: (value) => calls.push(['velocity', value]) } }
+      connect() { return this }
+      toDestination() { calls.push(['destination']); return this }
+      dispose() { calls.push(['gain-dispose']) }
+    }
+    const tone = { Synth, Gain, start: async () => {} }
+    const source = await readFile(new URL('../src/audio/toneOscillator.ts', import.meta.url), 'utf8')
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const oscillatorModule = { exports: {} }
+    vm.runInNewContext(code, { module: oscillatorModule, exports: oscillatorModule.exports, require: () => tone })
+    const { createControl } = dependencies['../grid']
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const knob = createControl('knob', 1, 0, 'knob')
+    const oscillator = createControl('oscillator', 2, 0, 'tone-element')
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [piano, knob, oscillator], connections: [
+      { id: 'notes', sourceId: 'piano', sourceParameter: 'note', targetId: 'oscillator', targetParameter: 'note' },
+      { id: 'frequency', sourceId: 'knob', sourceParameter: 'value', targetId: 'oscillator', targetParameter: 'frequency' },
+    ] })
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120 },
+      { ...dependencies, tone }, { setTimeout, clearTimeout })
+    const props = vue.reactive({ label: 'Oscillator', settings: vue.computed(() =>
+      grid.api.displayItems.value.find((item) => item.id === oscillator.id).settings),
+    baseFrequency: oscillator.settings.frequency, notes: vue.computed(() => grid.api.receivedToneNotes(oscillator.id)) })
+    const control = await setupComponent('ToneOscillator', props, { tone, '../audio/toneOscillator': oscillatorModule.exports })
+    const send = (note, on, bend) => grid.api.routeNote('piano', { parameter: 'note', value: note, on, velocity: 100, bend })
+    send(72, true)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(calls.find((call) => call[0] === 'attack'), ['attack', 440 * 2 ** (3 / 12) + 64, undefined])
+    assert.equal(calls.find((call) => call[0] === 'velocity')[1], 100 / 127)
+    send(60, true)
+    assert.ok(Math.abs(calls.filter((call) => call[0] === 'pitch').at(-1)[1] - (440 * 2 ** (-9 / 12) + 64)) < 1e-8)
+    send(60, undefined, 1)
+    assert.ok(Math.abs(calls.filter((call) => call[0] === 'pitch').at(-1)[1] - (440 * 2 ** (-8 / 12) + 64)) < 1e-8)
+    layout.items[1].settings.value = 20
+    assert.ok(Math.abs(calls.filter((call) => call[0] === 'pitch').at(-1)[1] - (440 * 2 ** (-8 / 12) + 20)) < 1e-8)
+    send(60, false)
+    assert.ok(Math.abs(calls.filter((call) => call[0] === 'pitch').at(-1)[1] - (440 * 2 ** (3 / 12) + 20)) < 1e-8)
+    send(72, false)
+    assert.equal(calls.filter((call) => call[0] === 'release').length, 1)
+    control.dispose()
+    grid.dispose()
+    assert.equal(calls.at(-1)[0], 'gain-dispose')
+  } finally {
+    await server.close()
+  }
+})
+
+test('oscillator cancels pending startup when a note is released', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const settings = createControl('oscillator', 0, 0, 'tone-element').settings
+    let resume
+    const startup = new Promise((resolve) => { resume = resolve })
+    let created = 0
+    class Oscillator {
+      constructor() { created++ }
+      update() {}
+      dispose() {}
+    }
+    const props = vue.reactive({ label: 'Oscillator', settings, baseFrequency: 440, notes: [] })
+    const control = await setupComponent('ToneOscillator', props,
+      { tone: { start: () => startup }, '../audio/toneOscillator': { ToneOscillator: Oscillator } })
+    props.notes.push({ note: 60, count: 1, velocity: 100 })
+    props.notes.splice(0)
+    resume()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(created, 0)
+    control.dispose()
+  } finally {
+    await server.close()
+  }
+})
+
+test('always-on oscillator starts without notes and stops when its mode changes', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const settings = createControl('oscillator', 0, 0, 'tone-element').settings
+    settings.noteMode = 'always-on'
+    const updates = []
+    let resume
+    const startup = new Promise((resolve) => { resume = resolve })
+    class Oscillator {
+      update(_settings, _frequency, notes, continuous) { updates.push([notes.length, continuous]) }
+      dispose() { updates.push(['dispose']) }
+    }
+    const props = vue.reactive({ label: 'Oscillator', settings, baseFrequency: 440, notes: [] })
+    const control = await setupComponent('ToneOscillator', props,
+      { tone: { start: () => startup }, '../audio/toneOscillator': { ToneOscillator: Oscillator } })
+    try {
+      assert.equal(control.api.waitingForAudio.value, true)
+      resume()
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.deepEqual(updates.at(-1), [0, true])
+      props.notes.push({ note: 60, count: 1, velocity: 100 })
+      assert.deepEqual(updates.at(-1), [1, true])
+      props.notes.splice(0)
+      assert.deepEqual(updates.at(-1), [0, true])
+      props.settings.noteMode = 'gated'
+      assert.deepEqual(updates.at(-1), [0, false])
+      props.settings.noteMode = 'continuous'
+      control.api.continuous.value = true
+      assert.deepEqual(updates.at(-1), [0, true])
+    } finally { control.dispose() }
+
+    let finish
+    let created = 0
+    const pending = new Promise((resolve) => { finish = resolve })
+    class PendingOscillator { constructor() { created++ } update() {} dispose() {} }
+    const pendingSettings = createControl('pending', 0, 0, 'tone-element').settings
+    pendingSettings.noteMode = 'always-on'
+    const pendingProps = vue.reactive({
+      label: 'Pending', settings: pendingSettings, baseFrequency: 440, notes: [],
+    })
+    const pendingControl = await setupComponent('ToneOscillator', pendingProps,
+      { tone: { start: () => pending }, '../audio/toneOscillator': { ToneOscillator: PendingOscillator } })
+    pendingProps.settings.noteMode = 'gated'
+    finish()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(created, 0)
+    pendingControl.dispose()
+  } finally { await server.close() }
+})
+
+test('oscillator voices release independently and always-on voices latch and reuse pitches', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const source = await readFile(new URL('../src/audio/toneOscillator.ts', import.meta.url), 'utf8')
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const synths = []
+    const oscillators = []
+    const signal = () => ({ value: undefined, rampTo(value) { this.value = value } })
+    class Gain {
+      constructor() { this.gain = signal() }
+      connect() { return this }
+      toDestination() { return this }
+      dispose() {}
+    }
+    class Synth {
+      constructor() {
+        this.oscillator = {}; this.envelope = {}; this.detune = signal(); this.calls = []
+        synths.push(this)
+      }
+      connect() { return this }
+      triggerAttack(value) { this.calls.push(['attack', value]) }
+      setNote(value) { this.calls.push(['pitch', value]) }
+      triggerRelease() { this.calls.push(['release']) }
+      dispose() { this.calls.push(['dispose']) }
+    }
+    class Oscillator {
+      constructor() { this.frequency = signal(); this.detune = signal(); this.started = 0; this.disposed = false; oscillators.push(this) }
+      connect() { return this }
+      start() { this.started++; return this }
+      dispose() { this.disposed = true }
+    }
+    const module = { exports: {} }
+    vm.runInNewContext(code, { module, exports: module.exports, require: () => ({ Gain, Synth, Oscillator }) })
+    const settings = createControl('oscillator', 0, 0, 'tone-element').settings
+    settings.polyphony = 2
+    const oscillator = new module.exports.ToneOscillator(settings)
+    const note = (pitch, bend = 0) => ({ note: pitch, count: 1, velocity: 127, bend })
+    try {
+      oscillator.update(settings, 440, [note(60), note(64)], false)
+      assert.equal(synths.length, 2)
+      assert.ok(synths.every((voice) => voice.calls.some(([event]) => event === 'attack')))
+      oscillator.update(settings, 440, [note(64, 1)], false)
+      assert.equal(synths.flatMap((voice) => voice.calls).filter(([event]) => event === 'release').length, 1)
+      assert.ok(synths.some((voice) => voice.calls.some(([event, frequency]) => event === 'pitch' &&
+        Math.abs(frequency - 440 * 2 ** ((65 - 69) / 12)) < 1e-8)))
+      oscillator.update(settings, 440, [], false)
+      assert.equal(synths.flatMap((voice) => voice.calls).filter(([event]) => event === 'release').length, 2)
+
+      settings.noteMode = 'always-on'
+      oscillator.update(settings, 440, [], true)
+      assert.equal(oscillators.length, 1)
+      assert.equal(oscillators[0].frequency.value, 440)
+      oscillator.update(settings, 440, [note(60), note(64)], true)
+      assert.equal(oscillators.length, 2)
+      const pitch60 = 440 * 2 ** ((60 - 69) / 12)
+      const pitch64 = 440 * 2 ** ((64 - 69) / 12)
+      const voice60 = oscillators.find((voice) => Math.abs(voice.frequency.value - pitch60) < 1e-8)
+      const voice64 = oscillators.find((voice) => Math.abs(voice.frequency.value - pitch64) < 1e-8)
+      assert.ok(voice60 && voice64)
+      oscillator.update(settings, 440, [], true)
+      assert.equal(voice60.frequency.value, pitch60)
+      assert.equal(voice64.frequency.value, pitch64)
+      oscillator.update(settings, 440, [note(67)], true)
+      assert.ok(Math.abs(voice60.frequency.value - 440 * 2 ** ((67 - 69) / 12)) < 1e-8)
+      assert.equal(voice64.frequency.value, pitch64)
+      assert.equal(oscillators.length, 2)
+      settings.polyphony = 1
+      oscillator.update(settings, 440, [note(67)], true)
+      assert.equal(oscillators.filter((voice) => voice.disposed).length, 1)
+    } finally { oscillator.dispose() }
+    settings.polyphony = 4
+    const previousCount = oscillators.length
+    const reusable = new module.exports.ToneOscillator(settings)
+    try {
+      reusable.update(settings, 440, [], true)
+      reusable.update(settings, 440, [note(60)], true)
+      reusable.update(settings, 440, [], true)
+      reusable.update(settings, 440, [note(64)], true)
+      assert.equal(oscillators.length, previousCount + 1)
+      reusable.update(settings, 440, [note(64), note(67)], true)
+      assert.equal(oscillators.length, previousCount + 2)
+    } finally { reusable.dispose() }
+  } finally { await server.close() }
 })
 
 test('toggle mode mutes incoming notes without changing trigger mode behavior', async () => {
@@ -1337,6 +1607,550 @@ test('copying an armed sequencer leaves the copy disarmed', async () => {
       assert.equal(layout.items.length, 2)
       assert.equal(layout.items[0].settings.armed, true)
       assert.equal(layout.items[1].settings.armed, false)
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('SubGrid configuration toggles a control on its surface', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const subgrid = createControl('sub', 0, 0, 'sub-grid')
+    const knob = createControl('knob', 0, 0, 'knob')
+    subgrid.settings.layout.items.push(knob)
+    const config = await setupComponent('SubGridConfigDialog', { item: knob, settings: vue.reactive(subgrid.settings) }, {})
+    try {
+      assert.equal(config.api.surfaced.value, false)
+      config.api.surfaced.value = true
+      assert.deepEqual(subgrid.settings.surfaceItemIds, ['knob'])
+      config.api.surfaced.value = false
+      assert.deepEqual(subgrid.settings.surfaceItemIds, [])
+    } finally { config.dispose() }
+  } finally { await server.close() }
+})
+
+test('SubGrid configuration names note ports and protects those used by a parent', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
+    const sub = createControl('sub', 0, 0, 'sub-grid')
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    sub.settings.layout.items.push(piano)
+    class Input { constructor(checked, value = '') { this.checked = checked; this.value = value } }
+    const props = vue.reactive({ item: piano, settings: sub.settings, protectedPorts: [] })
+    const config = await setupComponent('SubGridConfigDialog', props, { '../parameters': parameters }, { HTMLInputElement: Input })
+    try {
+      const note = parameters.outputs(piano).find((port) => port.id === 'note')
+      config.api.togglePort('output', note, { target: new Input(true) })
+      const port = props.settings.exposedPorts[0]
+      assert.equal(port.itemId, 'piano')
+      assert.equal(port.parameterId, 'note')
+      config.api.rename(port, { target: new Input(false, '  Melody  ') })
+      assert.equal(port.name, 'Melody')
+      props.protectedPorts.push(port.id)
+      const attempt = new Input(false)
+      config.api.togglePort('output', note, { target: attempt })
+      assert.equal(attempt.checked, true)
+      assert.equal(props.settings.exposedPorts.length, 1)
+      props.protectedPorts.pop()
+      config.api.togglePort('output', note, { target: new Input(false) })
+      assert.equal(props.settings.exposedPorts.length, 0)
+    } finally { config.dispose() }
+  } finally { await server.close() }
+})
+
+test('exposed note ports route through nested grids and release when a parent wire is removed', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { createControl } = gridModule
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const outer = createControl('outer', 1, 0, 'sub-grid')
+    const parentTone = createControl('parent-tone', 2, 0, 'tone-element')
+    const inner = createControl('inner', 0, 0, 'sub-grid')
+    const nestedPiano = createControl('nested-piano', 1, 0, 'piano-roll')
+    const tone = createControl('tone', 0, 0, 'tone-element')
+    inner.settings.layout.items.push(tone)
+    inner.settings.exposedPorts.push({ id: 'inner-in', name: 'Inner input', kind: 'note', direction: 'input', itemId: 'tone', parameterId: 'note' })
+    outer.settings.layout.items.push(inner, nestedPiano)
+    outer.settings.exposedPorts.push(
+      { id: 'outer-in', name: 'Input', kind: 'note', direction: 'input', itemId: 'inner', parameterId: 'inner-in' },
+      { id: 'outer-out', name: 'Output', kind: 'note', direction: 'output', itemId: 'nested-piano', parameterId: 'note' },
+    )
+    const wire = { id: 'in', sourceId: 'piano', sourceParameter: 'note', targetId: 'outer', targetParameter: 'outer-in' }
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [piano, outer, parentTone], connections: [
+      wire, { id: 'out', sourceId: 'outer', sourceParameter: 'outer-out', targetId: 'parent-tone', targetParameter: 'note' },
+    ] })
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const outerProps = vue.reactive({ ...common, layout: layout.items[1].settings.layout,
+      ownerSettings: layout.items[1].settings, boundaryNotes: [] })
+    const nested = await setupComponent('GrooveGrid', outerProps, { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, output) => { if (event === 'boundaryOutput') parent.api.routeNote('outer', { ...output, parameter: port }) })
+    const innerProps = vue.reactive({ ...common, layout: outerProps.layout.items[0].settings.layout,
+      ownerSettings: outerProps.layout.items[0].settings, boundaryNotes: [] })
+    const deepest = await setupComponent('GrooveGrid', innerProps, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const stopOuter = vue.watchEffect(() => { outerProps.boundaryNotes = parent.api.boundaryNotesForSubGrid('outer') }, { flush: 'sync' })
+    const stopInner = vue.watchEffect(() => { innerProps.boundaryNotes = nested.api.boundaryNotesForSubGrid('inner') }, { flush: 'sync' })
+    try {
+      parent.api.routeNote('piano', { parameter: 'note', value: 60, on: true, velocity: 73, bend: 0.4 })
+      parent.api.routeNote('piano', { parameter: 'note', value: 60, on: true, velocity: 81, bend: 0.5 })
+      assert.equal(parent.api.boundaryNotesForSubGrid('outer').length, 1, 'parent boundary')
+      assert.equal(outerProps.boundaryNotes.length, 1, 'outer props')
+      assert.equal(nested.api.boundaryNotesForSubGrid('inner').length, 1, 'nested boundary')
+      assert.equal(innerProps.boundaryNotes.length, 1, 'inner props')
+      let held = deepest.api.receivedToneNotes('tone')
+      assert.equal(held.length, 1)
+      assert.equal(held[0].count, 2)
+      assert.equal(held[0].velocity, 81)
+      assert.equal(held[0].bend, 0.5)
+      parent.api.routeNote('piano', { parameter: 'note', value: 60, bend: -0.25 })
+      assert.equal(deepest.api.receivedToneNotes('tone')[0].bend, -0.25)
+      parent.api.removeWire(layout.connections[0])
+      assert.equal(deepest.api.receivedToneNotes('tone').length, 0)
+      nested.api.routeNote('nested-piano', { parameter: 'note', value: 64, on: true, velocity: 96, bend: 0.2 })
+      held = parent.api.receivedToneNotes('parent-tone')
+      assert.equal(held[0].velocity, 96)
+      assert.equal(held[0].bend, 0.2)
+      nested.api.routeNote('nested-piano', { parameter: 'note', value: 64, on: false, velocity: 96 })
+      assert.equal(parent.api.receivedToneNotes('parent-tone').length, 0)
+      assert.ok(parent.api.protectedSubGridPorts('outer').includes('outer-out'))
+      assert.ok(nested.api.protectedSubGridPorts('inner').includes('inner-in'))
+    } finally { stopOuter(); stopInner(); deepest.dispose(); nested.dispose(); parent.dispose() }
+  } finally { await server.close() }
+})
+
+test('exposed numeric ports preserve mappings through nested grids and propagate outputs', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { createControl } = gridModule
+    const source = createControl('source', 0, 0, 'knob')
+    source.settings.value = 64
+    const outer = createControl('outer', 1, 0, 'sub-grid')
+    const parentGain = createControl('parent-gain', 2, 0, 'tone-element')
+    parentGain.settings.elementType = 'gain'
+    const inner = createControl('inner', 0, 0, 'sub-grid')
+    const output = createControl('output', 1, 0, 'knob')
+    output.settings.value = 32
+    const gain = createControl('gain', 0, 0, 'tone-element')
+    gain.settings.elementType = 'gain'
+    inner.settings.layout.items.push(gain)
+    inner.settings.exposedPorts.push({ id: 'inner-in', name: 'Gain', kind: 'numeric', direction: 'input', itemId: 'gain', parameterId: 'gain' })
+    outer.settings.layout.items.push(inner, output)
+    outer.settings.exposedPorts.push(
+      { id: 'outer-in', name: 'Gain', kind: 'numeric', direction: 'input', itemId: 'inner', parameterId: 'inner-in' },
+      { id: 'outer-out', name: 'Value', kind: 'numeric', direction: 'output', itemId: 'output', parameterId: 'value' },
+    )
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [source, outer, parentGain], connections: [
+      { id: 'in', sourceId: 'source', sourceParameter: 'value', targetId: 'outer', targetParameter: 'outer-in',
+        mappingMode: 'abs', absoluteMin: 0.4, absoluteMax: 1.4 },
+      { id: 'out', sourceId: 'outer', sourceParameter: 'outer-out', targetId: 'parent-gain', targetParameter: 'gain',
+        mappingMode: 'abs', absoluteMin: 0, absoluteMax: 2 },
+    ] })
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const outerProps = vue.reactive({ ...common, layout: layout.items[1].settings.layout,
+      ownerSettings: layout.items[1].settings, boundaryNumeric: [] })
+    const nested = await setupComponent('GrooveGrid', outerProps, { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, signal) => {
+        if (event === 'boundaryNumeric') parent.api.setBoundaryOutput('outer', port, signal)
+      })
+    const innerProps = vue.reactive({ ...common, layout: outerProps.layout.items[0].settings.layout,
+      ownerSettings: outerProps.layout.items[0].settings, boundaryNumeric: [] })
+    const deepest = await setupComponent('GrooveGrid', innerProps, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const stopOuter = vue.watchEffect(() => { outerProps.boundaryNumeric = parent.api.boundaryNumericForSubGrid('outer') }, { flush: 'sync' })
+    const stopInner = vue.watchEffect(() => { innerProps.boundaryNumeric = nested.api.boundaryNumericForSubGrid('inner') }, { flush: 'sync' })
+    try {
+      await vue.nextTick()
+      assert.ok(Math.abs(deepest.api.displayItems.value[0].settings.gain - (0.4 + 64 / 127)) < 1e-10)
+      assert.ok(Math.abs(parent.api.displayItems.value[2].settings.gain - 64 / 127) < 1e-10)
+      Object.assign(layout.connections[0], { mappingMode: 'mod', modulationMin: 0, modulationMax: 25 })
+      delete layout.connections[0].absoluteMin
+      delete layout.connections[0].absoluteMax
+      await vue.nextTick()
+      assert.ok(Math.abs(deepest.api.displayItems.value[0].settings.gain - (0.8 + 0.5 * 64 / 127)) < 1e-10)
+      outerProps.layout.items[1].settings.value = 96
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[2].settings.gain - 192 / 127) < 1e-10)
+      parent.api.removeWire(layout.connections[0])
+      await vue.nextTick()
+      assert.equal(deepest.api.displayItems.value[0].settings.gain, 0.8)
+    } finally { stopOuter(); stopInner(); deepest.dispose(); nested.dispose(); parent.dispose() }
+  } finally { await server.close() }
+})
+
+test('oscillator frequency outputs follow notes and modulation through nested SubGrids', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { createControl } = gridModule
+    const outer = createControl('outer', 0, 0, 'sub-grid')
+    const gain = createControl('gain', 1, 0, 'tone-element')
+    gain.settings.elementType = 'gain'
+    const inner = createControl('inner', 0, 0, 'sub-grid')
+    const oscillator = createControl('oscillator', 0, 0, 'tone-element')
+    const piano = createControl('piano', 1, 0, 'piano-roll')
+    const knob = createControl('knob', 2, 0, 'knob')
+    const innerGain = createControl('inner-gain', 3, 0, 'tone-element')
+    innerGain.settings.elementType = 'gain'
+    knob.settings.value = 20
+    inner.settings.layout.items.push(oscillator, piano, knob, innerGain)
+    inner.settings.layout.connections.push(
+      { id: 'notes', sourceId: 'piano', sourceParameter: 'note', targetId: 'oscillator', targetParameter: 'note' },
+      { id: 'modulation', sourceId: 'knob', sourceParameter: 'value', targetId: 'oscillator', targetParameter: 'frequency' },
+      { id: 'direct', sourceId: 'oscillator', sourceParameter: 'frequency', targetId: 'inner-gain', targetParameter: 'gain',
+        mappingMode: 'abs', absoluteMin: 0, absoluteMax: 2 },
+    )
+    inner.settings.exposedPorts.push({ id: 'frequency', name: 'Frequency', kind: 'numeric', direction: 'output', itemId: 'oscillator', parameterId: 'frequency' })
+    outer.settings.layout.items.push(inner)
+    outer.settings.exposedPorts.push({ id: 'frequency', name: 'Frequency', kind: 'numeric', direction: 'output', itemId: 'inner', parameterId: 'frequency' })
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [outer, gain], connections: [
+      { id: 'out', sourceId: 'outer', sourceParameter: 'frequency', targetId: 'gain', targetParameter: 'gain',
+        mappingMode: 'abs', absoluteMin: 0, absoluteMax: 2 },
+    ] })
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const outerSettings = layout.items[0].settings
+    const nested = await setupComponent('GrooveGrid', { ...common, layout: outerSettings.layout, ownerSettings: outerSettings },
+      { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, signal) => { if (event === 'boundaryNumeric') parent.api.setBoundaryOutput('outer', port, signal) })
+    const innerSettings = outerSettings.layout.items[0].settings
+    const deepest = await setupComponent('GrooveGrid', { ...common, layout: innerSettings.layout, ownerSettings: innerSettings },
+      { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, signal) => { if (event === 'boundaryNumeric') nested.api.setBoundaryOutput('inner', port, signal) })
+    const expected = (frequency) => 2 * (frequency - 20) / (20000 - 20)
+    try {
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(460)) < 1e-10)
+      assert.ok(Math.abs(deepest.api.displayItems.value[3].settings.gain - expected(460)) < 1e-10)
+      deepest.api.routeNote('piano', { parameter: 'note', value: 69, on: true, velocity: 100 })
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(460)) < 1e-10)
+      deepest.api.routeNote('piano', { parameter: 'note', value: 81, on: true, velocity: 100, bend: 1 })
+      await vue.nextTick()
+      const pitch = 440 * 2 ** (13 / 12) + 20
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(pitch)) < 1e-10)
+      assert.ok(Math.abs(deepest.api.displayItems.value[3].settings.gain - expected(pitch)) < 1e-10)
+      innerSettings.layout.items[0].settings.notePriority = 'lowest'
+      innerSettings.layout.items[2].settings.value = 40
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(480)) < 1e-10)
+      deepest.api.routeNote('piano', { parameter: 'note', value: 69, on: false })
+      deepest.api.routeNote('piano', { parameter: 'note', value: 81, on: false })
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(480)) < 1e-10)
+      innerSettings.layout.items[0].settings.elementType = 'noise'
+      await vue.nextTick()
+      assert.equal(parent.api.displayItems.value[1].settings.gain, 0.8)
+      assert.equal(deepest.api.displayItems.value[3].settings.gain, 0.8)
+      innerSettings.layout.items[0].settings.elementType = 'oscillator'
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(480)) < 1e-10)
+      innerSettings.layout.items[0].settings.noteMode = 'always-on'
+      innerSettings.layout.items[0].settings.notePriority = 'last'
+      innerSettings.layout.items[0].settings.polyphony = 2
+      deepest.api.routeNote('piano', { parameter: 'note', value: 69, on: true, velocity: 100 })
+      deepest.api.routeNote('piano', { parameter: 'note', value: 81, on: true, velocity: 100, bend: 1 })
+      await vue.nextTick()
+      deepest.api.routeNote('piano', { parameter: 'note', value: 69, on: false })
+      deepest.api.routeNote('piano', { parameter: 'note', value: 81, on: false })
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(440 * 2 ** (13 / 12) + 40)) < 1e-10)
+      innerSettings.layout.items[0].settings.noteMode = 'gated'
+      await vue.nextTick()
+      assert.ok(Math.abs(parent.api.displayItems.value[1].settings.gain - expected(480)) < 1e-10)
+    } finally { deepest.dispose(); nested.dispose(); parent.dispose() }
+  } finally { await server.close() }
+})
+
+test('SubGrid configuration exposes Tone numeric outputs', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
+    const item = vue.reactive(createControl('oscillator', 0, 0, 'tone-element'))
+    const settings = vue.reactive(createControl('sub', 0, 0, 'sub-grid').settings)
+    class Input { constructor(checked) { this.checked = checked } }
+    const dialog = await setupComponent('SubGridConfigDialog', { item, settings },
+      { '../parameters': parameters }, { HTMLInputElement: Input })
+    try {
+      const frequency = dialog.api.numericOutputs.value.find((port) => port.id === 'frequency')
+      assert.ok(frequency)
+      dialog.api.togglePort('output', frequency, { target: new Input(true) })
+      assert.equal(settings.exposedPorts[0].parameterId, 'frequency')
+      assert.equal(settings.exposedPorts[0].direction, 'output')
+      item.settings.elementType = 'noise'
+      assert.equal(dialog.api.numericOutputs.value.length, 0)
+      item.settings.elementType = 'envelope'
+      const level = dialog.api.numericOutputs.value.find((port) => port.id === 'value')
+      assert.ok(level)
+      assert.ok(dialog.api.numericInputs.value.some((port) => port.id === 'sustain'))
+      dialog.api.togglePort('output', level, { target: new Input(true) })
+      assert.equal(settings.exposedPorts[1].parameterId, 'value')
+    } finally { dialog.dispose() }
+  } finally { await server.close() }
+})
+
+test('envelope widget edits saved ADSR values under modulation and records gestures', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const { createControl } = gridModule
+    const envelope = createControl('env', 0, 0, 'tone-element')
+    envelope.settings.elementType = 'envelope'
+    envelope.settings.sustain = 0.25
+    const knob = createControl('knob', 1, 0, 'knob')
+    knob.settings.value = 64
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [envelope, knob], connections: [
+      { id: 'sustain', sourceId: 'knob', sourceParameter: 'value', targetId: 'env', targetParameter: 'sustain',
+        mappingMode: 'mod', modulationMin: 0, modulationMax: 50 },
+    ] })
+    const events = []
+    const bankEvents = new BankEventBus()
+    const unsubscribe = bankEvents.subscribe((event) => events.push(event))
+    const grid = await setupComponent('GrooveGrid', { layout, bankEvents, bankId: 'A', editing: false,
+      wiring: false, settingsOpen: false, bpm: 120, playing: true }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    try {
+      const displayed = grid.api.displayItems.value[0]
+      assert.ok(Math.abs(displayed.settings.sustain - (0.25 + 32 / 127)) < 1e-10)
+      grid.api.setSettingGesture(true)
+      grid.api.changeEnvelope(displayed, 'sustain', { parameter: 'value', value: displayed.settings.sustain + 0.1, delta: 0.1 })
+      grid.api.changeEnvelope(displayed, 'sustain', { parameter: 'value', value: displayed.settings.sustain + 0.2, delta: 0.1 })
+      grid.api.setSettingGesture(false)
+      assert.ok(Math.abs(layout.items[0].settings.sustain - 0.45) < 1e-10)
+      assert.ok(Math.abs(grid.api.displayItems.value[0].settings.sustain - (0.45 + 32 / 127)) < 1e-10)
+      assert.deepEqual(events.filter((event) => event.kind === 'live-automation').map((event) => event.parameter),
+        ['setting:tone-element:sustain', 'setting:tone-element:sustain'])
+      assert.ok(events.some((event) => event.kind === 'live-automation-end' && event.parameter === 'setting:tone-element:sustain'))
+    } finally { grid.dispose(); unsubscribe() }
+  } finally { await server.close() }
+})
+
+test('envelope output routes sampled levels directly and through SubGrid ports', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
+    const { effectiveControls } = await server.ssrLoadModule('/src/modulation.ts')
+    const { captureSettings, applySettingsAutomation } = await server.ssrLoadModule('/src/settingsAutomation.ts')
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const { createControl } = gridModule
+    const sub = createControl('sub', 0, 0, 'sub-grid')
+    const outerGain = createControl('outer-gain', 1, 0, 'tone-element')
+    outerGain.settings.elementType = 'gain'
+    const envelope = createControl('envelope', 0, 0, 'tone-element')
+    envelope.settings.elementType = 'envelope'
+    const innerGain = createControl('inner-gain', 1, 0, 'tone-element')
+    innerGain.settings.elementType = 'gain'
+    const knob = createControl('knob', 2, 0, 'knob')
+    knob.settings.value = 32
+    sub.settings.layout.items.push(envelope, innerGain, knob)
+    sub.settings.layout.connections.push(
+      { id: 'local', sourceId: 'envelope', sourceParameter: 'value', targetId: 'inner-gain', targetParameter: 'gain', mappingMode: 'abs' },
+      { id: 'sustain', sourceId: 'knob', sourceParameter: 'value', targetId: 'envelope', targetParameter: 'sustain', mappingMode: 'abs' },
+    )
+    sub.settings.exposedPorts.push({ id: 'level', name: 'Level', kind: 'numeric', direction: 'output', itemId: 'envelope', parameterId: 'value' })
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [sub, outerGain], connections: [
+      { id: 'outer', sourceId: 'sub', sourceParameter: 'level', targetId: 'outer-gain', targetParameter: 'gain', mappingMode: 'abs' },
+    ] })
+    assert.ok(parameters.isCompatible(envelope, 'value', innerGain, 'gain'))
+    assert.ok(parameters.isCompatible(knob, 'value', envelope, 'sustain'))
+    assert.ok(Math.abs(effectiveControls(sub.settings.layout, new Map())[0].settings.sustain - 32 / 127) < 1e-10)
+    assert.ok(captureSettings(envelope).some((entry) => entry.id === 'setting:tone-element:sustain'))
+    const automated = applySettingsAutomation(envelope, new Map([['setting:tone-element:sustain', 0.3]]))
+    assert.equal(automated.settings.sustain, 0.3)
+    assert.equal(envelope.settings.sustain, 1)
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
+      id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout,
+    }] }
+    assert.equal(isSavedProject(project), true)
+    const restored = await loadProjectFromFile(await saveProjectToFile(project))
+    assert.equal(restored.banks[0].layout.items[0].settings.exposedPorts[0].parameterId, 'value')
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const settings = layout.items[0].settings
+    const mounted = []
+    const frames = new Map()
+    let nextFrame = 0
+    const environment = { setTimeout, clearTimeout, onMounted: (callback) => mounted.push(callback),
+      requestAnimationFrame: (callback) => { const id = ++nextFrame; frames.set(id, callback); return id },
+      cancelAnimationFrame: (id) => frames.delete(id) }
+    const child = await setupComponent('GrooveGrid', { ...common, layout: settings.layout, ownerSettings: settings },
+      { '../grid': gridModule }, environment,
+      (event, port, signal) => { if (event === 'boundaryNumeric') parent.api.setBoundaryOutput('sub', port, signal) })
+    let level = 0
+    child.api.audioGraph.value = { getEnvelopeValue: () => level, update: () => false, setNotes: () => {}, dispose: () => {} }
+    const frame = () => {
+      const [id, callback] = frames.entries().next().value
+      frames.delete(id)
+      callback(0)
+    }
+    try {
+      mounted.forEach((callback) => callback())
+      assert.equal(frames.size, 1)
+      frame()
+      await vue.nextTick()
+      assert.equal(child.api.displayItems.value[1].settings.gain, 0)
+      assert.equal(parent.api.displayItems.value[1].settings.gain, 0)
+      level = 0.35
+      frame()
+      await vue.nextTick()
+      assert.equal(child.api.displayItems.value[1].settings.gain, 0.7)
+      assert.equal(parent.api.displayItems.value[1].settings.gain, 0.7)
+      level = 0
+      frame()
+      await vue.nextTick()
+      assert.equal(parent.api.displayItems.value[1].settings.gain, 0)
+      settings.layout.connections.splice(0, 1)
+      settings.exposedPorts.splice(0, 1)
+      await vue.nextTick()
+      assert.equal(frames.size, 0)
+      assert.equal(child.api.signals.has('envelope:value'), false)
+      assert.equal(parent.api.displayItems.value[1].settings.gain, 0.8)
+      settings.exposedPorts.push({ id: 'level', name: 'Level', kind: 'numeric', direction: 'output', itemId: 'envelope', parameterId: 'value' })
+      await vue.nextTick()
+      assert.equal(frames.size, 1)
+    } finally { child.dispose(); parent.dispose() }
+    assert.equal(frames.size, 0)
+  } finally { await server.close() }
+})
+
+test('exposed selector note output participates in destination switching', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { createControl } = gridModule
+    const piano = createControl('piano', 0, 0, 'piano-roll')
+    const sub = createControl('sub', 1, 0, 'sub-grid')
+    const parentTone = createControl('parent-tone', 2, 0, 'tone-element')
+    const selector = createControl('selector', 0, 0, 'output-selector')
+    const innerTone = createControl('inner-tone', 1, 0, 'tone-element')
+    sub.settings.layout.items.push(selector, innerTone)
+    sub.settings.layout.connections.push({ id: 'local', sourceId: 'selector', sourceParameter: 'note', targetId: 'inner-tone', targetParameter: 'note' })
+    sub.settings.exposedPorts.push(
+      { id: 'in', name: 'Input', kind: 'note', direction: 'input', itemId: 'selector', parameterId: 'note' },
+      { id: 'out', name: 'Output', kind: 'note', direction: 'output', itemId: 'selector', parameterId: 'note' },
+    )
+    const layout = vue.reactive({ columns: 3, rows: 1, items: [piano, sub, parentTone], connections: [
+      { id: 'in-wire', sourceId: 'piano', sourceParameter: 'note', targetId: 'sub', targetParameter: 'in' },
+      { id: 'out-wire', sourceId: 'sub', sourceParameter: 'out', targetId: 'parent-tone', targetParameter: 'note' },
+    ] })
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const childProps = vue.reactive({ ...common, layout: layout.items[1].settings.layout,
+      ownerSettings: layout.items[1].settings, boundaryNotes: [], connectedPorts: ['in', 'out'] })
+    const child = await setupComponent('GrooveGrid', childProps, { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, output) => { if (event === 'boundaryOutput') parent.api.routeNote('sub', { ...output, parameter: port }) })
+    const stop = vue.watchEffect(() => { childProps.boundaryNotes = parent.api.boundaryNotesForSubGrid('sub') }, { flush: 'sync' })
+    try {
+      parent.api.routeNote('piano', { parameter: 'note', value: 60, on: true, velocity: 75, bend: 0.3 })
+      assert.equal(child.api.receivedToneNotes('inner-tone').length, 1)
+      assert.equal(parent.api.receivedToneNotes('parent-tone').length, 0)
+      child.api.advanceSelector(childProps.layout.items[0])
+      assert.equal(child.api.receivedToneNotes('inner-tone').length, 0)
+      assert.equal(parent.api.receivedToneNotes('parent-tone')[0].velocity, 75)
+      assert.equal(parent.api.receivedToneNotes('parent-tone')[0].bend, 0.3)
+      parent.api.removeWire(layout.connections[1])
+      childProps.connectedPorts = ['in']
+      assert.equal(parent.api.receivedToneNotes('parent-tone').length, 0)
+      assert.equal(child.api.receivedToneNotes('inner-tone')[0].velocity, 75)
+      layout.connections.push({ id: 'out-again', sourceId: 'sub', sourceParameter: 'out', targetId: 'parent-tone', targetParameter: 'note' })
+      childProps.connectedPorts = ['in', 'out']
+      assert.equal(child.api.receivedToneNotes('inner-tone').length, 0)
+      assert.equal(parent.api.receivedToneNotes('parent-tone')[0].velocity, 75)
+      parent.api.removeWire(layout.connections[0])
+      assert.equal(parent.api.receivedToneNotes('parent-tone').length, 0)
+      assert.equal(child.api.receivedToneNotes('inner-tone').length, 0)
+    } finally { stop(); child.dispose(); parent.dispose() }
+  } finally { await server.close() }
+})
+
+test('exposed selector numeric input, selection and output preserve their mappings', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const { createControl } = gridModule
+    const source = createControl('source', 0, 0, 'knob')
+    source.settings.value = 64
+    const select = createControl('select', 1, 0, 'knob')
+    select.settings.value = 127
+    const sub = createControl('sub', 2, 0, 'sub-grid')
+    const parentGain = createControl('parent-gain', 3, 0, 'tone-element')
+    parentGain.settings.elementType = 'gain'
+    const selector = createControl('selector', 0, 0, 'output-selector')
+    const innerGain = createControl('inner-gain', 1, 0, 'tone-element')
+    innerGain.settings.elementType = 'gain'
+    sub.settings.layout.items.push(selector, innerGain)
+    sub.settings.layout.connections.push({ id: 'local', sourceId: 'selector', sourceParameter: 'value',
+      targetId: 'inner-gain', targetParameter: 'gain', mappingMode: 'abs' })
+    sub.settings.exposedPorts.push(
+      { id: 'in', name: 'Value', kind: 'numeric', direction: 'input', itemId: 'selector', parameterId: 'value' },
+      { id: 'select', name: 'Selection', kind: 'numeric', direction: 'input', itemId: 'selector', parameterId: 'selection' },
+      { id: 'out', name: 'Output', kind: 'numeric', direction: 'output', itemId: 'selector', parameterId: 'value' },
+    )
+    const layout = vue.reactive({ columns: 4, rows: 1, items: [source, select, sub, parentGain], connections: [
+      { id: 'in-wire', sourceId: 'source', sourceParameter: 'value', targetId: 'sub', targetParameter: 'in', mappingMode: 'abs' },
+      { id: 'select-wire', sourceId: 'select', sourceParameter: 'value', targetId: 'sub', targetParameter: 'select', mappingMode: 'abs' },
+      { id: 'out-wire', sourceId: 'sub', sourceParameter: 'out', targetId: 'parent-gain', targetParameter: 'gain', mappingMode: 'abs' },
+    ] })
+    const common = { editing: false, wiring: false, settingsOpen: false, bpm: 120 }
+    const parent = await setupComponent('GrooveGrid', { ...common, layout }, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const childProps = vue.reactive({ ...common, layout: layout.items[2].settings.layout,
+      ownerSettings: layout.items[2].settings, boundaryNumeric: [], connectedPorts: ['in', 'select', 'out'] })
+    const child = await setupComponent('GrooveGrid', childProps, { '../grid': gridModule }, { setTimeout, clearTimeout },
+      (event, port, signal) => {
+        if (event === 'boundaryNumeric') parent.api.setBoundaryOutput('sub', port, signal)
+      })
+    const stop = vue.watchEffect(() => { childProps.boundaryNumeric = parent.api.boundaryNumericForSubGrid('sub') }, { flush: 'sync' })
+    try {
+      await vue.nextTick()
+      assert.equal(childProps.layout.items[0].settings.index, 1)
+      assert.ok(Math.abs(parent.api.displayItems.value[3].settings.gain - 2 * 64 / 127) < 1e-10)
+      assert.equal(child.api.displayItems.value[1].settings.gain, 0.8)
+      layout.items[1].settings.value = 0
+      await vue.nextTick()
+      assert.equal(childProps.layout.items[0].settings.index, 0)
+      assert.equal(parent.api.displayItems.value[3].settings.gain, 0.8)
+      assert.ok(Math.abs(child.api.displayItems.value[1].settings.gain - 2 * 64 / 127) < 1e-10)
+      delete layout.connections[0].mappingMode
+      Object.assign(layout.items[0].settings, { min: -1, max: 1, step: 0.1, value: 0.5, defaultValue: 0 })
+      layout.items[1].settings.value = 127
+      await vue.nextTick()
+      assert.equal(childProps.layout.items[0].settings.index, 1)
+      assert.ok(Math.abs(parent.api.displayItems.value[3].settings.gain - 1.5) < 1e-10)
+    } finally { stop(); child.dispose(); parent.dispose() }
+  } finally { await server.close() }
+})
+
+test('pasting and opening a SubGrid edits an independent nested layout', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const clipboardModule = await server.ssrLoadModule('/src/subGridClipboard.ts')
+    const source = gridModule.createControl('source', 0, 0, 'knob')
+    const bank = { id: 'A', title: 'Source bank', layout: { columns: 1, rows: 1, items: [source], connections: [] } }
+    const clipboard = clipboardModule.copyBankAsSubGrid(bank)
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [], connections: [] })
+    const grid = await setupComponent('GrooveGrid', { layout, bankId: 'B', editing: true, wiring: false,
+      settingsOpen: false, bpm: 120, subGridClipboard: clipboard },
+    { '../grid': gridModule, '../subGridClipboard': clipboardModule }, { setTimeout, clearTimeout })
+    try {
+      grid.api.addItem(0, 0)
+      grid.api.pasteSubGrid()
+      assert.equal(layout.items[0].label, 'Source bank')
+      grid.api.enterSubgrid(layout.items[0].id)
+      assert.equal(grid.api.openSubgrid.value, layout.items[0])
+      layout.items[0].settings.layout.items[0].label = 'Changed'
+      assert.equal(source.label, 'Knob')
+      grid.api.leaveSubgrid()
+      assert.equal(grid.api.openSubgrid.value, undefined)
+      grid.api.addItem(1, 0)
+      grid.api.pasteSubGrid()
+      assert.equal(layout.items[1].settings.layout.items[0].label, 'Knob')
     } finally { grid.dispose() }
   } finally { await server.close() }
 })
@@ -1941,6 +2755,20 @@ test('transport count-in precedes playback while input start bypasses it', async
       await app.api.togglePlayback()
       assert.equal(app.api.countingIn.value, false)
       assert.equal(intervals.size, 0)
+      const nested = gridModule.createControl('nested', 0, 0, 'sub-grid')
+      const nestedLoop = gridModule.createControl('inner-loop', 0, 0, 'sequenced-loop')
+      nestedLoop.settings.armed = true
+      nestedLoop.settings.countIn = true
+      nested.settings.layout.items.push(nestedLoop)
+      loop.settings.armed = false
+      app.api.banks.value[0].layout.items.push(nested)
+      assert.equal(await app.api.startFromInput('A/nested'), true)
+      await app.api.togglePlayback()
+      await app.api.togglePlayback()
+      assert.equal(app.api.countingIn.value, true)
+      await app.api.togglePlayback()
+      nestedLoop.settings.armed = false
+      loop.settings.armed = true
       const importedLoop = gridModule.createControl('imported', 0, 0, 'sequenced-loop')
       importedLoop.settings.armed = true
       app.api.addImportedBank({ id: 'X', title: 'Imported', icon: 'X', color: '#ffffff',
@@ -2199,6 +3027,13 @@ test('arming a sequencer disarms other banks without stopping their playback', a
       assert.equal(first.settings.armed, false)
       gridA.api.armLoop('other')
       assert.equal(banks[0].layout.items[1].settings.armed, true)
+      const nested = createControl('nested', 0, 0, 'sub-grid')
+      const innerLoop = createControl('inner', 0, 0, 'sequenced-loop')
+      innerLoop.settings.armed = true
+      nested.settings.layout.items.push(innerLoop)
+      banks[1].layout.items.push(nested)
+      gridA.api.setLoopArmed(banks[0].layout.items[1], true)
+      assert.equal(innerLoop.settings.armed, false)
     } finally { gridA.dispose(); gridB.dispose() }
   } finally { await server.close() }
 })

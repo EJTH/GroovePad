@@ -35,8 +35,9 @@ export function setSample(params: SampleHitParams | SampleLoopParams, asset?: Sa
 
 export function samplesInBanks(banks: Bank[]): SampleAsset[] {
   const assets: SampleAsset[] = []
-  for (const bank of banks) {
-    for (const item of bank.layout.items) {
+  const collectLayout = (layout: import('./grid').GridLayout) => {
+    for (const item of layout.items) {
+      if (item.type === 'sub-grid') collectLayout(item.settings.layout)
       if (item.type !== 'instrument-pad') continue
       const { instrumentType, instrumentParams } = item.settings
       if ((instrumentType === 'sample-hit' || instrumentType === 'sample-loop') && instrumentParams.sample &&
@@ -45,18 +46,25 @@ export function samplesInBanks(banks: Bank[]): SampleAsset[] {
       }
     }
   }
+  for (const bank of banks) {
+    collectLayout(bank.layout)
+  }
   return assets
 }
 
 export function replaceSampleInBanks(banks: Bank[], source: string, replacement?: SampleAsset) {
-  for (const bank of banks) {
-    for (const item of bank.layout.items) {
+  const replaceLayout = (layout: import('./grid').GridLayout) => {
+    for (const item of layout.items) {
+      if (item.type === 'sub-grid') replaceLayout(item.settings.layout)
       if (item.type !== 'instrument-pad') continue
       const { instrumentType, instrumentParams } = item.settings
       if ((instrumentType === 'sample-hit' || instrumentType === 'sample-loop') && instrumentParams.sample === source) {
         setSample(instrumentParams as SampleHitParams | SampleLoopParams, replacement)
       }
     }
+  }
+  for (const bank of banks) {
+    replaceLayout(bank.layout)
   }
 }
 

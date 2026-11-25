@@ -73,6 +73,12 @@ function settings(item: GridItem): Setting[] {
     } else if (s.instrumentType === '808' || s.instrumentType === '909') {
       choice('drum', params.drum, ['kick', 'snare', 'closed-hat', 'open-hat', 'rim', 'tom'], (value) => { params.drum = value })
     }
+  } else if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
+    const s = item.settings
+    number('attack', s.attack, (value) => { s.attack = value }, 0.001, 5)
+    number('decay', s.decay, (value) => { s.decay = value }, 0.01, 10)
+    number('sustain', s.sustain, (value) => { s.sustain = value }, 0, 1)
+    number('release', s.release, (value) => { s.release = value }, 0.01, 10)
   } else if (item.type === 'knob') {
     const s = item.settings
     number('min', s.min, (value) => { s.min = value }, -Number.MAX_VALUE, Number.MAX_VALUE)

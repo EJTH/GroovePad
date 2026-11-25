@@ -27,6 +27,7 @@ export function useGridInteraction(options: {
   message: Ref<string>
   openSettings: (item: GridItem) => void
   nextControlId: () => string
+  validateCopy?: (item: GridItem) => boolean
 }) {
   const interaction = ref<Interaction | null>(null)
   const dropAction = ref<DropAction | null>(null)
@@ -148,6 +149,10 @@ export function useGridInteraction(options: {
       if (!isValidPlacement(layout, candidate)) {
         options.message.value = 'The control must fit inside the grid without overlapping another control.'
       } else if (action === 'copy') {
+        if (options.validateCopy && !options.validateCopy(candidate)) {
+          dropAction.value = null
+          return
+        }
         if (candidate.type === 'sequenced-loop') candidate.settings.armed = false
         layout.items.push(candidate)
         options.message.value = ''

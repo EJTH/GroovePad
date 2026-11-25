@@ -12,7 +12,7 @@ export class Bass303 implements InstrumentInstance {
   private activeNote: number | undefined
   private pitchBend = 0
 
-  constructor(params: Partial<Bass303Params>) {
+  constructor(params: Partial<Bass303Params>, output?: Tone.InputNode) {
     this.params = {
       transpose: params.transpose ?? 0,
       resonance: params.resonance ?? 6,
@@ -34,7 +34,9 @@ export class Bass303 implements InstrumentInstance {
         octaves: this.params.filterAmount * 4,
       },
       portamento: this.params.slideTime,
-    }).toDestination()
+    })
+    if (output) this.synth.connect(output)
+    else this.synth.toDestination()
   }
 
   trigger(velocity: number, note = 60): void {

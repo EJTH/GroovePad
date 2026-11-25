@@ -4,6 +4,7 @@
 import { isSavedProject, migrateSavedProject, type SavedProject } from './project'
 import { samplesInBanks } from './sampleAssets'
 import { isBeta } from './appChannel'
+import type { PresetCollection } from './presets'
 
 interface StoredProject {
   project: unknown
@@ -14,9 +15,12 @@ const blobs = new Map<string, Blob>()
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(isBeta ? 'groovepad-beta' : 'groovepad', 1)
+    const request = indexedDB.open(isBeta ? 'groovepad-beta' : 'groovepad', 2)
     let blocked = false
-    request.onupgradeneeded = () => request.result.createObjectStore('projects')
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('projects')) request.result.createObjectStore('projects')
+      if (!request.result.objectStoreNames.contains('preset-collections')) request.result.createObjectStore('preset-collections')
+    }
     request.onsuccess = () => {
       if (blocked) request.result.close()
       else resolve(request.result)
@@ -107,4 +111,41 @@ export async function saveStoredProject(project: SavedProject): Promise<void> {
     db.close()
   }
   for (const source of blobs.keys()) if (!ids.has(source)) blobs.delete(source)
+}
+
+export async function loadPresetCollection(): Promise<PresetCollection> {
+  const db = await openDatabase()
+  try {
+    const value = await new Promise<unknown>((resolve, reject) => {
+      const request = db.transaction('preset-collections').objectStore('preset-collections').get('mine')
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error ?? new Error('Could not read the preset collection.'))
+    })
+    if (value === undefined) return { schemaVersion: 1, presets: [] }
+    if (!value || typeof value !== 'object' || !('schemaVersion' in value) ||
+      value.schemaVersion !== 1 || !('presets' in value) || !Array.isArray(value.presets)) {
+      throw new Error('Stored preset collection is invalid or unsupported.')
+    }
+    return value as unknown as PresetCollection
+  } finally {
+    db.close()
+  }
+}
+
+export async function savePresetCollection(collection: PresetCollection): Promise<void> {
+  if (collection.schemaVersion !== 1 || !Array.isArray(collection.presets)) {
+    throw new Error('Unsupported preset collection.')
+  }
+  const db = await openDatabase()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('preset-collections', 'readwrite')
+      transaction.objectStore('preset-collections').put(collection, 'mine')
+      transaction.oncomplete = () => resolve()
+      transaction.onabort = () => reject(transaction.error ?? new Error('Could not save the preset collection.'))
+      transaction.onerror = () => reject(transaction.error ?? new Error('Could not save the preset collection.'))
+    })
+  } finally {
+    db.close()
+  }
 }

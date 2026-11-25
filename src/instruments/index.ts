@@ -8,6 +8,7 @@ import { Drum808 } from './Drum808'
 import { Drum909 } from './Drum909'
 import { DrumKit } from './DrumKit'
 import { defaultEnvelope } from './defaultEnvelope'
+import type { InputNode } from 'tone'
 import type {
   InstrumentType,
   InstrumentInstance,
@@ -23,18 +24,18 @@ export type { InstrumentType, InstrumentInstance, AnyInstrumentParams, DrumType 
 export { SampleHit, SampleLoop, Bass303, Drum808, Drum909, DrumKit }
 
 export class InstrumentFactory {
-  static create(type: InstrumentType, params: Partial<AnyInstrumentParams>): InstrumentInstance {
+  static create(type: InstrumentType, params: Partial<AnyInstrumentParams>, output?: InputNode): InstrumentInstance {
     switch (type) {
       case 'sample-hit':
-        return new SampleHit(params as Partial<SampleHitParams>)
+        return new SampleHit(params as Partial<SampleHitParams>, output)
       case 'sample-loop':
-        return new SampleLoop(params as Partial<SampleLoopParams>)
+        return new SampleLoop(params as Partial<SampleLoopParams>, output)
       case '303':
-        return new Bass303(params as Partial<Bass303Params>)
+        return new Bass303(params as Partial<Bass303Params>, output)
       case '808':
-        return new Drum808(params as Partial<Drum808Params>)
+        return new Drum808(params as Partial<Drum808Params>, output)
       case '909':
-        return new Drum909(params as Partial<Drum909Params>)
+        return new Drum909(params as Partial<Drum909Params>, output)
       default:
         const exhaustive: never = type
         throw new Error(`Unknown instrument type: ${exhaustive}`)

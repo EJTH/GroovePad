@@ -5,6 +5,7 @@ import { nextTick, onUnmounted, ref, watch, type Ref } from 'vue'
 import * as Tone from 'tone'
 import type { Bank } from '../project'
 import { BankEventBus, Metronome, TransportClock } from '../sequencedLoop'
+import { gridScopes } from '../grid'
 
 export function useTransport(options: {
   banks: Ref<Bank[]>
@@ -72,7 +73,7 @@ export function useTransport(options: {
 
   async function startFromInput(bankId: string): Promise<boolean> {
     if (playing.value) return true
-    if (startingTransport || countingIn.value || options.editing.value || !options.banks.value.some((bank) =>
+    if (startingTransport || countingIn.value || options.editing.value || !gridScopes(options.banks.value).some((bank) =>
       bank.layout.items.some((item) => item.type === 'sequenced-loop' && item.settings.armed &&
         (bank.id === bankId || item.settings.recordScope === 'all')))) return false
     startingTransport = true
@@ -110,7 +111,7 @@ export function useTransport(options: {
       console.error(options.projectError.value, error)
       return
     } finally { startingTransport = false }
-    const countIn = options.banks.value.some((bank) => bank.layout.items.some((item) =>
+    const countIn = gridScopes(options.banks.value).some((bank) => bank.layout.items.some((item) =>
       item.type === 'sequenced-loop' && item.settings.armed && item.settings.countIn))
     if (!countIn) { beginPlayback(false); return }
     countingIn.value = true

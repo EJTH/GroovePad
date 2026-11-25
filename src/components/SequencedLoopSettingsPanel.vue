@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { defaultLoopWidgetButtons, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type LoopAutomation, type LoopNote, type LoopRow, type LoopWidgetButton } from '../grid'
+import { defaultLoopWidgetButtons, gridScopes, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type LoopAutomation, type LoopNote, type LoopRow, type LoopWidgetButton } from '../grid'
 import { cloneClip, copyRow, nextUnusedClipIndex, pasteRow, removeRow, rowKey, type RowClipboard } from '../loopRows'
 import NumericSetting from './NumericSetting.vue'
 import SequenceEditor from './SequenceEditor.vue'
@@ -65,7 +65,7 @@ const automation = computed({
   set: (value: LoopAutomation[]) => { if (validIndex.value) props.draft.settings.automation[String(clipIndex.value)] = value },
 })
 const sources = computed(() => {
-  const banks = props.banks ?? [{ id: props.bankId ?? '', title: '', layout: props.layout }]
+  const banks = gridScopes(props.banks ?? [{ id: props.bankId ?? '', title: '', layout: props.layout }])
   return banks.flatMap((bank) => bank.layout.items.map((item) => ({
     id: item.id, bankId: bank.id, label: banks.length > 1 ? `${bank.title} / ${item.label}` : item.label,
     color: 'color' in item.settings ? item.settings.color : undefined,

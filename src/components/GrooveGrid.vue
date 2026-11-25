@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { createControl, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, nextLoopQuantize, MAX_GRID_COLUMNS, MAX_GRID_ROWS, MAX_LOOP_CLIP_INDEX, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision, type SequencedLoopSettings } from '../grid'
-import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible } from '../parameters'
-import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource } from '../modulation'
+import { computed, onBeforeMount, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowReactive, shallowRef, triggerRef, watch } from 'vue'
+import { createControl, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, nextLoopQuantize, MAX_GRID_COLUMNS, MAX_GRID_ROWS, MAX_LOOP_CLIP_INDEX, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision, type SequencedLoopSettings, type SubGridSettings } from '../grid'
+import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible, selectorRoutingCompatible } from '../parameters'
+import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
 import MPCPad from './MPCPad.vue'
@@ -12,6 +12,13 @@ import ModWheel from './ModWheel.vue'
 import PianoRoll from './PianoRoll.vue'
 import Arpeggiator from './Arpeggiator.vue'
 import InstrumentPad from './InstrumentPad.vue'
+import ToneOscillator from './ToneOscillator.vue'
+import ToneNoise from './ToneNoise.vue'
+import ADSREnvelopeEditor from './ADSREnvelopeEditor.vue'
+import ChannelMixer from './ChannelMixer.vue'
+import { BankAudio, type BoundaryAudio } from '../audio/bankAudio'
+import { audioBoundaryKey, audioOutput, AudioRouteError, validateAudioRoutes } from '../audio/audioRoutes'
+import { oscillatorPitch } from '../audio/toneOscillator'
 import NumericSetting from './NumericSetting.vue'
 import SettingsDialog from './SettingsDialog.vue'
 import OutputSelector from './OutputSelector.vue'
@@ -25,9 +32,22 @@ import { BankEventBus, TransportClock } from '../sequencedLoop'
 import type { Bank } from '../project'
 import { useGridPlayback } from './useGridPlayback'
 import { cloneClip, nextUnusedClipIndex } from '../loopRows'
+import { pasteSubGridLayout, type SubGridClipboard } from '../subGridClipboard'
+import SubGridConfigDialog from './SubGridConfigDialog.vue'
+import type { ADSREnvelope } from '../instruments/types'
+
+interface BoundaryNote {
+  id: string
+  portId: string
+  note: number
+  count: number
+  velocity: number
+  bend?: number
+}
 
 const props = defineProps<{
   layout: GridLayout
+  rootLayout?: GridLayout
   editing: boolean
   wiring: boolean
   volumeMode?: boolean
@@ -42,12 +62,94 @@ const props = defineProps<{
   startOnInput?: (bankId: string) => Promise<boolean>
   transportStartImmediate?: boolean
   triggeredByInput?: boolean
+  parentAudioInput?: Tone.ToneAudioNode
+  parentAudioOutput?: Tone.InputNode
+  parentAudioPorts?: BoundaryAudio[]
+  subGridClipboard?: SubGridClipboard | null
+  surfaceTarget?: HTMLElement
+  ownerSettings?: SubGridSettings
+  configurationMode?: boolean
+  protectedPorts?: string[]
+  connectedPorts?: string[]
+  boundaryNotes?: BoundaryNote[]
+  boundaryNumeric?: BoundaryNumeric[]
 }>()
-const emit = defineEmits<{ closeSettings: []; output: [itemId: string, output: ParameterOutput] }>()
+const emit = defineEmits<{ closeSettings: []; output: [itemId: string, output: ParameterOutput]; audioError: [message: string];
+  boundaryOutput: [portId: string, output: ParameterOutput]; boundaryNumeric: [portId: string, signal: NumericSignal | undefined] }>()
 
 const grid = ref<HTMLElement | null>(null)
 const message = ref('')
+const audioError = ref('')
+const processorError = ref('')
+const nestedAudioErrors = reactive(new Map<string, string>())
+const displayedAudioError = computed(() => [audioError.value, processorError.value, ...nestedAudioErrors.values()].filter(Boolean).join(' '))
+watch(displayedAudioError, (error) => emit('audioError', error))
+watch(() => props.layout.items.map((item) => item.id), (ids) => {
+  for (const id of nestedAudioErrors.keys()) if (!ids.includes(id)) nestedAudioErrors.delete(id)
+})
+function setNestedAudioError(id: string, error: string) {
+  if (error) nestedAudioErrors.set(id, error)
+  else nestedAudioErrors.delete(id)
+}
+function changeEnvelope(item: Extract<GridItem, { type: 'tone-element' }>, parameter: keyof ADSREnvelope, output: ParameterOutput) {
+  const original = props.layout.items.find((entry) => entry.id === item.id)
+  if (original?.type !== 'tone-element' || original.settings.elementType !== 'envelope') return
+  const input = inputs(original).find((entry) => entry.id === parameter)
+  if (input?.min === undefined || input.max === undefined) return
+  const previous = original.settings[parameter]
+  const next = Math.max(input.min, Math.min(input.max, previous + (output.delta ?? output.value - item.settings[parameter])))
+  if (next === previous && output.value === item.settings[parameter]) return
+  original.settings[parameter] = next
+  recordSettingChange(item.id, { id: `setting:tone-element:${parameter}`, value: next, continuous: true })
+}
+const audioGraph = shallowRef<BankAudio>()
+onBeforeMount(() => {
+  try {
+    audioGraph.value = new BankAudio((error) => {
+      processorError.value = error
+      console.error(error)
+    }, props.parentAudioInput, props.parentAudioOutput)
+    audioGraph.value.update(props.layout, props.parentAudioPorts)
+  } catch (error) {
+    audioError.value = `Audio routing error: ${error instanceof Error ? error.message : String(error)}`
+    console.error(audioError.value, error)
+  }
+})
+onUnmounted(() => audioGraph.value?.dispose())
 const selectedId = ref<string | null>(null)
+const openSubgridId = ref<string | null>(null)
+const subgridSettingsOpen = ref(false)
+const subgridConfig = ref(false)
+const configuringId = ref<string | null>(null)
+const configuringItem = computed(() => props.layout.items.find((item) => item.id === configuringId.value))
+const surfaceTargets = shallowReactive(new Map<string, HTMLElement>())
+function setSurfaceTarget(id: string, element: unknown) {
+  if (element instanceof HTMLElement) surfaceTargets.set(id, element)
+  else surfaceTargets.delete(id)
+}
+function boundsForSurface(settings?: SubGridSettings) {
+  const items = settings?.layout.items.filter((item) => settings.surfaceItemIds.includes(item.id)) ?? []
+  if (!items.length) return undefined
+  const x = Math.min(...items.map((item) => item.x))
+  const y = Math.min(...items.map((item) => item.y))
+  return { x, y, columns: Math.max(...items.map((item) => item.x + item.width)) - x,
+    rows: Math.max(...items.map((item) => item.y + item.height)) - y }
+}
+const surfaceBounds = computed(() => boundsForSurface(props.ownerSettings))
+function subgridSurfaceStyle(item: Extract<GridItem, { type: 'sub-grid' }>) {
+  const bounds = boundsForSurface(item.settings)
+  if (!bounds) return { display: 'none' }
+  return { gridTemplateColumns: `repeat(${bounds.columns}, minmax(0, 1fr))`,
+    gridTemplateRows: `repeat(${bounds.rows}, minmax(0, 1fr))`,
+    aspectRatio: `${bounds.columns} / ${bounds.rows}`, '--surface-ratio': bounds.columns / bounds.rows }
+}
+function surfaceStyle(item: GridItem) {
+  const bounds = surfaceBounds.value
+  if (!bounds) return itemStyle(item)
+  return { gridColumn: `${item.x - bounds.x + 1} / span ${item.width}`, gridRow: `${item.y - bounds.y + 1} / span ${item.height}` }
+}
+const openSubgrid = computed(() => props.layout.items.find((item) => item.id === openSubgridId.value && item.type === 'sub-grid'))
+watch(openSubgrid, (item) => { if (!item) openSubgridId.value = null })
 const widgetEditor = ref<{ id: string; index: number } | null>(null)
 const widgetEditorLoop = computed(() => {
   const item = props.layout.items.find((entry) => entry.id === widgetEditor.value?.id)
@@ -62,8 +164,45 @@ const wirePair = ref<{ sourceId: string; targetId: string } | null>(null)
 const wireOutput = ref('')
 const wireInput = ref('')
 const wireDraft = ref<Connection | null>(null)
-const activeNotes = reactive(new Map<string, { count: number; velocity: number; bend?: number }>())
+const activeNotes = reactive(new Map<string, { count: number; velocity: number; bend?: number; sequence: number }>())
+const boundaryActiveNotes = reactive(new Map<string, BoundaryNote & { targetId: string; targetParameter: string; sequence: number }>())
+let noteSequence = 0
 const signals = reactive(new Map<string, number>())
+const boundaryOutputSignals = reactive(new Map<string, NumericSignal>())
+const envelopeOutputs = computed(() => props.layout.items.filter((item) =>
+  item.type === 'tone-element' && item.settings.elementType === 'envelope' &&
+  (props.layout.connections.some((wire) => wire.sourceId === item.id && wire.sourceParameter === 'value') ||
+    props.ownerSettings?.exposedPorts.some((port) => port.itemId === item.id && port.parameterId === 'value' &&
+      port.direction === 'output' && port.kind === 'numeric'))).map((item) => item.id))
+let envelopeFrame: number | undefined
+let envelopeMonitoring = false
+function sampleEnvelopes() {
+  envelopeFrame = undefined
+  for (const id of envelopeOutputs.value) {
+    const value = audioGraph.value?.getEnvelopeValue(id)
+    const key = `${id}:value`
+    if (value === undefined) signals.delete(key)
+    else if (signals.get(key) !== value) signals.set(key, value)
+  }
+  if (envelopeMonitoring && envelopeOutputs.value.length) envelopeFrame = requestAnimationFrame(sampleEnvelopes)
+}
+watch(envelopeOutputs, (current, previous) => {
+  for (const id of previous ?? []) if (!current.includes(id)) signals.delete(`${id}:value`)
+  if (!current.length && envelopeFrame !== undefined) {
+    cancelAnimationFrame(envelopeFrame)
+    envelopeFrame = undefined
+  } else if (current.length && envelopeMonitoring && envelopeFrame === undefined) {
+    envelopeFrame = requestAnimationFrame(sampleEnvelopes)
+  }
+})
+onMounted(() => {
+  envelopeMonitoring = true
+  if (envelopeOutputs.value.length) envelopeFrame = requestAnimationFrame(sampleEnvelopes)
+})
+onBeforeUnmount(() => {
+  envelopeMonitoring = false
+  if (envelopeFrame !== undefined) cancelAnimationFrame(envelopeFrame)
+})
 const selectorNotes = reactive(new Map<string, number>())
 const selectorFlash = ref<{ sourceId: string; targetId: string; sequence: number } | null>(null)
 let selectorFlashSequence = 0
@@ -72,6 +211,19 @@ onBeforeUnmount(() => clearTimeout(selectorFlashTimer))
 const clock = props.transportClock ?? new TransportClock()
 const bankId = props.bankId ?? ''
 const bankEvents = props.bankEvents ?? new BankEventBus()
+const selectorPortWires = computed(() => {
+  const used = new Set(props.layout.connections.map((wire) => wire.id))
+  return (props.ownerSettings?.exposedPorts ?? []).flatMap((port) => {
+    const item = props.layout.items.find((entry) => entry.id === port.itemId)
+    if (item?.type !== 'output-selector' || port.direction !== 'output' || !port.parameterId ||
+      !props.connectedPorts?.includes(port.id)) return []
+    let id = `exposed:${port.id}`
+    while (used.has(id)) id += ':'
+    used.add(id)
+    return [{ id, sourceId: item.id, sourceParameter: port.parameterId, targetId: '', targetParameter: port.id }]
+  })
+})
+const modulationLayout = computed(() => ({ ...props.layout, connections: [...props.layout.connections, ...selectorPortWires.value] }))
 const {
   loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, loopEditorPlayheads, effectiveSignals, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
   changeLoopIndex,
@@ -91,12 +243,112 @@ const {
   startOnInput: () => props.startOnInput,
   signals,
   routeNote,
+  boundaryNumeric: resolvedBoundaryNumeric,
+  boundaryOutputs: boundaryOutputSignals,
+  modulationLayout: () => modulationLayout.value,
 })
 void loopEngine
 void loopAutomation
 void toggleLoop
 void changeLoopIndex
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
+const latchedOscillatorNotes = new Map<string, HeldNote>()
+watch(() => renderedItems.value.flatMap(({ item, original }) => {
+  if (item.type !== 'tone-element' || item.settings.elementType !== 'oscillator' || original.type !== 'tone-element') return []
+  const notes = receivedToneNotes(item.id)
+  const current = oscillatorPitch(item.settings, original.settings.frequency, notes)
+  if (item.settings.noteMode !== 'always-on') latchedOscillatorNotes.delete(item.id)
+  else if (current.note) latchedOscillatorNotes.set(item.id, current.note)
+  const latched = item.settings.noteMode === 'always-on' && !current.note ? latchedOscillatorNotes.get(item.id) : undefined
+  return [{ id: item.id, value: latched
+    ? oscillatorPitch(item.settings, original.settings.frequency, [latched]).frequency : current.frequency }]
+}), (current, previous) => {
+  for (const entry of previous ?? []) {
+    if (!current.some((item) => item.id === entry.id)) {
+      signals.delete(`${entry.id}:frequency`)
+      latchedOscillatorNotes.delete(entry.id)
+    }
+  }
+  for (const entry of current) {
+    const key = `${entry.id}:frequency`
+    if (signals.get(key) !== entry.value) signals.set(key, entry.value)
+  }
+}, { immediate: true })
+function resolvedBoundaryNumeric(): BoundaryNumeric[] {
+  return (props.boundaryNumeric ?? []).flatMap((entry) => {
+    const port = props.ownerSettings?.exposedPorts.find((candidate) =>
+      candidate.id === entry.portId && candidate.kind === 'numeric' && candidate.direction === 'input')
+    return port?.itemId && port.parameterId
+      ? [{ ...entry, wire: { ...entry.wire, targetId: port.itemId, targetParameter: port.parameterId } }] : []
+  })
+}
+function setBoundaryOutput(id: string, port: string, signal?: NumericSignal) {
+  const key = `${id}:${port}`
+  if (!signal) {
+    boundaryOutputSignals.delete(key)
+    signals.delete(key)
+  } else {
+    boundaryOutputSignals.set(key, signal)
+    signals.set(key, signal.value)
+  }
+}
+function boundaryNumericForSubGrid(id: string): BoundaryNumeric[] {
+  const result = resolvedBoundaryNumeric().filter((entry) => entry.wire.targetId === id)
+    .map((entry) => ({ ...entry, portId: entry.wire.targetParameter }))
+  const target = props.layout.items.find((item) => item.id === id)
+  if (!target) return result
+  for (const wire of props.layout.connections) {
+    if (wire.targetId !== id || !inputs(target).some((port) => port.id === wire.targetParameter && port.kind === 'number')) continue
+    const signal = numericSignal(modulationLayout.value, wire, effectiveSignals.value,
+      (sourceId) => displayItems.value.find((item) => item.id === sourceId), resolvedBoundaryNumeric(), boundaryOutputSignals)
+    if (signal) result.push({ portId: wire.targetParameter, wire, signal })
+  }
+  return result
+}
+watch(() => (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.kind === 'numeric' &&
+  port.direction === 'output' && port.itemId && port.parameterId).map((port) => {
+  const item = props.layout.items.find((entry) => entry.id === port.itemId)
+  const wire: Connection | undefined = item?.type === 'output-selector'
+    ? selectorPortWires.value.find((entry) => entry.targetParameter === port.id)
+    : { id: '', sourceId: port.itemId!, sourceParameter: port.parameterId!, targetId: '', targetParameter: '' }
+  const signal = wire && numericSignal(modulationLayout.value, wire, effectiveSignals.value,
+    (id) => displayItems.value.find((item) => item.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
+  return { id: port.id, signal }
+}), (current, previous) => {
+  for (const entry of previous ?? []) if (!current.some((port) => port.id === entry.id)) emit('boundaryNumeric', entry.id, undefined)
+  for (const entry of current) {
+    if (!previous || !previous.some((port) => port.id === entry.id && port.signal?.value === entry.signal?.value &&
+      port.signal?.min === entry.signal?.min && port.signal?.max === entry.signal?.max)) {
+      emit('boundaryNumeric', entry.id, entry.signal)
+    }
+  }
+}, { immediate: true })
+function updateAudioGraph(layout: GridLayout) {
+  if (!audioGraph.value) return
+  try {
+    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts)
+    for (const item of layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
+      audioGraph.value.setNotes(item.id, receivedToneNotes(item.id))
+    }
+    if (rerouted) triggerRef(audioGraph)
+    audioError.value = ''
+  } catch (error) {
+    audioError.value = `Audio routing error: ${error instanceof Error ? error.message : String(error)}`
+    console.error(audioError.value, error)
+  }
+}
+watch(() => ({ ...props.layout, items: displayItems.value }), updateAudioGraph, { deep: true })
+watch(() => props.parentAudioPorts?.map(({ port, node }) => [node, port.id, port.direction, port.itemId, port.parameterId] as const),
+  (current, previous) => {
+    if (current?.length === previous?.length && current?.every((entry, index) =>
+      entry.every((value, part) => value === previous?.[index]?.[part]))) return
+    updateAudioGraph({ ...props.layout, items: displayItems.value })
+  }, { flush: 'post' })
+watch([activeNotes, boundaryActiveNotes], () => {
+  for (const item of props.layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
+    audioGraph.value?.setNotes(item.id, receivedToneNotes(item.id))
+  }
+}, { deep: true, flush: 'sync' })
 const selectedDisplay = computed(() => displayItems.value.find((item) => item.id === selectedId.value))
 const selectedLoopPlayhead = computed(() => {
   const item = selectedControl.value
@@ -113,6 +365,44 @@ const widgetEditorPlayhead = computed(() => {
 })
 function widgetButtonCount(settings: SequencedLoopSettings) {
   return LOOP_WIDGET_BUTTONS.filter((button) => loopWidgetButtonVisible(settings, button.id)).length
+}
+function mixerChannelLabel(key: string) {
+  const source = props.layout.items.find((item) =>
+    outputs(item).some((port) => port.kind === 'audio' && audioOutput(item.id, port.id) === key))
+  if (source) return source.label
+  const boundary = props.parentAudioPorts?.find(({ port }) => audioBoundaryKey(port) === key)
+  if (boundary) return boundary.port.name
+  const bankLabels: Record<string, string> = {
+    'bank-pre': 'Bank input',
+    'bank-post': 'Bank output',
+    'main-pre': 'Main input',
+    'main-post': 'Main output',
+  }
+  return bankLabels[key] ?? 'Audio input'
+}
+function mixerChannelControls(item: Extract<GridItem, { type: 'tone-element' }>) {
+  if (item.settings.elementType !== 'mixer') return []
+  return (audioGraph.value?.getMixerInputs(item.id) ?? []).map((id) => {
+    const channel = item.settings.mixerChannels?.[id]
+    return { id, label: mixerChannelLabel(id), volume: channel?.volume ?? 0, pan: channel?.pan ?? 0, solo: channel?.solo ?? false }
+  })
+}
+function changeMixerChannel(
+  item: Extract<GridItem, { type: 'tone-element' }>,
+  id: string,
+  parameter: 'volume' | 'pan' | 'solo',
+  value: number | boolean,
+) {
+  if (item.settings.elementType !== 'mixer') return
+  item.settings.mixerChannels ??= {}
+  const channel = item.settings.mixerChannels[id] ??= { volume: 0, pan: 0, solo: false }
+  if (parameter === 'solo') {
+    if (typeof value === 'boolean') channel.solo = value
+  } else if (typeof value === 'number') {
+    channel[parameter] = parameter === 'volume'
+      ? Math.max(-60, Math.min(6, value))
+      : Math.max(-1, Math.min(1, value))
+  }
 }
 function cloneWidgetClip(item: Extract<GridItem, { type: 'sequenced-loop' }>, index: number) {
   const target = cloneClip(item.settings, index)
@@ -146,6 +436,8 @@ function availableInputs(outputId: string) {
   if (!source || !target || createsCycle(props.layout.connections, source.id, target.id)) return []
   return inputs(target).filter((input) => selectorConnectionsCompatible(props.layout.items, props.layout.connections,
     { id: '', sourceId: source.id, sourceParameter: outputId, targetId: target.id, targetParameter: input.id }) &&
+    selectorRoutingCompatible(props.rootLayout ?? props.layout, { layout: props.layout, connections: [...props.layout.connections,
+      { id: '', sourceId: source.id, sourceParameter: outputId, targetId: target.id, targetParameter: input.id }] }) &&
     !props.layout.connections.some((connection) => connection.sourceId === source.id &&
       connection.sourceParameter === outputId && connection.targetId === target.id && connection.targetParameter === input.id))
 }
@@ -201,6 +493,17 @@ function nextControlId() {
   return `control-${number}`
 }
 
+function audioItemsCompatible(items: GridItem[]) {
+  try {
+    validateAudioRoutes(props.rootLayout ?? props.layout, { layout: props.layout, items })
+    return true
+  } catch (error) {
+    if (!(error instanceof AudioRouteError)) throw error
+    message.value = error.message
+    return false
+  }
+}
+
 function addItem(x: number, y: number) {
   selectedId.value = null
   addPosition.value = { x, y }
@@ -210,11 +513,43 @@ function addItem(x: number, y: number) {
 function chooseControlType(type: GridItemType) {
   const position = addPosition.value
   if (!position) return
-  addPosition.value = null
   const item = createControl(nextControlId(), position.x, position.y, type)
+  if (!audioItemsCompatible([...props.layout.items, item])) return
+  addPosition.value = null
   props.layout.items.push(item)
   selectedId.value = item.id
   newControl.value = true
+}
+
+function pasteSubGrid() {
+  const position = addPosition.value
+  const clipboard = props.subGridClipboard
+  if (!position || !clipboard) return
+  const id = nextControlId()
+  const item = createControl(id, position.x, position.y, 'sub-grid')
+  if (item.type !== 'sub-grid') return
+  item.label = clipboard.title
+  item.settings.layout = pasteSubGridLayout(clipboard, `${bankId}/${id}`)
+  if (!audioItemsCompatible([...props.layout.items, item])) return
+  props.layout.items.push(item)
+  addPosition.value = null
+  selectedId.value = item.id
+  newControl.value = true
+}
+
+function enterSubgrid(id: string) {
+  if (!props.layout.items.some((item) => item.id === id && item.type === 'sub-grid')) return
+  selectedId.value = null
+  newControl.value = false
+  message.value = ''
+  openSubgridId.value = id
+}
+
+function leaveSubgrid() {
+  openSubgridId.value = null
+  subgridSettingsOpen.value = false
+  subgridConfig.value = false
+  if (props.settingsOpen) emit('closeSettings')
 }
 
 function isOccupied(x: number, y: number) {
@@ -237,6 +572,7 @@ const { interaction, dropAction, canCopyDrop, startInteraction, updateInteractio
     message,
     openSettings,
     nextControlId,
+    validateCopy: (item) => audioItemsCompatible([...props.layout.items, item]),
   })
 
 function changeType(type: GridItemType) {
@@ -280,12 +616,19 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
     original.settings.value = Math.max(original.settings.min, Math.min(original.settings.max, adjusted))
   }
   const sourceParameter = outputs(item).find((parameter) => parameter.id === output.parameter)
+  const exposedOutputInUse = (parameter: string) => !!props.ownerSettings?.exposedPorts.some((port) =>
+    port.direction === 'output' && port.itemId === item.id && port.parameterId === parameter &&
+    props.connectedPorts?.includes(port.id))
   const trackPressure = output.parameter !== 'pressure' ||
-    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'pressure')
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'pressure') ||
+    !!props.ownerSettings?.exposedPorts.some((port) => port.direction === 'output' &&
+      port.itemId === item.id && port.parameterId === 'pressure')
   const recordVelocity = output.parameter !== 'velocity' ||
-    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'velocity')
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'velocity') ||
+    exposedOutputInUse('velocity')
   const recordGate = output.parameter !== 'gate' ||
-    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'gate')
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'gate') ||
+    exposedOutputInUse('gate')
   if (output.on === undefined && output.parameter !== 'note' && trackPressure) {
     if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
     else signals.set(`${item.id}:${output.parameter}`, output.value)
@@ -293,7 +636,10 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   const recordable = (original.type !== 'knob' && original.type !== 'mod-wheel') || original.settings.recordAutomation
   const touched = wasActive || liveControls.has(item.id) ||
     (user && output.parameter === 'velocity' && (original.type === 'pad' || original.type === 'instrument-pad' || original.type === 'piano-roll'))
-  if (props.playing && !props.editing && recordable && trackPressure && recordVelocity && recordGate && touched &&
+  const recordPressure = output.parameter !== 'pressure' ||
+    props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'pressure') ||
+    exposedOutputInUse('pressure')
+  if (props.playing && !props.editing && recordable && recordPressure && recordVelocity && recordGate && touched &&
     (user || output.user) && (original.type !== 'knob' || output.pointer === true) && sourceParameter?.kind === 'number') {
     bankEvents.emit({ kind: 'live-automation', bankId, sourceId: item.id, parameter: output.parameter,
       value: original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value, active: output.active,
@@ -311,24 +657,32 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   routeNote(item.id, output)
 }
 
-function routeNote(sourceId: string, output: ParameterOutput) {
+function routeNote(sourceId: string, output: ParameterOutput, selectedOverride?: Connection | null) {
   const source = props.layout.items.find((entry) => entry.id === sourceId)
   if (!source) return
-  const selected = source.type === 'output-selector' ? selectedSelectorWire(props.layout.connections, source) : undefined
+  const selected = source.type === 'output-selector'
+    ? selectedOverride === undefined ? selectedSelectorWire(modulationLayout.value.connections, source) : selectedOverride
+    : undefined
+  for (const port of props.ownerSettings?.exposedPorts ?? []) {
+    if (port.kind === 'note' && port.direction === 'output' && port.itemId === sourceId && port.parameterId === output.parameter) {
+      if (source.type === 'output-selector' && !(selected?.targetId === '' && selected.targetParameter === port.id)) continue
+      emit('boundaryOutput', port.id, output)
+    }
+  }
   for (const connection of props.layout.connections) {
     if (connection.sourceId !== sourceId || connection.sourceParameter !== output.parameter ||
       (source.type === 'output-selector' && connection.id !== selected?.id)) continue
     const target = props.layout.items.find((entry) => entry.id === connection.targetId)
     const targetParameter = target && inputs(target).find((parameter) => parameter.id === connection.targetParameter)
     if (!target || !targetParameter) continue
-    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'instrument-pad' || target.type === 'arpeggiator' || target.type === 'output-selector')) {
+    if (targetParameter.kind === 'note' && (target.type === 'pad' || target.type === 'instrument-pad' || target.type === 'arpeggiator' || target.type === 'output-selector' || target.type === 'tone-element' || target.type === 'sub-grid')) {
       const key = `${connection.id}:${output.value}`
       const previous = activeNotes.get(key)
       const count = previous?.count ?? 0
       if (output.on === undefined) {
         if (previous && output.bend !== undefined) activeNotes.set(key, { ...previous, bend: output.bend })
         else continue
-      } else if (output.on) activeNotes.set(key, { count: count + 1, velocity: output.velocity ?? 100, bend: output.bend })
+      } else if (output.on) activeNotes.set(key, { count: count + 1, velocity: output.velocity ?? 100, bend: output.bend, sequence: ++noteSequence })
       else if (count > 1) activeNotes.set(key, { ...previous!, count: count - 1 })
       else activeNotes.delete(key)
       if (output.on && (target.type === 'pad' || target.type === 'instrument-pad')) {
@@ -344,32 +698,104 @@ function routeNote(sourceId: string, output: ParameterOutput) {
   }
 }
 
+function boundaryNotesForSubGrid(id: string): BoundaryNote[] {
+  const notes: BoundaryNote[] = []
+  for (const connection of props.layout.connections) {
+    if (connection.targetId !== id) continue
+    const prefix = `${connection.id}:`
+    for (const [key, active] of activeNotes) {
+      if (!key.startsWith(prefix)) continue
+      notes.push({ id: JSON.stringify(['wire', connection.id, key.slice(prefix.length)]),
+        portId: connection.targetParameter, note: Number(key.slice(prefix.length)), count: active.count,
+        velocity: active.velocity, bend: active.bend })
+    }
+  }
+  for (const [key, active] of boundaryActiveNotes) {
+    if (active.targetId === id) notes.push({ id: JSON.stringify(['boundary', key]), portId: active.targetParameter,
+      note: active.note, count: active.count, velocity: active.velocity, bend: active.bend })
+  }
+  return notes
+}
+
+watch(() => props.boundaryNotes ?? [], (incoming) => {
+  const next = new Map<string, BoundaryNote & { targetId: string; targetParameter: string }>()
+  for (const note of incoming) {
+    const port = props.ownerSettings?.exposedPorts.find((entry) => entry.id === note.portId &&
+      entry.kind === 'note' && entry.direction === 'input')
+    if (!port?.itemId || !port.parameterId) continue
+    next.set(JSON.stringify([note.portId, note.id]), { ...note, targetId: port.itemId, targetParameter: port.parameterId })
+  }
+  for (const key of new Set([...boundaryActiveNotes.keys(), ...next.keys()])) {
+    const before = boundaryActiveNotes.get(key)
+    const after = next.get(key)
+    const target = props.layout.items.find((item) => item.id === (after ?? before)?.targetId)
+    const sameTarget = before && after && before.targetId === after.targetId &&
+      before.targetParameter === after.targetParameter && before.note === after.note
+    const oldCount = sameTarget ? before.count : 0
+    const newCount = sameTarget ? after.count : 0
+    if (before && (!sameTarget || before.count > newCount)) {
+      const oldTarget = props.layout.items.find((item) => item.id === before.targetId)
+      if (oldTarget?.type === 'output-selector') {
+        for (let i = sameTarget ? newCount : 0; i < before.count; i++) {
+          routeNote(oldTarget.id, { parameter: 'note', value: before.note, on: false, velocity: before.velocity })
+        }
+      }
+    }
+    if (!after) { boundaryActiveNotes.delete(key); continue }
+    boundaryActiveNotes.set(key, { ...after,
+      sequence: !sameTarget || after.count > oldCount ? ++noteSequence : before.sequence })
+    if (target?.type === 'output-selector') {
+      for (let i = sameTarget ? oldCount : 0; i < after.count; i++) {
+        routeNote(target.id, { parameter: 'note', value: after.note, on: true, velocity: after.velocity, bend: after.bend })
+      }
+      if (sameTarget && after.count && before.bend !== after.bend && after.bend !== undefined) {
+        routeNote(target.id, { parameter: 'note', value: after.note, bend: after.bend })
+      }
+    }
+    if (target && (target.type === 'pad' || target.type === 'instrument-pad') && after.count > oldCount) {
+      handleOutput(target, { parameter: 'velocity', value: after.velocity })
+    }
+  }
+}, { deep: true, immediate: true, flush: 'sync' })
+
 function selectorDestination(item: GridItem) {
-  const wire = selectedSelectorWire(props.layout.connections, item)
+  const wire = selectedSelectorWire(modulationLayout.value.connections, item)
+  const port = wire && selectorPortWires.value.some((entry) => entry.id === wire.id)
+    ? props.ownerSettings?.exposedPorts.find((entry) => entry.id === wire.targetParameter) : undefined
+  if (port) return `Parent / ${port.name}`
   const target = wire && props.layout.items.find((entry) => entry.id === wire.targetId)
   const input = target && inputs(target).find((parameter) => parameter.id === wire?.targetParameter)
   return target && input ? `${target.label} / ${input.label}` : 'No destination'
 }
 
 function numericWireValue(wire: Connection) {
-  const signal = numericSignal(props.layout, wire, effectiveSignals.value, (id) => displayItems.value.find((entry) => entry.id === id))
+  const external = resolvedBoundaryNumeric().find((entry) => entry.wire === wire ||
+    (entry.wire.id === wire.id && entry.wire.targetId === wire.targetId && entry.wire.targetParameter === wire.targetParameter))
+  const signal = external?.signal ?? numericSignal(modulationLayout.value, wire, effectiveSignals.value,
+    (id) => displayItems.value.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
   if (!signal) return undefined
   const offset = modulationOffset(wire, signal)
   return offset === undefined ? signal.value : selectorNumericValue(wire, signal, normalizeSignal(signal.value, signal.min, signal.max) * 127)
 }
 
-function selectorInputValue(wire: Connection) {
-  const signal = numericSignal(props.layout, wire, effectiveSignals.value, (id) => displayItems.value.find((entry) => entry.id === id))
+function selectorInputValue(wire: Connection, externalSignal?: BoundaryNumeric['signal']) {
+  const signal = externalSignal ?? numericSignal(modulationLayout.value, wire, effectiveSignals.value,
+    (id) => displayItems.value.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
   if (!signal) return undefined
   const target = props.layout.items.find((item) => item.id === wire.targetId)
-  const count = props.layout.connections.filter((connection) => connection.sourceId === wire.targetId).length
+  const count = modulationLayout.value.connections.filter((connection) => connection.sourceId === wire.targetId).length
   const base = target?.type === 'output-selector' && count
     ? ((target.settings.baseIndex ?? target.settings.index) % count + 0.5) * 128 / count : 0
   return selectorNumericValue(wire, signal, base)
 }
 
 function selectorValue(item: GridItem) {
-  const incoming = props.layout.connections.find((wire) => wire.targetId === item.id && wire.targetParameter !== 'selection')
+  const incoming = props.layout.connections.find((wire) => wire.targetId === item.id && wire.targetParameter !== 'selection') ??
+    resolvedBoundaryNumeric().find((entry) => entry.wire.targetId === item.id && entry.wire.targetParameter === 'value')?.wire
+  if (!incoming && [...boundaryActiveNotes.values()].some((note) => note.targetId === item.id)) {
+    const note = receivedNotes(item.id).at(-1)?.note
+    return note === undefined ? 'No signal' : noteName(note)
+  }
   if (!incoming) return 'No signal'
   if (incoming.targetParameter === 'note') {
     const note = selectorNotes.get(item.id)
@@ -381,7 +807,7 @@ function selectorValue(item: GridItem) {
 
 function setSelectorIndex(item: GridItem, index: number, userInitiated = false) {
   if (item.type !== 'output-selector') return
-  const count = props.layout.connections.filter((wire) => wire.sourceId === item.id).length
+  const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id).length
   if (userInitiated && count) item.settings.baseIndex = index
   if (!count || item.settings.index % count === index) return
   const notes = receivedNotes(item.id)
@@ -389,8 +815,8 @@ function setSelectorIndex(item: GridItem, index: number, userInitiated = false) 
     routeNote(item.id, { parameter: 'note', value: note.note, on: false, velocity: note.velocity })
   }
   item.settings.index = index
-  const selected = selectedSelectorWire(props.layout.connections, item)
-  if (selected && userInitiated) {
+  const selected = selectedSelectorWire(modulationLayout.value.connections, item)
+  if (selected && selected.targetId && userInitiated) {
     selectorFlash.value = { sourceId: item.id, targetId: selected.targetId, sequence: ++selectorFlashSequence }
     clearTimeout(selectorFlashTimer)
     selectorFlashTimer = setTimeout(() => { selectorFlash.value = null }, 900)
@@ -406,23 +832,39 @@ function setSelectorIndex(item: GridItem, index: number, userInitiated = false) 
 function advanceSelector(item: GridItem) {
   const original = props.layout.items.find((entry) => entry.id === item.id)
   if (!original || original.type !== 'output-selector') return
-  const count = props.layout.connections.filter((wire) => wire.sourceId === item.id).length
+  const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id).length
   if (count < 2) return
   setSelectorIndex(original, (original.settings.index + 1) % count, true)
 }
 
 watch(() => props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
-  const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection')
-  const origin = wire && signalSource(props.layout, wire)
-  return { id: item.id, wireId: wire?.id, originId: origin?.id, value: wire && selectorInputValue(wire) }
+  const wires = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id)
+  return { id: item.id, wires, selected: wires[item.settings.index % wires.length] }
+}), (current, previous) => {
+  for (const entry of current) {
+    const old = previous?.find((item) => item.id === entry.id)
+    if (!old || JSON.stringify(old.wires.map((wire) => wire.id)) === JSON.stringify(entry.wires.map((wire) => wire.id)) ||
+      old.selected?.id === entry.selected?.id) continue
+    for (const note of receivedNotes(entry.id)) for (let i = 0; i < note.count; i++) {
+      if (old.selected) routeNote(entry.id, { parameter: 'note', value: note.note, on: false, velocity: note.velocity }, old.selected)
+      if (entry.selected) routeNote(entry.id, { parameter: 'note', value: note.note, on: true, velocity: note.velocity, bend: note.bend }, entry.selected)
+    }
+  }
+}, { flush: 'sync' })
+
+watch(() => props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
+  const external = resolvedBoundaryNumeric().find((entry) => entry.wire.targetId === item.id && entry.wire.targetParameter === 'selection')
+  const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection') ?? external?.wire
+  const origin = wire && !external ? signalSource(modulationLayout.value, wire) : undefined
+  return { id: item.id, wireId: wire?.id, originId: origin?.id, wire, value: wire && selectorInputValue(wire, external?.signal) }
 }), (current, previous) => {
   for (const selection of current) {
     const old = previous?.find((entry) => entry.id === selection.id)
     if (old && old.wireId === selection.wireId && old.originId === selection.originId && old.value === selection.value) continue
     const item = props.layout.items.find((entry) => entry.id === selection.id)
-    const count = props.layout.connections.filter((wire) => wire.sourceId === selection.id).length
+    const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === selection.id).length
     if (!item || item.type !== 'output-selector' || !count) continue
-    const wire = props.layout.connections.find((entry) => entry.id === selection.wireId)
+    const wire = selection.wire
     if (selection.value === undefined || !Number.isFinite(selection.value)) {
       if (wire?.mappingMode === 'mod' && item.settings.baseIndex !== undefined) {
         setSelectorIndex(item, item.settings.baseIndex % count)
@@ -437,7 +879,8 @@ watch(() => props.layout.items.filter((item) => item.type === 'output-selector')
 
 function padActive(id: string) {
   return props.layout.connections.some((connection) => connection.targetId === id &&
-    [...activeNotes.keys()].some((key) => key.startsWith(`${connection.id}:`)))
+    [...activeNotes.keys()].some((key) => key.startsWith(`${connection.id}:`))) ||
+    [...boundaryActiveNotes.values()].some((note) => note.targetId === id && note.targetParameter === 'note')
 }
 
 function receivedNotes(id: string): HeldNote[] {
@@ -452,7 +895,30 @@ function receivedNotes(id: string): HeldNote[] {
       notes.set(note, { note, count: (previous?.count ?? 0) + active.count, velocity: active.velocity, bend: active.bend })
     }
   }
+  for (const active of boundaryActiveNotes.values()) {
+    if (active.targetId !== id || active.targetParameter !== 'note') continue
+    const previous = notes.get(active.note)
+    notes.set(active.note, { note: active.note, count: (previous?.count ?? 0) + active.count, velocity: active.velocity, bend: active.bend })
+  }
   return [...notes.values()].sort((a, b) => a.note - b.note)
+}
+
+function receivedToneNotes(id: string): HeldNote[] {
+  const notes: { note: HeldNote; sequence: number }[] = []
+  for (const connection of props.layout.connections) {
+    if (connection.targetId !== id || connection.targetParameter !== 'note') continue
+    const prefix = `${connection.id}:`
+    for (const [key, active] of activeNotes) {
+      if (!key.startsWith(prefix)) continue
+      notes.push({ note: { note: Number(key.slice(prefix.length)), count: active.count,
+        velocity: active.velocity, bend: active.bend }, sequence: active.sequence })
+    }
+  }
+  for (const active of boundaryActiveNotes.values()) {
+    if (active.targetId === id && active.targetParameter === 'note') notes.push({
+      note: { note: active.note, count: active.count, velocity: active.velocity, bend: active.bend }, sequence: active.sequence })
+  }
+  return notes.sort((a, b) => a.sequence - b.sequence).map((entry) => entry.note)
 }
 
 function toggleArpeggiator(id: string) {
@@ -489,6 +955,13 @@ function connectWire() {
   let number = 1
   while (props.layout.connections.some((connection) => connection.id === `wire-${number}`)) number++
   const connection = { ...pending, id: `wire-${number}` }
+  try {
+    validateAudioRoutes(props.rootLayout ?? props.layout, { layout: props.layout, connections: [...props.layout.connections, connection] })
+  } catch (error) {
+    if (!(error instanceof AudioRouteError)) throw error
+    message.value = error.message
+    return
+  }
   if (connection.mappingMode === 'mod') setConnectionMappingMode(props.layout, connection, 'mod')
   props.layout.connections.push(connection)
   wirePair.value = null
@@ -560,6 +1033,15 @@ function wireStartPosition(id: string) {
 }
 
 function removeWire(connection: Connection) {
+  const target = props.layout.items.find((item) => item.id === connection.targetId)
+  if (target?.type === 'output-selector' && connection.targetParameter === 'note') {
+    const prefix = `${connection.id}:`
+    for (const [key, note] of activeNotes) if (key.startsWith(prefix)) {
+      for (let i = 0; i < note.count; i++) routeNote(target.id, {
+        parameter: 'note', value: Number(key.slice(prefix.length)), on: false, velocity: note.velocity,
+      })
+    }
+  }
   props.layout.connections.splice(props.layout.connections.indexOf(connection), 1)
   for (const key of activeNotes.keys()) if (key.startsWith(`${connection.id}:`)) activeNotes.delete(key)
 }
@@ -589,25 +1071,66 @@ function wireLine(connection: Connection) {
 
 function removeItem() {
   finishSettingChanges()
-  const index = props.layout.items.findIndex((item) => item.id === selectedId.value)
-  if (index !== -1) props.layout.items.splice(index, 1)
+  if (props.ownerSettings?.exposedPorts.some((port) => port.itemId === selectedId.value)) {
+    message.value = 'Remove the control’s exposed ports before deleting it.'
+    return
+  }
   for (const connection of [...props.layout.connections]) {
     if (connection.sourceId === selectedId.value || connection.targetId === selectedId.value) removeWire(connection)
+  }
+  const index = props.layout.items.findIndex((item) => item.id === selectedId.value)
+  if (index !== -1) props.layout.items.splice(index, 1)
+  if (props.ownerSettings) {
+    const surfaceIndex = props.ownerSettings.surfaceItemIds.indexOf(selectedId.value ?? '')
+    if (surfaceIndex >= 0) props.ownerSettings.surfaceItemIds.splice(surfaceIndex, 1)
   }
   selectedId.value = null
   newControl.value = false
   message.value = ''
 }
 
+function protectedSubGridPorts(id: string): string[] {
+  const protectedIds = new Set<string>()
+  for (const wire of props.layout.connections) {
+    if (wire.sourceId === id) protectedIds.add(wire.sourceParameter)
+    if (wire.targetId === id) protectedIds.add(wire.targetParameter)
+  }
+  for (const port of props.ownerSettings?.exposedPorts ?? []) {
+    if (port.itemId === id && port.parameterId) protectedIds.add(port.parameterId)
+  }
+  return [...protectedIds]
+}
+
+function connectedSubGridPorts(id: string): string[] {
+  const connected = new Set(props.layout.connections.flatMap((wire) => [
+    ...(wire.sourceId === id ? [wire.sourceParameter] : []),
+    ...(wire.targetId === id ? [wire.targetParameter] : []),
+  ]))
+  for (const port of props.ownerSettings?.exposedPorts ?? []) {
+    if (port.itemId === id && port.parameterId && props.connectedPorts?.includes(port.id)) connected.add(port.parameterId)
+  }
+  return [...connected]
+}
+
+function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): BoundaryAudio[] {
+  const connected = connectedSubGridPorts(item.id)
+  return item.settings.exposedPorts.flatMap((port) => {
+    if (port.kind !== 'audio' || !connected.includes(port.id)) return []
+    const node = audioGraph.value?.getPort(item.id, port)
+    return node ? [{ port, node }] : []
+  })
+}
+
 </script>
 
 <template>
   <div class="grid-editor">
-    <p v-if="editing && !wiring" class="edit-hint">Tap + to add a control. Tap a control to edit it.</p>
-    <p v-if="wiring" class="edit-hint">{{ wireFirst ? 'Choose a destination control.' : 'Drag from a source to a destination, or tap each in order.' }}</p>
-    <p v-if="message && !selectedControl && !settingsOpen" class="grid-message" role="alert">{{ message }}</p>
+    <p v-if="!openSubgrid && editing && !wiring" class="edit-hint">Tap + to add a control. Tap a control to edit it.</p>
+    <p v-if="!openSubgrid && wiring" class="edit-hint">{{ wireFirst ? 'Choose a destination control.' : 'Drag from a source to a destination, or tap each in order.' }}</p>
+    <p v-if="!openSubgrid && message && !selectedControl && !settingsOpen" class="grid-message" role="alert">{{ message }}</p>
+    <p v-if="displayedAudioError" class="grid-message" role="alert">{{ displayedAudioError }}</p>
 
-    <div class="grid-area">
+    <div v-show="!openSubgrid" class="grid-area">
       <div
         ref="grid"
         class="groove-grid"
@@ -630,19 +1153,47 @@ function removeItem() {
           @click="addItem(cell.x, cell.y)"
         ><span v-if="editing && !wiring" aria-hidden="true">+</span></button>
 
-        <div v-for="{ item, original } in renderedItems" :key="item.id" class="grid-item" :style="itemStyle(original)">
+        <template v-for="{ item, original } in renderedItems" :key="item.id">
+        <Teleport :to="surfaceTarget || 'body'" :disabled="!surfaceTarget || !ownerSettings?.surfaceItemIds.includes(item.id)">
+        <div class="grid-item" :style="surfaceTarget && ownerSettings?.surfaceItemIds.includes(item.id) ? surfaceStyle(original) : itemStyle(original)">
           <div v-show="!editing && !wiring && !volumeMode" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
             <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
             <Knob v-else-if="item.type === 'knob'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :automation-hold="lfoAutomationHold(item.id)" @output="handleOutput(item, $event)" @hold-change="recordToggle(item.id, 'hold', $event)" />
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :audio-output="audioGraph?.getOutput(item.id)" :audio-unavailable="!audioGraph?.getOutput(item.id)" :disabled="!audioGraph?.getOutput(item.id)" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
               @advance="advanceSelector(item)" />
             <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
+            <div v-else-if="item.type === 'sub-grid' && original.type === 'sub-grid'" class="sub-grid-control">
+              <button type="button" class="subgrid-open" :aria-label="`Open ${item.label}`" @click="enterSubgrid(item.id)">Open {{ item.label }}</button>
+              <strong v-if="!original.settings.surfaceItemIds.length">{{ item.label }}</strong>
+              <div :ref="(element) => setSurfaceTarget(item.id, element)" class="subgrid-surface"
+                :style="subgridSurfaceStyle(original)" />
+            </div>
+            <ToneOscillator v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'oscillator' && audioGraph?.getOutput(item.id)"
+              :label="item.label" :settings="item.settings" :base-frequency="original.settings.frequency"
+              :notes="receivedToneNotes(item.id)" :audio-output="audioGraph?.getOutput(item.id)" />
+            <ToneNoise v-else-if="item.type === 'tone-element' && item.settings.elementType === 'noise' && audioGraph?.getOutput(item.id)"
+              :label="item.label" :settings="item.settings" :notes="receivedToneNotes(item.id)"
+              :audio-output="audioGraph?.getOutput(item.id)" />
+            <ADSREnvelopeEditor v-else-if="item.type === 'tone-element' && item.settings.elementType === 'envelope'"
+              compact :title="item.label" :envelope="item.settings" :color="item.settings.color"
+              :show-visualizer="item.settings.showVisualizer ?? true" :show-knobs="item.settings.showKnobs ?? true"
+              :attack-max="5" :decay-min="0.01" :decay-max="10"
+              @change="(parameter, output) => changeEnvelope(item, parameter, output)" @activity="setSettingGesture"
+              @open-settings="openSettings(original)" />
+            <ChannelMixer v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'mixer'"
+              :label="item.label" :color="item.settings.color" :channels="mixerChannelControls(original)"
+              @change="(id, parameter, value) => changeMixerChannel(original, id, parameter, value)" />
+            <div v-else-if="item.type === 'tone-element'" class="tone-element-control"
+              :style="{ '--tone-color': item.settings.color }">
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.settings.elementType }}</small>
+            </div>
             <div v-else-if="item.type === 'sequenced-loop' && original.type === 'sequenced-loop'" class="loop-control"
               role="group" :aria-label="`${item.label} controls`" tabindex="0"
               :style="{ '--loop-color': item.settings.color }"
@@ -751,9 +1302,42 @@ function removeItem() {
             @click="$event.detail === 0 && keyboardWire(original)">
             <span :class="{ 'vertical-edit-label': item.orientation === 'vertical' }">{{ item.label }}</span>
           </button>
+          <button v-if="configurationMode" type="button" class="wire-control"
+            :aria-label="`Configure ${original.label}`" @click="configuringId = item.id">{{ original.label }}</button>
         </div>
+        </Teleport>
+        </template>
       </div>
     </div>
+
+    <div v-if="openSubgrid" class="subgrid-navigation">
+      <button type="button" @click="leaveSubgrid">Back</button>
+      <strong>{{ openSubgrid.label }}</strong>
+      <button type="button" :aria-pressed="subgridConfig" @click="subgridConfig = !subgridConfig">CFG</button>
+      <button type="button" @click="subgridSettingsOpen = true">Grid settings</button>
+    </div>
+    <template v-for="item in layout.items" :key="item.id">
+      <GrooveGrid v-if="item.type === 'sub-grid' && audioGraph?.getInput(item.id) && audioGraph?.getOutput(item.id)"
+        v-show="openSubgridId === item.id" :layout="item.settings.layout" :root-layout="rootLayout ?? layout" :bank-id="`${bankId}/${item.id}`"
+        :parent-audio-input="audioGraph.getInput(item.id)" :parent-audio-output="audioGraph.getOutput(item.id)"
+        :parent-audio-ports="audioPortsForSubGrid(item)"
+        :banks="banks" :bank-events="bankEvents" :transport-clock="clock" :bpm="bpm" :playing="playing"
+        :start-on-input="startOnInput" :transport-start-immediate="transportStartImmediate" :triggered-by-input="triggeredByInput"
+        :sub-grid-clipboard="subGridClipboard" :repeat-division="repeatDivision"
+        :owner-settings="item.settings" :configuration-mode="subgridConfig && openSubgridId === item.id"
+        :protected-ports="protectedSubGridPorts(item.id)" :boundary-notes="boundaryNotesForSubGrid(item.id)"
+        :connected-ports="connectedSubGridPorts(item.id)"
+        :boundary-numeric="boundaryNumericForSubGrid(item.id)"
+        :surface-target="openSubgridId !== item.id && !editing && !wiring && !volumeMode ? surfaceTargets.get(item.id) : undefined"
+        :editing="editing && openSubgridId === item.id && !subgridConfig" :wiring="wiring && openSubgridId === item.id && !subgridConfig"
+        :volume-mode="volumeMode && openSubgridId === item.id"
+        :settings-open="openSubgridId === item.id && (settingsOpen || subgridSettingsOpen)"
+        @close-settings="subgridSettingsOpen = false; emit('closeSettings')" @audio-error="setNestedAudioError(item.id, $event)"
+        @boundary-output="(port, output) => routeNote(item.id, { ...output, parameter: port })"
+        @boundary-numeric="(port, signal) => setBoundaryOutput(item.id, port, signal)" />
+    </template>
+    <SubGridConfigDialog v-if="configuringItem && ownerSettings" :item="configuringItem" :settings="ownerSettings"
+      :protected-ports="protectedPorts" @close="configuringId = null" />
 
     <SettingsDialog v-if="dropAction" title="Place control" @close="dropAction = null">
       <p v-if="dropAction.swapId">Swap these controls?</p>
@@ -769,7 +1353,7 @@ function removeItem() {
       <p v-if="!dropAction.swapId && !canCopyDrop" class="grid-message">There is not enough separate space to copy here.</p>
     </SettingsDialog>
 
-    <SettingsDialog v-if="settingsOpen" title="Grid settings" @close="resizeGrid">
+    <SettingsDialog v-if="settingsOpen && !openSubgrid" title="Grid settings" @close="resizeGrid">
       <form class="settings-form" @submit.prevent="resizeGrid">
         <div class="settings-dimensions grid-dimensions">
           <NumericSetting v-model="layout.columns" label="Columns" :min="Math.max(1, ...layout.items.map((item) => item.x + item.width))" :max="MAX_GRID_COLUMNS" integer />
@@ -781,7 +1365,11 @@ function removeItem() {
 
     <SettingsDialog v-if="addPosition" title="Add control" @close="addPosition = null">
       <p class="control-picker-hint">Choose a control to add to your grid.</p>
+      <p v-if="message" class="grid-message" role="alert">{{ message }}</p>
       <div class="control-picker">
+        <button v-if="subGridClipboard" type="button" class="control-picker-button" @click="pasteSubGrid">
+          <span><strong>Paste SubGrid</strong><small>{{ subGridClipboard.title }}</small></span>
+        </button>
         <button v-for="control in controlTypes" :key="control.type" type="button" class="control-picker-button"
           @click="chooseControlType(control.type)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="control.icon" /></svg>
@@ -790,13 +1378,14 @@ function removeItem() {
       </div>
     </SettingsDialog>
 
-    <GridControlSettingsDialog v-if="selectedControl" :draft="selectedControl" :display-item="selectedDisplay" :selected-id="selectedId" :new-control="newControl" :layout="layout" :bpm="bpm" :banks="banks" :bank-id="bankId"
+    <GridControlSettingsDialog v-if="selectedControl" :draft="selectedControl" :display-item="selectedDisplay" :selected-id="selectedId" :new-control="newControl" :layout="layout" :root-layout="rootLayout ?? layout" :bpm="bpm" :banks="banks" :bank-id="bankId" :nested="!!parentAudioInput" :owner-settings="ownerSettings" :boundary-audio="parentAudioPorts"
       :loop-playhead="selectedLoopPlayhead"
       :message="message" @update:message="message = $event"
       @save="saveItem"
       @arm-change="selectedControl?.type === 'sequenced-loop' && setLoopArmed(selectedControl, $event)"
       @setting-change="selectedId && recordSettingChange(selectedId, $event)"
       @setting-activity="setSettingGesture"
+      @open-sub-grid="enterSubgrid"
       @remove="removeItem" @remove-wire="removeWire" @change-type="changeType" />
     <SequencedLoopSettingsPanel v-if="widgetEditorLoop && widgetEditor" :draft="widgetEditorLoop" :layout="layout" :banks="banks" :bank-id="bankId"
       editor-only :editor-clip-index="widgetEditor.index" :playhead="widgetEditorPlayhead"

@@ -4,6 +4,7 @@ import type { KnobSettings, ParameterOutput } from '../grid'
 
 const props = defineProps<{ label: string; settings: KnobSettings; emitInitial?: boolean; rotated?: boolean }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; activity: [active: boolean] }>()
+const dragPixelsPerStep = 1
 const pointerId = ref<number | null>(null)
 let lastY = 0
 let lastX = 0
@@ -43,8 +44,9 @@ function move(event: PointerEvent) {
   const distance = Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical
   lastX = event.clientX
   lastY = event.clientY
-  const { min, max } = props.settings
-  dragValue = Math.max(min, Math.min(max, dragValue + distance / 100 * (max - min)))
+  const { min, max, step } = props.settings
+  const valuePerPixel = Math.min(step / dragPixelsPerStep, (max - min) / 100)
+  dragValue = Math.max(min, Math.min(max, dragValue + distance * valuePerPixel))
   lastDragValue = setValue(dragValue, lastDragValue, true)
 }
 

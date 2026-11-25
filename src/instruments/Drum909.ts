@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { DrumKit } from './DrumKit'
+import type { InputNode } from 'tone'
 import type { Drum909Params } from './types'
 
 export class Drum909 extends DrumKit<'909'> {
-  constructor(params: Partial<Drum909Params>) {
-    super(params, '909')
+  constructor(params: Partial<Drum909Params>, output?: InputNode) {
+    super(params, '909', output)
   }
 }

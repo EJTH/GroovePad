@@ -5,6 +5,34 @@
 Let users build reusable controls from grids, add useful Tone.js elements, and
 route audio without needing to understand an audio graph first. This is a draft:
 the choices marked as recommendations should be confirmed before implementation.
+The sections below retain the original goals; the status and remaining plan
+describe what has actually been delivered.
+
+## Current progress
+
+- Nested SubGrids can be created, opened and edited. CFG exposes named note,
+  numeric and audio ports and selects interactive surface controls. Audio can
+  also pass through the enclosing SubGrid control.
+- Bank settings can copy a bank as a SubGrid, and Add control can paste an
+  independent snapshot. This clipboard is temporary and is cleared on reload
+  or project replacement.
+- Oscillator, noise, filter, gain, delay, reverb, envelope and mixer elements
+  are available. Oscillators accept notes, have configurable polyphony, and
+  expose a numeric frequency output. Always-on mode bypasses the oscillator
+  envelope and retains released pitches, reusing released voices for new notes.
+- Envelopes expose all ADSR settings and a numeric value output; the widget and
+  settings both use the ADSR editor. CFG indicates whether it is active.
+- Typed audio, note and numeric connections, selector routing, nested ports,
+  automatic inserts and feedback validation are implemented. Instruments
+  route through the bank audio graph.
+- The envelope processor now uses a shared envelope signal to drive its audio
+  gain. This is preparation for audio-rate modulation, **not** the completed
+  modulation refactor: envelope values and LFO output still reach control
+  routing through animation-frame updates.
+
+The latest full test run passed 166 tests and the build passed. An isolated
+offline browser check also verified the refactored envelope's audible gate.
+These checks do not replace the end-to-end testing listed below.
 
 ## Adding elements
 
@@ -97,8 +125,8 @@ continuous-oscillator behavior can be offered as a separate mode.
 ## Audio routing
 
 Treat audio, notes/events and numeric control signals as distinct, typed wire
-connections. Each bank and SubGrid has an audio context with pre-FX and post-FX
-points. The default **Bank** context refers to the current enclosing grid,
+connections. Each bank and SubGrid has audio buses with pre-FX and post-FX
+points. The default **Bank** route refers to the current enclosing grid,
 including inside a SubGrid.
 
 - Adding an effect defaults to an ordered insert chain: enclosing grid audio ->
@@ -110,20 +138,49 @@ including inside a SubGrid.
   parallel send; avoid accidental dry-signal doubling when wires are added.
 - Reject routes that create feedback, including unsafe pre/post combinations.
 
-## Implementation and delivery
+## Remaining plan
 
-1. Add nested grid data, stable instance/port identities, preset assets,
-   validation and project migration. Add the separate local collection and
-   project/collection import and export, preserving nested samples and reporting
-   missing dependencies.
-2. Add SubGrid navigation, CFG mode, interactive surfaces and control wiring.
-   Keep playback and state alive when switching editor views.
-3. Introduce managed audio buses and routable instrument outputs; preserve
-   existing project playback and session recording.
-4. Add the first Tone.js elements and routing UI, then expand the catalogue.
+### Decouple modulation from rendering
 
-Test nested save/load, instance isolation, collection persistence and backup,
-project import conflicts and dependencies, exposed ports, note on/off and pitch
-bend, audio-chain order, feedback rejection, existing projects and recording.
-The routing/runtime work is substantial: current wires carry control or note
-signals, while instruments connect directly to the audio destination.
+1. Move continuous LFO and envelope modulation for suitable audio parameters
+   into the audio graph. The shared envelope signal is already available; LFO
+   generation and audio-rate routing are still to be implemented. Widgets
+   should observe modulation for display, not drive audio from animation frames.
+2. Keep selectors and settings that are not audio parameters on a separate
+   control-rate path. Explicitly handle the boundary between audio and control
+   signals; do not imply that browser timers are reliable in background tabs.
+3. Preserve existing mappings and behavior: source ranges, absolute and
+   additive modulation, clamping, multiple inputs, selectors, nested SubGrid
+   ports, LFO hold, waveforms, depth, offset and smoothing. A signal reaching
+   an audio parameter must not also be applied through the old sampled path.
+4. Test rendered audio as well as control values, including simultaneous
+   sources, selectors, nested ports, hold/release, changes while playing and
+   save/reload. Check background-tab behavior when the audio context remains
+   running, and surface audio initialization or processing failures.
+
+### Musical timing
+
+Separately from modulation, review loop playback, note repeat, arpeggiator and
+metronome scheduling. They currently use browser timers and can fire late
+under load. A shared look-ahead scheduler should schedule musical events on
+the audio clock, while live input remains responsive. Carry scheduled times
+through routing and instrument interfaces, and test tempo changes, stop,
+voice releases and delayed or background-tab callbacks.
+
+### Other remaining overhaul work
+
+- Build the preset library and its management/import/export UI described
+  above. Preset data and storage helpers exist, but the library is not exposed
+  in the UI and bank copy/paste is not persistent.
+- Add the proposed categorized Tone.js picker. Automatic effect order follows
+  layout-item order; there is no independent effect-order control.
+- Extend Tone settings automation beyond the envelope ADSR settings where
+  appropriate. The oscillator's numeric frequency output represents one
+  priority-selected pitch, not a separate output per voice.
+- Consider fuller SubGrid breadcrumbs and navigation polish; the current
+  editor has a Back action.
+- Perform hands-on end-to-end checks for nested routing, audio and selector
+  ports, save/reload, existing projects, session recording, audio permission,
+  oscillator voice reuse and stealing, and mobile/touch interaction. Preset
+  collection persistence, backup, conflicts and sample dependencies also need
+  validation when the library UI is implemented.
