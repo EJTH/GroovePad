@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { noteName, scaleNote, scales } from '../../music'
 import { ExpressionTracker } from '../../expression'
 import type { ParameterOutput, PianoRollSettings, RepeatDivision } from '../../grid'
@@ -8,9 +8,14 @@ import { useNoteRepeat } from '../useNoteRepeat'
 
 const props = defineProps<{ label: string; settings: PianoRollSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
+const root = ref<HTMLElement | null>(null)
 const pointers = reactive(new Map<number, number>())
 const keys = reactive(new Set<number>())
 const expression = new ExpressionTracker()
+function isVisible() {
+  return !!root.value?.getClientRects().length
+}
+defineExpose({ isVisible })
 
 const notes = computed(() => {
   const numRows = props.settings.numRows ?? 1
@@ -200,7 +205,7 @@ onBeforeUnmount(releaseAll)
 </script>
 
 <template>
-  <div class="piano" :class="[settings.orientation, settings.style || 'pads']" :style="{ '--piano-color': settings.color, '--mpc-color': settings.color }"
+  <div ref="root" class="piano" :class="[settings.orientation, settings.style || 'pads']" :style="{ '--piano-color': settings.color, '--mpc-color': settings.color }"
     :aria-label="label" @touchstart.prevent @touchmove.prevent>
     <div v-for="(row, rowIndex) in rows" :key="rowIndex" class="key-row"
       :style="settings.style === 'whites-blacks' ? pianoRowStyle(row) : undefined">

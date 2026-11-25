@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { noteName, scales } from '../../music'
 import { pointerTap } from '../../pointerTap'
 import type { ArpeggiatorSettings, HeldNote, ParameterOutput } from '../../grid'
@@ -8,8 +8,13 @@ import type { TransportClock } from '../../sequencedLoop'
 const props = defineProps<{ label: string; settings: ArpeggiatorSettings; bpm: number; notes: HeldNote[]; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; toggle: [] }>()
 const tap = pointerTap(() => emit('toggle'))
-const activeNote = ref<number | null>(null)
+let currentActiveNote: number | null = null
 let activeSource: number | null = null
+let effectiveSettings = props.settings
+let scheduledEnabled = effectiveSettings.enabled
+let scheduledRate = effectiveSettings.rate
+const button = ref<HTMLButtonElement | null>(null)
+const statusText = ref<HTMLElement | null>(null)
 const forwarded = new Map<number, HeldNote>()
 let step = 0
 let interval: number | undefined
@@ -18,7 +23,7 @@ let releaseTimer: number | undefined
 let generation = 0
 
 function stepBeats() {
-  const [numerator, denominator] = props.settings.rate.split('/').map(Number)
+  const [numerator, denominator] = effectiveSettings.rate.split('/').map(Number)
   return 4 * numerator! / denominator!
 }
 
@@ -27,8 +32,9 @@ function stepDuration() { return 60000 / props.bpm * stepBeats() }
 function release() {
   if (releaseTimer !== undefined) window.clearTimeout(releaseTimer)
   releaseTimer = undefined
-  if (activeNote.value !== null) emit('output', { parameter: 'note', value: activeNote.value, on: false, velocity: 100 })
-  activeNote.value = null
+  if (currentActiveNote !== null) emit('output', { parameter: 'note', value: currentActiveNote, on: false, velocity: 100 })
+  currentActiveNote = null
+  updateDisplay()
   activeSource = null
 }
 
@@ -41,7 +47,7 @@ function tick() {
   release()
   const notes = [...props.notes].sort((a, b) => a.note - b.note)
   if (!notes.length) return
-  const { style, steps, distance, scale, gate } = props.settings
+  const { style, steps, distance, scale, gate } = effectiveSettings
   const count = (steps + 1) * notes.length
   const period = Math.max(1, count * 2 - 2)
   let index = step % count
@@ -53,11 +59,12 @@ function tick() {
   let note = root + Math.floor(index / notes.length) * distance
   while (note < 127 && !scales[scale].includes(((note - root) % 12 + 12) % 12)) note++
   note = Math.max(0, Math.min(127, note))
-  activeNote.value = note
+  currentActiveNote = note
   activeSource = held.note
   sendNote(note, true, held.velocity, held.bend)
   releaseTimer = window.setTimeout(release, stepDuration() * gate)
   step++
+  updateDisplay()
 }
 
 function stop() {
@@ -87,7 +94,7 @@ function scheduleStep(beat: number) {
 
 function restart() {
   stop()
-  if (!props.settings.enabled || !props.notes.length) return
+  if (!effectiveSettings.enabled || !props.notes.length) return
   step = 0
   if (props.playing && props.transportClock) {
     const duration = stepBeats()
@@ -97,6 +104,37 @@ function restart() {
     interval = window.setInterval(tick, stepDuration())
   }
 }
+
+function updateDisplay() {
+  const enabled = effectiveSettings.enabled
+  if (button.value) {
+    button.value.setAttribute('aria-label', `${enabled ? 'Disable' : 'Enable'} ${props.label}`)
+    button.value.setAttribute('aria-pressed', String(enabled))
+  }
+  if (statusText.value) {
+    statusText.value.textContent = enabled
+      ? props.notes.length ? `Note ${currentActiveNote === null ? '–' : noteName(currentActiveNote)}` : 'On'
+      : 'Off'
+  }
+}
+
+function setEffectiveSettings(settings: ArpeggiatorSettings) {
+  const scheduleChanged = scheduledEnabled !== settings.enabled || scheduledRate !== settings.rate
+  effectiveSettings = settings
+  scheduledEnabled = settings.enabled
+  scheduledRate = settings.rate
+  updateDisplay()
+  if (!scheduleChanged) return
+  if (effectiveSettings.enabled) {
+    syncForwarded([])
+    if (!props.notes.length) { stop(); step = 0 }
+    else restart()
+  } else {
+    stop()
+    syncForwarded(props.notes)
+  }
+}
+defineExpose({ setEffectiveSettings })
 
 function syncForwarded(notes: HeldNote[]) {
   const next = new Map(notes.map((note) => [note.note, note]))
@@ -119,17 +157,17 @@ function syncForwarded(notes: HeldNote[]) {
   for (const [pitch, note] of next) forwarded.set(pitch, { ...note })
 }
 
+watch(() => props.settings, setEffectiveSettings, { deep: true, flush: 'sync' })
 watch(
   [
     () => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(','),
-    () => props.settings.enabled,
-    () => props.settings.rate,
     () => props.bpm,
     () => props.playing,
     () => props.transportClock,
   ],
   (current, previous) => {
-    if (props.settings.enabled) {
+    updateDisplay()
+    if (effectiveSettings.enabled) {
       syncForwarded([])
       if (!props.notes.length) { stop(); step = 0 }
       else if (!previous?.[0] || current.slice(1).some((value, index) => value !== previous[index + 1])) restart()
@@ -141,21 +179,24 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 watch(() => props.notes.map((note) => `${note.note}:${note.bend ?? 0}`).join(','), () => {
-  if (!props.settings.enabled) syncForwarded(props.notes)
-  else if (activeNote.value !== null && activeSource !== null) {
+  updateDisplay()
+  if (!effectiveSettings.enabled) syncForwarded(props.notes)
+  else if (currentActiveNote !== null && activeSource !== null) {
     const note = props.notes.find((entry) => entry.note === activeSource)
-    if (note) emit('output', { parameter: 'note', value: activeNote.value, bend: note.bend ?? 0 })
+    if (note) emit('output', { parameter: 'note', value: currentActiveNote, bend: note.bend ?? 0 })
   }
 }, { flush: 'sync' })
+onMounted(updateDisplay)
 onBeforeUnmount(() => { stop(); syncForwarded([]) })
 </script>
 
 <template>
-  <button type="button" class="arp" :style="{ '--arp-color': settings.color }" :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`"
-    :aria-pressed="settings.enabled" @pointerdown="tap.down" @pointerup="tap.up"
+  <button ref="button" type="button" class="arp" :style="{ '--arp-color': settings.color }"
+    :aria-label="`${settings.enabled ? 'Disable' : 'Enable'} ${label}`" :aria-pressed="settings.enabled"
+    @pointerdown="tap.down" @pointerup="tap.up"
     @pointercancel="tap.cancel" @lostpointercapture="tap.cancel" @click="tap.click">
     <strong>{{ label }}</strong>
-    <span>{{ settings.enabled ? (notes.length ? `Note ${activeNote === null ? '–' : noteName(activeNote)}` : 'On') : 'Off' }}</span>
+    <span ref="statusText">{{ settings.enabled ? 'On' : 'Off' }}</span>
   </button>
 </template>
 

@@ -17,6 +17,7 @@ const emit = defineEmits<{ toggleMute: [] }>()
 const continuous = ref(false)
 const error = ref('')
 const waitingForAudio = ref(false)
+let effectiveSettings = props.settings
 const hasControls = computed(() => props.settings.noteMode === 'continuous' ||
   (props.settings.noteMode === 'always-on' && (waitingForAudio.value || !!error.value)))
 let oscillator: ToneOscillator | undefined
@@ -26,7 +27,7 @@ let disposed = false
 function updateOscillator(notes: HeldNote[], playContinuous: boolean) {
   if (!oscillator) return
   try {
-    oscillator.update(props.settings, props.baseFrequency, notes, playContinuous)
+    oscillator.update(effectiveSettings, props.baseFrequency, notes, playContinuous)
     error.value = ''
   } catch (cause) {
     error.value = `Oscillator audio error: ${cause instanceof Error ? cause.message : String(cause)}`
@@ -35,7 +36,7 @@ function updateOscillator(notes: HeldNote[], playContinuous: boolean) {
 }
 
 function sync() {
-  const playContinuous = props.settings.noteMode === 'always-on' || (props.settings.noteMode === 'continuous' && continuous.value)
+  const playContinuous = effectiveSettings.noteMode === 'always-on' || (effectiveSettings.noteMode === 'continuous' && continuous.value)
   const active = props.notes.length > 0 || playContinuous
   if (!active) {
     generation++
@@ -53,9 +54,9 @@ function sync() {
     try {
       await Tone.start()
       if (disposed || request !== generation) return
-      oscillator = new ToneOscillator(props.settings, props.audioOutput)
-      oscillator.update(props.settings, props.baseFrequency, props.notes,
-        props.settings.noteMode === 'always-on' || (props.settings.noteMode === 'continuous' && continuous.value))
+      oscillator = new ToneOscillator(effectiveSettings, props.audioOutput)
+      oscillator.update(effectiveSettings, props.baseFrequency, props.notes,
+        effectiveSettings.noteMode === 'always-on' || (effectiveSettings.noteMode === 'continuous' && continuous.value))
       waitingForAudio.value = false
       error.value = ''
     } catch (cause) {
@@ -67,9 +68,21 @@ function sync() {
   })()
 }
 
+function setEffectiveSettings(settings: ToneElementSettings) {
+  const relevant = ['oscillatorType', 'frequency', 'detune', 'attack', 'release', 'noteMode', 'notePriority', 'polyphony'] as const
+  if (relevant.every((key) => effectiveSettings[key] === settings[key])) {
+    effectiveSettings = settings
+    return
+  }
+  effectiveSettings = settings
+  sync()
+}
+defineExpose({ setEffectiveSettings })
+
 watch(() => props.settings.noteMode, (mode) => {
   if (mode !== 'continuous') continuous.value = false
 }, { flush: 'sync' })
+watch(() => props.settings, (settings) => { effectiveSettings = settings; sync() }, { deep: true, flush: 'sync' })
 watch(() => [props.settings.oscillatorType, props.settings.frequency, props.settings.detune,
   props.settings.attack, props.settings.release, props.settings.noteMode, props.settings.notePriority, props.settings.polyphony,
   props.baseFrequency, continuous.value,

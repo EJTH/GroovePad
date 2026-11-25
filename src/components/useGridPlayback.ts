@@ -24,18 +24,23 @@ export function useGridPlayback(options: {
   triggeredByInput: () => boolean | undefined
   startOnInput: () => ((bankId: string) => Promise<boolean>) | undefined
   signals: Map<string, number>
+  scheduleControlRefresh: () => void
   routeNote: (sourceId: string, output: ParameterOutput) => void
   boundaryNumeric?: () => BoundaryNumeric[]
   modulationLayout?: () => GridLayout
   boundaryOutputs?: ReadonlyMap<string, NumericSignal>
 }) {
   const loopVoices = reactive(new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>())
-  const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
+  const loopAutomation = new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>()
   const liveControls = reactive(new Set<string>())
-  const manualOverrides = reactive(new Map<string, number>())
+  const manualOverrides = new Map<string, number>()
   const settingTimers = reactive(new Map<string, ReturnType<typeof setTimeout> | undefined>())
   let settingGesture = false
   let automationSequence = 0
+  const displayVersion = ref(0)
+  function refreshDisplaySnapshot() {
+    displayVersion.value++
+  }
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
   const loopEditorPlayheads = ref(new Map<string, { index: number; position: number }>())
@@ -57,7 +62,7 @@ export function useGridPlayback(options: {
     },
     options.bankId,
     (loop) => {
-      const effective = displayItems.value.find((item) => item.id === loop.id)
+      const effective = getDisplayItems().find((item) => item.id === loop.id)
       return effective?.type === 'sequenced-loop' ? effective.settings.clipIndex : loop.settings.clipIndex
     },
     (first, second) => sameBankScope(options.banks() ?? [], first, second),
@@ -73,7 +78,7 @@ export function useGridPlayback(options: {
     const editorPlayheads = new Map<string, { index: number; position: number }>()
     for (const item of options.layout().items) if (item.type === 'sequenced-loop') {
       next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id) })
-      const displayed = displayItems.value.find((entry) => entry.id === item.id)
+      const displayed = getDisplayItems().find((entry) => entry.id === item.id)
       const position = loopEngine.playhead(item.id, displayed?.type === 'sequenced-loop' ? displayed.settings.clipIndex : item.settings.clipIndex)
       if (position !== undefined) playheads.set(item.id, position * 100)
       const editorPosition = loopEngine.playhead(item.id, item.settings.clipIndex)
@@ -265,7 +270,7 @@ export function useGridPlayback(options: {
 
   function clearLoopClip(id: string) {
     const item = options.layout().items.find((entry) => entry.id === id)
-    const displayItem = displayItems.value.find((entry) => entry.id === id)
+    const displayItem = getDisplayItems().find((entry) => entry.id === id)
     if (item?.type !== 'sequenced-loop' || displayItem?.type !== 'sequenced-loop') return
     const index = String(displayItem.settings.clipIndex)
     item.settings.clips[index] = []
@@ -316,10 +321,15 @@ export function useGridPlayback(options: {
         loopVoices.set(event.voiceId, { instrumentId: source.id, note: event.note.note, velocity: event.note.velocity, bend: event.note.bend })
       }
     } else if (event.kind === 'loop-automation') {
-      if (!event.event) { loopAutomation.delete(event.owner); return }
+      if (!event.event) {
+        loopAutomation.delete(event.owner)
+        options.scheduleControlRefresh()
+        return
+      }
       if (event.bankId !== options.bankId) return
       if (event.remove) {
         loopAutomation.get(event.owner)?.delete(`${event.event.sourceId}:${event.event.parameter}`)
+        options.scheduleControlRefresh()
         return
       }
       let values = loopAutomation.get(event.owner)
@@ -327,22 +337,24 @@ export function useGridPlayback(options: {
       values.set(`${event.event.sourceId}:${event.event.parameter}`, {
         sourceId: event.event.sourceId, value: event.event.value, active: event.event.active, sequence: ++automationSequence,
       })
+      options.scheduleControlRefresh()
     }
   }
   const unsubscribeBankEvents = options.bankEvents.subscribe(receiveBankEvent)
 
   let loopTimer: ReturnType<typeof setInterval> | undefined
-  const playbackAutomation = computed(() => {
+  function playbackAutomation() {
     const selected = new Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>()
     for (const values of loopAutomation.values()) for (const [key, event] of values) {
       if (!selected.has(key) || selected.get(key)!.sequence < event.sequence) selected.set(key, event)
     }
     return selected
-  })
+  }
 
-  const effectiveSignals = computed(() => {
+  function effectiveSignals() {
     const result = new Map(options.signals)
-    for (const [key, event] of playbackAutomation.value) {
+    const events = playbackAutomation()
+    for (const [key, event] of events) {
       const source = options.layout().items.find((item) => item.id === event.sourceId)
       if (!source || liveControls.has(source.id) || (manualOverrides.get(key) ?? -1) >= event.sequence) continue
       if (event.active === false) result.delete(key)
@@ -350,19 +362,19 @@ export function useGridPlayback(options: {
     }
     for (const item of options.layout().items) if (item.type === 'knob') {
       const parameter = 'setting:knob:value'
-      const event = playbackAutomation.value.get(`${item.id}:${parameter}`)
-      const output = playbackAutomation.value.get(`${item.id}:value`)
+      const event = events.get(`${item.id}:${parameter}`)
+      const output = events.get(`${item.id}:value`)
       if (event && (!output || event.sequence > output.sequence) && displayedAutomation(item.id, parameter) !== undefined) {
         result.set(`${item.id}:value`, event.value)
       }
     }
     return result
-  })
+  }
 
   function controlActivity(id: string, active: boolean) {
     if (active) {
       const item = options.layout().items.find((entry) => entry.id === id)
-      const value = playbackAutomation.value.get(`${id}:value`)
+      const value = playbackAutomation().get(`${id}:value`)
       if (item?.type === 'knob' && value && value.active !== false) {
         item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value.value))
       }
@@ -391,7 +403,10 @@ export function useGridPlayback(options: {
   }
 
   function markManualOverride(itemId: string, parameter: string) {
-    manualOverrides.set(`${itemId}:${parameter}`, automationSequence)
+    const key = `${itemId}:${parameter}`
+    if (manualOverrides.get(key) === automationSequence) return
+    manualOverrides.set(key, automationSequence)
+    options.scheduleControlRefresh()
   }
 
   function finishSettingChanges() {
@@ -432,32 +447,49 @@ export function useGridPlayback(options: {
 
   function displayedAutomation(id: string, parameter: string) {
     const key = `${id}:${parameter}`
-    const event = playbackAutomation.value.get(key)
+    const event = playbackAutomation().get(key)
     return event && event.active !== false && !liveControls.has(id) && !settingTimers.has(JSON.stringify([id, parameter])) &&
       (manualOverrides.get(key) ?? -1) < event.sequence ? event.value : undefined
   }
 
-  const automationItems = computed(() => {
+  function getAutomationItems() {
     const layout = options.layout()
+    const signals = effectiveSignals()
+    const events = playbackAutomation()
     return layout.items.map((item) => {
       const settings = new Map<string, number>()
-      for (const [key, event] of playbackAutomation.value) {
+      for (const [key, event] of events) {
         if (event.sourceId !== item.id) continue
         const parameter = key.slice(item.id.length + 1)
         if (!parameter.startsWith('setting:') || displayedAutomation(item.id, parameter) === undefined) continue
         settings.set(parameter, event.value)
       }
       const effective = settings.size ? applySettingsAutomation(item, settings) : item
-      const enabled = effective.type === 'arpeggiator' ? effectiveSignals.value.get(`${item.id}:enabled`) : undefined
+      const enabled = effective.type === 'arpeggiator' ? signals.get(`${item.id}:enabled`) : undefined
       return effective.type === 'arpeggiator' && enabled !== undefined
         ? { ...effective, settings: { ...effective.settings, enabled: enabled >= 0.5 } }
         : effective
     })
+  }
+  const automationItems = computed(() => {
+    void displayVersion.value
+    return getAutomationItems()
   })
-  const displayItems = computed(() => {
+  function getDisplayItems() {
     const modulationLayout = options.modulationLayout?.() ?? options.layout()
-    return effectiveControls({ ...modulationLayout, items: automationItems.value }, effectiveSignals.value,
+    const selectors = new Map(modulationLayout.items.filter((item) => item.type === 'output-selector')
+      .map((item) => [item.id, item.settings.index]))
+    const items = getAutomationItems().map((item) => {
+      const index = selectors.get(item.id)
+      return item.type === 'output-selector' && index !== undefined
+        ? { ...item, settings: { ...item.settings, index } } : item
+    })
+    return effectiveControls({ ...modulationLayout, items }, effectiveSignals(),
       options.boundaryNumeric?.() ?? [], options.boundaryOutputs, true)
+  }
+  const displayItems = computed(() => {
+    void displayVersion.value
+    return getDisplayItems()
   })
   watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
     ({ id: item.id, index: item.settings.clipIndex })), (selections) => {
@@ -488,9 +520,15 @@ export function useGridPlayback(options: {
     }
   }, { immediate: true, flush: 'sync' })
 
+  let playbackStateInitialized = false
   watch([options.playing, options.editing], ([playing, editing]) => {
     if (!playing || editing) { liveControls.clear(); manualOverrides.clear() }
     updateLoopStatus()
+    if (playbackStateInitialized) {
+      options.scheduleControlRefresh()
+      refreshDisplaySnapshot()
+    }
+    playbackStateInitialized = true
   }, { immediate: true, flush: 'sync' })
 
   onBeforeUnmount(() => {
@@ -509,8 +547,11 @@ export function useGridPlayback(options: {
     loopEditorPlayheads,
     playbackAutomation,
     effectiveSignals,
+    refreshDisplaySnapshot,
     automationItems,
     displayItems,
+    getAutomationItems,
+    getDisplayItems,
     startArmedLoops,
     updateLoopStatus,
     loopGesture,

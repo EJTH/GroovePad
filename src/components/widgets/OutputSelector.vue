@@ -1,18 +1,30 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import { pointerTap } from '../../pointerTap'
 
-defineProps<{ label: string; destination: string; value: string; flashSequence: number }>()
+const props = defineProps<{ label: string; destination: string; value: string; flashSequence: number }>()
 const emit = defineEmits<{ advance: [] }>()
 const tap = pointerTap(() => emit('advance'))
+const button = ref<HTMLButtonElement | null>(null)
+const destinationText = ref<HTMLElement | null>(null)
+const valueText = ref<HTMLElement | null>(null)
+function setRuntimeDisplay(destination: string, value: string) {
+  if (!button.value || !destinationText.value || !valueText.value || !button.value.getClientRects().length) return false
+  destinationText.value.textContent = destination
+  valueText.value.textContent = value
+  button.value.setAttribute('aria-label', `${props.label}: ${destination}, ${value}. Select next output`)
+  return true
+}
+defineExpose({ setRuntimeDisplay })
 </script>
 
 <template>
-  <button type="button" class="output-selector" :aria-label="`${label}: ${destination}, ${value}. Select next output`"
+  <button ref="button" type="button" class="output-selector" :aria-label="`${label}: ${destination}, ${value}. Select next output`"
     @pointerdown="tap.down" @pointerup="tap.up" @pointercancel="tap.cancel" @lostpointercapture="tap.cancel" @click="tap.click">
     <span v-if="flashSequence" :key="flashSequence" class="flash" aria-hidden="true"></span>
     <span class="label">{{ label }}</span>
-    <span :key="flashSequence" class="destination" :class="{ blinking: flashSequence }">{{ destination }}</span>
-    <span class="value">{{ value }}</span>
+    <span ref="destinationText" :key="flashSequence" class="destination" :class="{ blinking: flashSequence }">{{ destination }}</span>
+    <span ref="valueText" class="value">{{ value }}</span>
   </button>
 </template>
 

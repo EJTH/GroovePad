@@ -11,6 +11,7 @@ const props = defineProps<{ label: string; settings: InstrumentPadSettings; note
 const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
 const error = ref('')
 const inputsMuted = ref(false)
+let effectiveSettings = props.settings
 let instrument: InstrumentInstance | undefined
 let localPressed = false
 let localVelocity = 100
@@ -35,9 +36,9 @@ function incomingBend() {
 }
 
 function syncParameters() {
-  const params = props.settings.muted ? { ...props.settings.instrumentParams, volume: -Infinity } : props.settings.instrumentParams
+  const params = effectiveSettings.muted ? { ...effectiveSettings.instrumentParams, volume: -Infinity } : effectiveSettings.instrumentParams
   if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
-    if (instrument.params.sample !== props.settings.instrumentParams.sample) {
+    if (instrument.params.sample !== effectiveSettings.instrumentParams.sample) {
       generation++
       instrument.dispose()
       instrument = undefined
@@ -66,6 +67,12 @@ function syncParameters() {
   }
 }
 
+function setEffectiveSettings(settings: InstrumentPadSettings) {
+  effectiveSettings = settings
+  syncParameters()
+}
+defineExpose({ setEffectiveSettings })
+
 function syncNote() {
   if (props.audioUnavailable) {
     generation++
@@ -73,7 +80,7 @@ function syncNote() {
     currentKey = ''
     return
   }
-  if (props.settings.instrumentType === 'sample-hit' && props.settings.instrumentParams.polyphony > 1) {
+  if (effectiveSettings.instrumentType === 'sample-hit' && effectiveSettings.instrumentParams.polyphony > 1) {
     syncHitNotes()
     return
   }
@@ -92,7 +99,7 @@ function syncNote() {
     try {
       await Tone.start()
       if (unmounted || request !== generation) return
-      instrument ??= InstrumentFactory.create(props.settings.instrumentType, props.settings.instrumentParams, props.audioOutput)
+      instrument ??= InstrumentFactory.create(effectiveSettings.instrumentType, effectiveSettings.instrumentParams, props.audioOutput)
       syncParameters()
       instrument.setPitchBend?.(localPressed ? 0 : incomingBend())
       await instrument.trigger(velocity, note)
@@ -128,7 +135,7 @@ function syncHitNotes() {
       try {
         await Tone.start()
         if (unmounted || request !== generation || hitNotes.get(id) !== note) return
-        instrument ??= InstrumentFactory.create('sample-hit', props.settings.instrumentParams, props.audioOutput)
+        instrument ??= InstrumentFactory.create('sample-hit', effectiveSettings.instrumentParams, props.audioOutput)
         if (!(instrument instanceof SampleHit)) return
         syncParameters()
         if (!(instrument instanceof SampleHit) || hitNotes.get(id) !== note) return
@@ -177,10 +184,9 @@ watch(() => (props.loopNotes ?? []).map((note) => `${note.note}:${note.count}:${
   syncNote, { flush: 'sync' })
 watch(() => localPressed ? 0 : incomingBend(),
   (bend) => {
-    if (!(instrument instanceof SampleHit) || props.settings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
+    if (!(instrument instanceof SampleHit) || effectiveSettings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
   })
-watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
-watch(() => props.settings.muted, syncParameters, { flush: 'sync' })
+watch(() => props.settings, (settings) => { effectiveSettings = settings; syncParameters() }, { deep: true, immediate: true })
 watch(() => props.audioUnavailable, syncNote, { flush: 'sync' })
 onBeforeUnmount(() => {
   if (localPressed && props.settings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)

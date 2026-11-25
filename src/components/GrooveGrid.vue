@@ -2,7 +2,7 @@
 import { computed, onBeforeMount, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowReactive, shallowRef, triggerRef, watch } from 'vue'
 import { createControl, nextLoopQuantize, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision, type SubGridSettings } from '../grid'
 import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible, selectorRoutingCompatible } from '../parameters'
-import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource, type BoundaryNumeric, type NumericSignal } from '../modulation'
+import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
 import MPCPad from './widgets/MPCPad.vue'
@@ -19,6 +19,7 @@ import ADSREnvelopeEditor from './UI/ADSREnvelopeEditor.vue'
 import ChannelMixer from './widgets/tone/ChannelMixer.vue'
 import { BankAudio, type BoundaryAudio } from '../audio/bankAudio'
 import { audioBoundaryKey, audioOutput, AudioRouteError, validateAudioRoutes } from '../audio/audioRoutes'
+import { SignalRuntime, subscribeVisualRefresh } from '../audio/signalRuntime'
 import { oscillatorPitch } from '../audio/toneOscillator'
 import NumericSetting from './UI/NumericSetting.vue'
 import SettingsDialog from './UI/SettingsDialog.vue'
@@ -89,6 +90,13 @@ const displayedAudioError = computed(() => [audioError.value, processorError.val
 watch(displayedAudioError, (error) => emit('audioError', error))
 watch(() => props.layout.items.map((item) => item.id), (ids) => {
   for (const id of nestedAudioErrors.keys()) if (!ids.includes(id)) nestedAudioErrors.delete(id)
+  for (const id of nestedGridRuntime.keys()) if (!ids.includes(id)) nestedGridRuntime.delete(id)
+  for (const key of boundaryOutputSignals.keys()) {
+    if (!props.layout.items.some((item) => key.startsWith(`${item.id}:`))) {
+      boundaryOutputSignals.delete(key)
+      signalRuntime.delete(key)
+    }
+  }
 })
 function setNestedAudioError(id: string, error: string) {
   if (error) nestedAudioErrors.set(id, error)
@@ -115,8 +123,8 @@ onBeforeMount(() => {
     audioGraph.value.update(props.layout, props.parentAudioPorts, {
       bpm: props.bpm,
       toneSettings: effectiveToneSettings(),
-      baseItems: automationItems.value,
-      signals: effectiveSignals.value,
+      baseItems: getAutomationItems(),
+      signals: effectiveSignals(),
       boundaryInputs: modulationBoundaryInputs(),
       wheelPositions,
       automatedWheels: automatedModWheels(),
@@ -178,43 +186,44 @@ const wireDraft = ref<Connection | null>(null)
 const activeNotes = reactive(new Map<string, { count: number; velocity: number; bend?: number; sequence: number }>())
 const boundaryActiveNotes = reactive(new Map<string, BoundaryNote & { targetId: string; targetParameter: string; sequence: number }>())
 let noteSequence = 0
-const signals = reactive(new Map<string, number>())
-const wheelPositions = reactive(new Map<string, number>())
-const boundaryOutputSignals = reactive(new Map<string, NumericSignal>())
+const signalRuntime = new SignalRuntime()
+const signals = signalRuntime.values
+onBeforeUnmount(() => signalRuntime.dispose())
+const wheelPositions = new Map<string, number>()
+const boundaryOutputSignals = new Map<string, NumericSignal>()
+const boundarySignalOverrides = new Map<string, NumericSignal | undefined>()
+const runtimeSelectorIndexes = new Map<string, number>()
+const selectorInputSnapshots = new Map<string, string>()
+const nestedGridRuntime = new Map<string, { setBoundaryNumericInput(port: string, signal?: NumericSignal): void }>()
+const loopRuntimeVisibility = new Map<string, () => boolean>()
+const loopRuntimeVisible = new Map<string, boolean>()
+const runtimeLoopIndexes = new Map<string, number>()
+const pianoRuntimeVisibility = new Map<string, () => boolean>()
+const pianoRuntimeStates = new Map<string, { visible: boolean; settings: string }>()
 const envelopeOutputs = computed(() => props.layout.items.filter((item) =>
   item.type === 'tone-element' && item.settings.elementType === 'envelope' &&
   (props.layout.connections.some((wire) => wire.sourceId === item.id && wire.sourceParameter === 'value') ||
     props.ownerSettings?.exposedPorts.some((port) => port.itemId === item.id && port.parameterId === 'value' &&
       port.direction === 'output' && port.kind === 'numeric'))).map((item) => item.id))
-let envelopeFrame: number | undefined
-let envelopeMonitoring = false
+let stopEnvelopeRefresh: (() => void) | undefined
 function sampleEnvelopes() {
-  envelopeFrame = undefined
   for (const id of envelopeOutputs.value) {
     const value = audioGraph.value?.getEnvelopeValue(id)
     const key = `${id}:value`
-    if (value === undefined) signals.delete(key)
-    else if (signals.get(key) !== value) signals.set(key, value)
+    if (value === undefined) signalRuntime.delete(key)
+    else signalRuntime.set(key, value)
   }
-  if (envelopeMonitoring && envelopeOutputs.value.length) envelopeFrame = requestAnimationFrame(sampleEnvelopes)
 }
 watch(envelopeOutputs, (current, previous) => {
-  for (const id of previous ?? []) if (!current.includes(id)) signals.delete(`${id}:value`)
-  if (!current.length && envelopeFrame !== undefined) {
-    cancelAnimationFrame(envelopeFrame)
-    envelopeFrame = undefined
-  } else if (current.length && envelopeMonitoring && envelopeFrame === undefined) {
-    envelopeFrame = requestAnimationFrame(sampleEnvelopes)
-  }
+  for (const id of previous ?? []) if (!current.includes(id)) signalRuntime.delete(`${id}:value`, true)
+  stopEnvelopeRefresh?.()
+  stopEnvelopeRefresh = current.length ? subscribeVisualRefresh(sampleEnvelopes) : undefined
 })
 onMounted(() => {
-  envelopeMonitoring = true
-  if (envelopeOutputs.value.length) envelopeFrame = requestAnimationFrame(sampleEnvelopes)
+  updateRuntimeControls()
+  if (envelopeOutputs.value.length) stopEnvelopeRefresh = subscribeVisualRefresh(sampleEnvelopes)
 })
-onBeforeUnmount(() => {
-  envelopeMonitoring = false
-  if (envelopeFrame !== undefined) cancelAnimationFrame(envelopeFrame)
-})
+onBeforeUnmount(() => stopEnvelopeRefresh?.())
 const selectorNotes = reactive(new Map<string, number>())
 const selectorFlash = ref<{ sourceId: string; targetId: string; sequence: number } | null>(null)
 let selectorFlashSequence = 0
@@ -237,7 +246,7 @@ const selectorPortWires = computed(() => {
 })
 const modulationLayout = computed(() => ({ ...props.layout, connections: [...props.layout.connections, ...selectorPortWires.value] }))
 const {
-  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, loopEditorPlayheads, effectiveSignals, automationItems, displayItems, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
+  loopEngine, loopAutomation, liveControls, loopStatus, loopPlayheads, loopEditorPlayheads, effectiveSignals, automationItems, displayItems, getAutomationItems, getDisplayItems, refreshDisplaySnapshot, startArmedLoops, loopGesture, loopKeyDown, toggleLoop,
   changeLoopIndex,
   recordedNotes, selectedLoopNotes, loopWantsPlayback, previewX, previewY, previewColor, loopPreviewCurves, armLoop,
   setLoopArmed, toggleLoopPlayback, clearLoopClip, beginInput, captureNote, controlActivity, markManualOverride, displayedAutomation,
@@ -254,18 +263,31 @@ const {
   triggeredByInput: () => props.triggeredByInput,
   startOnInput: () => props.startOnInput,
   signals,
+  scheduleControlRefresh: () => signalRuntime.refresh(),
   routeNote,
   boundaryNumeric: resolvedBoundaryNumeric,
   boundaryOutputs: boundaryOutputSignals,
-  modulationLayout: () => modulationLayout.value,
+  modulationLayout: () => withRuntimeSelectors(modulationLayout.value, props.layout.items),
 })
+watch([() => props.editing, () => props.wiring, () => props.settingsOpen, selectedId, widgetEditor],
+  refreshDisplaySnapshot, { flush: 'post' })
 void loopEngine
 void loopAutomation
 void toggleLoop
 void changeLoopIndex
+let runtimeControlItems = getDisplayItems()
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
-function effectiveToneSettings() {
-  return new Map(displayItems.value.flatMap((item) =>
+function withRuntimeSelectors(layout: GridLayout, items: GridItem[] = layout.items): GridLayout {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  return { ...layout, items: layout.items.map((item) => {
+    const current = byId.get(item.id) ?? item
+    const index = runtimeSelectorIndexes.get(item.id)
+    return current.type === 'output-selector' && index !== undefined
+      ? { ...current, settings: { ...current.settings, index } } : current
+  }) }
+}
+function effectiveToneSettings(items = runtimeControlItems) {
+  return new Map(items.flatMap((item) =>
     item.type === 'tone-element' ? [[item.id, item.settings] as const] : []))
 }
 const latchedOscillatorNotes = new Map<string, HeldNote>()
@@ -281,21 +303,24 @@ watch(() => renderedItems.value.flatMap(({ item, original }) => {
 }), (current, previous) => {
   for (const entry of previous ?? []) {
     if (!current.some((item) => item.id === entry.id)) {
-      signals.delete(`${entry.id}:frequency`)
+      signalRuntime.delete(`${entry.id}:frequency`, true)
       latchedOscillatorNotes.delete(entry.id)
     }
   }
   for (const entry of current) {
     const key = `${entry.id}:frequency`
-    if (signals.get(key) !== entry.value) signals.set(key, entry.value)
+    signalRuntime.set(key, entry.value)
   }
 }, { immediate: true })
 function resolvedBoundaryNumeric(): BoundaryNumeric[] {
   return (props.boundaryNumeric ?? []).flatMap((entry) => {
+    const signal = boundarySignalOverrides.has(entry.portId)
+      ? boundarySignalOverrides.get(entry.portId) : entry.signal
+    if (!signal) return []
     const port = props.ownerSettings?.exposedPorts.find((candidate) =>
       candidate.id === entry.portId && candidate.kind === 'numeric' && candidate.direction === 'input')
     return port?.itemId && port.parameterId
-      ? [{ ...entry, wire: { ...entry.wire, targetId: port.itemId, targetParameter: port.parameterId } }] : []
+      ? [{ ...entry, signal, wire: { ...entry.wire, targetId: port.itemId, targetParameter: port.parameterId } }] : []
   })
 }
 function modulationBoundaryInputs() {
@@ -309,49 +334,81 @@ function setBoundaryOutput(id: string, port: string, signal?: NumericSignal) {
   const key = `${id}:${port}`
   if (!signal) {
     boundaryOutputSignals.delete(key)
-    signals.delete(key)
+    signalRuntime.delete(key)
   } else {
     boundaryOutputSignals.set(key, signal)
-    signals.set(key, signal.value)
+    signalRuntime.set(key, signal.value)
   }
+  nestedGridRuntime.get(id)?.setBoundaryNumericInput(port, signal)
+  signalRuntime.refresh()
+}
+
+function setBoundaryNumericInput(port: string, signal?: NumericSignal) {
+  if (sameNumericSignal(boundarySignalOverrides.get(port), signal) && boundarySignalOverrides.has(port)) return
+  boundarySignalOverrides.set(port, signal)
+  signalRuntime.refresh()
+}
+
+function setNestedGridRuntime(id: string, instance: unknown) {
+  if (typeof instance === 'object' && instance !== null && 'setBoundaryNumericInput' in instance &&
+    typeof instance.setBoundaryNumericInput === 'function') {
+    const update = instance.setBoundaryNumericInput
+    nestedGridRuntime.set(id, {
+      setBoundaryNumericInput: (port, signal) => { Reflect.apply(update, instance, [port, signal]) },
+    })
+  } else nestedGridRuntime.delete(id)
 }
 function boundaryNumericForSubGrid(id: string): BoundaryNumeric[] {
   const result = resolvedBoundaryNumeric().filter((entry) => entry.wire.targetId === id)
     .map((entry) => ({ ...entry, portId: entry.wire.targetParameter }))
   const target = props.layout.items.find((item) => item.id === id)
   if (!target) return result
+  const items = getDisplayItems()
   for (const wire of props.layout.connections) {
     if (wire.targetId !== id || !inputs(target).some((port) => port.id === wire.targetParameter && port.kind === 'number')) continue
-    const signal = numericSignal(modulationLayout.value, wire, effectiveSignals.value,
-      (sourceId) => displayItems.value.find((item) => item.id === sourceId), resolvedBoundaryNumeric(), boundaryOutputSignals)
+    const signal = numericSignal(withRuntimeSelectors(modulationLayout.value, items), wire, effectiveSignals(),
+      (sourceId) => items.find((item) => item.id === sourceId), resolvedBoundaryNumeric(), boundaryOutputSignals)
     if (signal) result.push({ portId: wire.targetParameter, wire, signal })
   }
   return result
 }
-watch(() => (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.kind === 'numeric' &&
-  port.direction === 'output' && port.itemId && port.parameterId).map((port) => {
-  const item = props.layout.items.find((entry) => entry.id === port.itemId)
-  const wire: Connection | undefined = item?.type === 'output-selector'
-    ? selectorPortWires.value.find((entry) => entry.targetParameter === port.id)
-    : { id: '', sourceId: port.itemId!, sourceParameter: port.parameterId!, targetId: '', targetParameter: '' }
-  const signal = wire && numericSignal(modulationLayout.value, wire, effectiveSignals.value,
-    (id) => displayItems.value.find((item) => item.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
-  return { id: port.id, signal }
-}), (current, previous) => {
-  for (const entry of previous ?? []) if (!current.some((port) => port.id === entry.id)) emit('boundaryNumeric', entry.id, undefined)
-  for (const entry of current) {
-    if (!previous || !previous.some((port) => port.id === entry.id && port.signal?.value === entry.signal?.value &&
-      port.signal?.min === entry.signal?.min && port.signal?.max === entry.signal?.max)) {
-      emit('boundaryNumeric', entry.id, entry.signal)
-    }
+const publishedBoundarySignals = new Map<string, NumericSignal>()
+function sameNumericSignal(first?: NumericSignal, second?: NumericSignal) {
+  return first?.value === second?.value && first?.min === second?.min && first?.max === second?.max &&
+    first?.source.id === second?.source.id
+}
+function updateBoundaryOutputs(items: GridItem[], controlSignals: Map<string, number>) {
+  const ports = (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.kind === 'numeric' &&
+    port.direction === 'output' && port.itemId && port.parameterId)
+  const current = new Set(ports.map((port) => port.id))
+  for (const [id] of publishedBoundarySignals) if (!current.has(id)) {
+    publishedBoundarySignals.delete(id)
+    emit('boundaryNumeric', id, undefined)
   }
-}, { immediate: true })
-function updateAudioGraph(layout: GridLayout) {
+  const layout = withRuntimeSelectors(modulationLayout.value, items)
+  for (const port of ports) {
+    const item = props.layout.items.find((entry) => entry.id === port.itemId)
+    const wire: Connection | undefined = item?.type === 'output-selector'
+      ? selectorPortWires.value.find((entry) => entry.targetParameter === port.id)
+      : { id: '', sourceId: port.itemId!, sourceParameter: port.parameterId!, targetId: '', targetParameter: '' }
+    const signal = wire && numericSignal(layout, wire, controlSignals,
+      (id) => items.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
+    const previous = publishedBoundarySignals.get(port.id)
+    if (sameNumericSignal(previous, signal)) continue
+    if (signal) publishedBoundarySignals.set(port.id, signal)
+    else publishedBoundarySignals.delete(port.id)
+    emit('boundaryNumeric', port.id, signal)
+  }
+}
+function updateAudioGraph(layout: GridLayout, items = runtimeControlItems, controlSignals = effectiveSignals()) {
   if (!audioGraph.value) return
   try {
-    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts, {
-      bpm: props.bpm, toneSettings: effectiveToneSettings(), baseItems: automationItems.value,
-      signals: effectiveSignals.value, boundaryInputs: modulationBoundaryInputs(),
+    const routedLayout = withRuntimeSelectors(layout, items)
+    const baseItems = getAutomationItems()
+    const routedBaseItems = withRuntimeSelectors({ ...layout, items: baseItems }, baseItems).items
+    const rerouted = audioGraph.value.update(routedLayout, props.parentAudioPorts, {
+      bpm: props.bpm, toneSettings: effectiveToneSettings(items), baseItems: routedBaseItems,
+      signals: controlSignals, boundaryInputs: modulationBoundaryInputs(),
       wheelPositions, automatedWheels: automatedModWheels(),
     })
     for (const item of layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
@@ -365,40 +422,87 @@ function updateAudioGraph(layout: GridLayout) {
   }
 }
 
-function audioGraphSignalInputs() {
-  const excluded = new Set(props.layout.items.flatMap((item) => {
-    if (item.type === 'lfo' || (item.type === 'tone-element' && item.settings.elementType === 'envelope')) {
-      return [`${item.id}:value`]
+function updateRuntimeControls() {
+  const controlSignals = effectiveSignals()
+  const items = getDisplayItems()
+  runtimeControlItems = items
+  updateSelectorRuntime(items, controlSignals)
+  const numericInputs = new Set((props.ownerSettings?.exposedPorts ?? [])
+    .filter((port) => port.kind === 'numeric' && port.direction === 'input').map((port) => port.id))
+  for (const port of boundarySignalOverrides.keys()) if (!numericInputs.has(port)) boundarySignalOverrides.delete(port)
+  let visibleDisplayChanged = false
+  const loopIds = new Set(items.flatMap((item) => item.type === 'sequenced-loop' ? [item.id] : []))
+  for (const id of runtimeLoopIndexes.keys()) if (!loopIds.has(id)) {
+    runtimeLoopIndexes.delete(id)
+    loopRuntimeVisible.delete(id)
+    loopRuntimeVisibility.delete(id)
+  }
+  const pianoIds = new Set(items.flatMap((item) => item.type === 'piano-roll' ? [item.id] : []))
+  for (const id of pianoRuntimeStates.keys()) if (!pianoIds.has(id)) {
+    pianoRuntimeStates.delete(id)
+    pianoRuntimeVisibility.delete(id)
+  }
+  for (const item of items) {
+    if (item.type === 'sequenced-loop') {
+      const previousIndex = runtimeLoopIndexes.get(item.id)
+      const visible = loopRuntimeVisibility.get(item.id)?.() ?? false
+      if (visible && (!loopRuntimeVisible.get(item.id) || previousIndex !== item.settings.clipIndex)) visibleDisplayChanged = true
+      loopRuntimeVisible.set(item.id, visible)
+      runtimeLoopIndexes.set(item.id, item.settings.clipIndex)
+      const original = props.layout.items.find((entry) => entry.id === item.id)
+      if (original?.type === 'sequenced-loop') {
+        original.settings.clips[String(item.settings.clipIndex)] ??= []
+        original.settings.automation[String(item.settings.clipIndex)] ??= []
+      }
     }
-    if (item.type === 'mod-wheel' && wheelPositions.has(item.id) && !automatedModWheels().has(item.id)) {
-      return [`${item.id}:value`]
+    if (item.type === 'piano-roll') {
+      const visible = pianoRuntimeVisibility.get(item.id)?.() ?? false
+      const settings = JSON.stringify([item.settings.scale, item.settings.orientation])
+      const previous = pianoRuntimeStates.get(item.id)
+      if (visible && (!previous?.visible || previous.settings !== settings)) visibleDisplayChanged = true
+      pianoRuntimeStates.set(item.id, { visible, settings })
     }
-    return []
-  }))
-  return JSON.stringify([...effectiveSignals.value].filter(([key]) => !excluded.has(key)))
+    if (item.type === 'knob' && ![...bypassedKnobs.values()].some((knobs) => knobs.has(item.id))) {
+      knobDisplays.get(item.id)?.setDisplayValue(item.settings.value)
+    }
+    if (item.type === 'output-selector') {
+      const value = selectorValue(item)
+      const update = selectorDisplays.get(item.id)
+      const destination = selectorDestination(item)
+      const snapshot = JSON.stringify([destination, value])
+      if (update && selectorDisplaySnapshots.get(item.id) !== snapshot) {
+        if (update.setRuntimeDisplay(destination, value)) selectorDisplaySnapshots.set(item.id, snapshot)
+      }
+    }
+    const updateSettings = runtimeSettings.get(item.id)
+    if (updateSettings) {
+      const snapshot = JSON.stringify([item.settings,
+        item.type === 'mod-wheel' ? displayedAutomation(item.id, 'value') : undefined])
+      if (runtimeSettingsSnapshots.get(item.id) !== snapshot) {
+        runtimeSettingsSnapshots.set(item.id, snapshot)
+        updateSettings(item)
+      }
+    }
+  }
+  if (visibleDisplayChanged) refreshDisplaySnapshot()
+  updateAudioGraph({ ...props.layout, items: props.layout.items }, items, controlSignals)
+  updateBoundaryOutputs(items, controlSignals)
 }
-function unmanagedToneSettings() {
-  const parameters = ['cutoff', 'gain', 'delayTime', 'feedback', 'attack', 'decay', 'sustain', 'release'] as const
-  return JSON.stringify([...effectiveToneSettings()].map(([id, settings]) =>
-    [id, ...parameters.map((parameter) => audioGraph.value?.isModulationDriven(id, parameter) ? null : settings[parameter])]))
-}
-watch(() => ({ ...props.layout, items: props.layout.items }), updateAudioGraph, { deep: true })
+
+watch(() => ({ ...props.layout, items: props.layout.items }), updateRuntimeControls, { deep: true })
 watch([
   () => props.bpm,
-  unmanagedToneSettings,
   () => JSON.stringify(automationItems.value.filter((item) => item.type === 'tone-element' || item.type === 'lfo' ||
     item.type === 'knob' || item.type === 'mod-wheel').map((item) => [item.id, item.settings])),
-  audioGraphSignalInputs,
-  () => JSON.stringify(resolvedBoundaryNumeric()),
-  () => JSON.stringify([...wheelPositions]),
-  () => JSON.stringify([...automatedModWheels()]),
-], () => updateAudioGraph({ ...props.layout, items: props.layout.items }), { flush: 'post' })
+], updateRuntimeControls, { flush: 'post' })
 watch(() => props.parentAudioPorts?.map(({ port, node }) => [node, port.id, port.direction, port.itemId, port.parameterId] as const),
   (current, previous) => {
     if (current?.length === previous?.length && current?.every((entry, index) =>
       entry.every((value, part) => value === previous?.[index]?.[part]))) return
-    updateAudioGraph({ ...props.layout, items: props.layout.items })
+    updateRuntimeControls()
   }, { flush: 'post' })
+const stopRuntimeRefresh = signalRuntime.subscribe(updateRuntimeControls)
+onBeforeUnmount(stopRuntimeRefresh)
 watch([activeNotes, boundaryActiveNotes], () => {
   for (const item of props.layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
     audioGraph.value?.setNotes(item.id, receivedToneNotes(item.id))
@@ -686,9 +790,12 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
     props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'gate') ||
     exposedOutputInUse('gate')
   if (output.on === undefined && output.parameter !== 'note' && trackPressure) {
-    if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
-    else signals.set(`${item.id}:${output.parameter}`,
-      original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value)
+    const continuousSignal = output.parameter === 'pressure' && (user || output.user) ||
+      output.parameter === 'value' && (item.type === 'lfo' || user || output.user)
+    if (output.active === false) signalRuntime.delete(`${item.id}:${output.parameter}`, true)
+    else signalRuntime.set(`${item.id}:${output.parameter}`,
+      original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value,
+      !continuousSignal)
   }
   const recordable = (original.type !== 'knob' && original.type !== 'mod-wheel') || original.settings.recordAutomation
   const touched = wasActive || liveControls.has(item.id) ||
@@ -715,8 +822,11 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
 }
 
 function routeNote(sourceId: string, output: ParameterOutput, selectedOverride?: Connection | null) {
-  const source = props.layout.items.find((entry) => entry.id === sourceId)
-  if (!source) return
+  const found = props.layout.items.find((entry) => entry.id === sourceId)
+  if (!found) return
+  const source = found.type === 'output-selector' && runtimeSelectorIndexes.has(sourceId)
+    ? { ...found, settings: { ...found.settings, index: runtimeSelectorIndexes.get(sourceId)! } }
+    : found
   const selected = source.type === 'output-selector'
     ? selectedOverride === undefined ? selectedSelectorWire(modulationLayout.value.connections, source) : selectedOverride
     : undefined
@@ -816,7 +926,10 @@ watch(() => props.boundaryNotes ?? [], (incoming) => {
 }, { deep: true, immediate: true, flush: 'sync' })
 
 function selectorDestination(item: GridItem) {
-  const wire = selectedSelectorWire(modulationLayout.value.connections, item)
+  const selector = item.type === 'output-selector' && runtimeSelectorIndexes.has(item.id)
+    ? { ...item, settings: { ...item.settings, index: runtimeSelectorIndexes.get(item.id)! } }
+    : item
+  const wire = selectedSelectorWire(modulationLayout.value.connections, selector)
   const port = wire && selectorPortWires.value.some((entry) => entry.id === wire.id)
     ? props.ownerSettings?.exposedPorts.find((entry) => entry.id === wire.targetParameter) : undefined
   if (port) return `Parent / ${port.name}`
@@ -828,22 +941,12 @@ function selectorDestination(item: GridItem) {
 function numericWireValue(wire: Connection) {
   const external = resolvedBoundaryNumeric().find((entry) => entry.wire === wire ||
     (entry.wire.id === wire.id && entry.wire.targetId === wire.targetId && entry.wire.targetParameter === wire.targetParameter))
-  const signal = external?.signal ?? numericSignal(modulationLayout.value, wire, effectiveSignals.value,
-    (id) => displayItems.value.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
+  const items = getDisplayItems()
+  const signal = external?.signal ?? numericSignal(withRuntimeSelectors(modulationLayout.value, items), wire, effectiveSignals(),
+    (id) => items.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
   if (!signal) return undefined
   const offset = modulationOffset(wire, signal)
   return offset === undefined ? signal.value : selectorNumericValue(wire, signal, normalizeSignal(signal.value, signal.min, signal.max) * 127)
-}
-
-function selectorInputValue(wire: Connection, externalSignal?: BoundaryNumeric['signal']) {
-  const signal = externalSignal ?? numericSignal(modulationLayout.value, wire, effectiveSignals.value,
-    (id) => displayItems.value.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals)
-  if (!signal) return undefined
-  const target = props.layout.items.find((item) => item.id === wire.targetId)
-  const count = modulationLayout.value.connections.filter((connection) => connection.sourceId === wire.targetId).length
-  const base = target?.type === 'output-selector' && count
-    ? ((target.settings.baseIndex ?? target.settings.index) % count + 0.5) * 128 / count : 0
-  return selectorNumericValue(wire, signal, base)
 }
 
 function selectorValue(item: GridItem) {
@@ -866,12 +969,14 @@ function setSelectorIndex(item: GridItem, index: number, userInitiated = false) 
   if (item.type !== 'output-selector') return
   const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id).length
   if (userInitiated && count) item.settings.baseIndex = index
-  if (!count || item.settings.index % count === index) return
+  const currentIndex = runtimeSelectorIndexes.get(item.id) ?? item.settings.index
+  if (!count || currentIndex % count === index) return
   const notes = receivedNotes(item.id)
   for (const note of notes) for (let i = 0; i < note.count; i++) {
     routeNote(item.id, { parameter: 'note', value: note.note, on: false, velocity: note.velocity })
   }
   item.settings.index = index
+  runtimeSelectorIndexes.set(item.id, index)
   const selected = selectedSelectorWire(modulationLayout.value.connections, item)
   if (selected && selected.targetId && userInitiated) {
     selectorFlash.value = { sourceId: item.id, targetId: selected.targetId, sequence: ++selectorFlashSequence }
@@ -886,17 +991,73 @@ function setSelectorIndex(item: GridItem, index: number, userInitiated = false) 
   }
 }
 
+function updateSelectorRuntime(items: GridItem[], controlSignals: Map<string, number>) {
+  const selectors = items.filter((item): item is Extract<GridItem, { type: 'output-selector' }> =>
+    item.type === 'output-selector')
+  const currentIds = new Set(selectors.map((item) => item.id))
+  for (const id of runtimeSelectorIndexes.keys()) if (!currentIds.has(id)) {
+    runtimeSelectorIndexes.delete(id)
+    selectorInputSnapshots.delete(id)
+  }
+  for (const item of selectors) {
+    const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id).length
+    const original = props.layout.items.find((entry) => entry.id === item.id)
+    if (original?.type !== 'output-selector') continue
+    const oldIndex = runtimeSelectorIndexes.get(item.id) ?? item.settings.index
+    const external = resolvedBoundaryNumeric().find((entry) =>
+      entry.wire.targetId === item.id && entry.wire.targetParameter === 'selection')
+    const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection') ??
+      external?.wire
+    const signal = wire && (external?.wire === wire ? external.signal : numericSignal(
+      withRuntimeSelectors(modulationLayout.value, items), wire, controlSignals,
+      (id) => items.find((entry) => entry.id === id), resolvedBoundaryNumeric(), boundaryOutputSignals))
+    const snapshot = JSON.stringify([wire?.id, wire?.mappingMode, wire?.modulationMin, wire?.modulationMax,
+      wire?.absoluteMin, wire?.absoluteMax, signal?.source.id, signal?.value, signal?.min, signal?.max])
+    const previousSnapshot = selectorInputSnapshots.get(item.id)
+    selectorInputSnapshots.set(item.id, snapshot)
+    if (previousSnapshot !== snapshot && count) {
+      if (signal && Number.isFinite(signal.value)) {
+        if (wire?.mappingMode === 'mod' && original.settings.baseIndex === undefined) {
+          original.settings.baseIndex = original.settings.index
+        }
+        const baseIndex = wire?.mappingMode === 'mod'
+          ? original.settings.baseIndex ?? original.settings.index : 0
+        const base = wire?.mappingMode === 'mod' ? ((baseIndex % count + 0.5) * 128 / count) : 0
+        const value = selectorNumericValue(wire!, signal, base)
+        const resolvedIndex = Math.min(count - 1, Math.floor(value * count / 128))
+        runtimeSelectorIndexes.set(item.id, resolvedIndex)
+      } else if (wire?.mappingMode === 'mod' && original.settings.baseIndex !== undefined) {
+        runtimeSelectorIndexes.set(item.id, original.settings.baseIndex % count)
+      }
+    }
+    const nextIndex = count ? (runtimeSelectorIndexes.get(item.id) ?? original.settings.index) % count : original.settings.index
+    if (oldIndex === nextIndex) { runtimeSelectorIndexes.set(item.id, nextIndex); continue }
+    const notes = receivedNotes(item.id)
+    const oldItem = { ...item, settings: { ...item.settings, index: oldIndex } }
+    const oldWire = selectedSelectorWire(modulationLayout.value.connections, oldItem)
+    const nextWire = selectedSelectorWire(modulationLayout.value.connections, { ...item, settings: { ...item.settings, index: nextIndex } })
+    for (const note of notes) for (let i = 0; i < note.count; i++) {
+      if (oldWire) routeNote(item.id, { parameter: 'note', value: note.note, on: false, velocity: note.velocity }, oldWire)
+    }
+    runtimeSelectorIndexes.set(item.id, nextIndex)
+    for (const note of notes) for (let i = 0; i < note.count; i++) {
+      if (nextWire) routeNote(item.id, { parameter: 'note', value: note.note, on: true, velocity: note.velocity, bend: note.bend }, nextWire)
+    }
+  }
+}
+
 function advanceSelector(item: GridItem) {
   const original = props.layout.items.find((entry) => entry.id === item.id)
   if (!original || original.type !== 'output-selector') return
   const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id).length
   if (count < 2) return
-  setSelectorIndex(original, (original.settings.index + 1) % count, true)
+  setSelectorIndex(original, ((runtimeSelectorIndexes.get(item.id) ?? original.settings.index) + 1) % count, true)
 }
 
 watch(() => props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
   const wires = modulationLayout.value.connections.filter((wire) => wire.sourceId === item.id)
-  return { id: item.id, wires, selected: wires[item.settings.index % wires.length] }
+  const index = runtimeSelectorIndexes.get(item.id) ?? item.settings.index
+  return { id: item.id, wires, selected: wires[index % wires.length] }
 }), (current, previous) => {
   for (const entry of current) {
     const old = previous?.find((item) => item.id === entry.id)
@@ -908,31 +1069,6 @@ watch(() => props.layout.items.filter((item) => item.type === 'output-selector')
     }
   }
 }, { flush: 'sync' })
-
-watch(() => props.layout.items.filter((item) => item.type === 'output-selector').map((item) => {
-  const external = resolvedBoundaryNumeric().find((entry) => entry.wire.targetId === item.id && entry.wire.targetParameter === 'selection')
-  const wire = props.layout.connections.find((entry) => entry.targetId === item.id && entry.targetParameter === 'selection') ?? external?.wire
-  const origin = wire && !external ? signalSource(modulationLayout.value, wire) : undefined
-  return { id: item.id, wireId: wire?.id, originId: origin?.id, wire, value: wire && selectorInputValue(wire, external?.signal) }
-}), (current, previous) => {
-  for (const selection of current) {
-    const old = previous?.find((entry) => entry.id === selection.id)
-    if (old && old.wireId === selection.wireId && old.originId === selection.originId && old.value === selection.value) continue
-    const item = props.layout.items.find((entry) => entry.id === selection.id)
-    const count = modulationLayout.value.connections.filter((wire) => wire.sourceId === selection.id).length
-    if (!item || item.type !== 'output-selector' || !count) continue
-    const wire = selection.wire
-    if (selection.value === undefined || !Number.isFinite(selection.value)) {
-      if (wire?.mappingMode === 'mod' && item.settings.baseIndex !== undefined) {
-        setSelectorIndex(item, item.settings.baseIndex % count)
-      }
-      continue
-    }
-    if (wire?.mappingMode === 'mod' && item.settings.baseIndex === undefined) item.settings.baseIndex = item.settings.index
-    const value = Math.max(0, Math.min(127, selection.value))
-    setSelectorIndex(item, Math.min(count - 1, Math.floor(value * count / 128)))
-  }
-}, { immediate: true })
 
 function padActive(id: string) {
   return props.layout.connections.some((connection) => connection.targetId === id &&
@@ -981,7 +1117,7 @@ function receivedToneNotes(id: string): HeldNote[] {
 function toggleArpeggiator(id: string) {
   const item = props.layout.items.find((entry) => entry.id === id)
   if (item?.type !== 'arpeggiator') return
-  const automated = effectiveSignals.value.get(`${id}:enabled`)
+  const automated = effectiveSignals().get(`${id}:enabled`)
   item.settings.enabled = !(automated === undefined ? item.settings.enabled : automated >= 0.5)
   recordToggle(id, 'enabled', item.settings.enabled)
 }
@@ -998,6 +1134,55 @@ function sampleLfo(id: string, settings: Extract<GridItem, { type: 'lfo' }>['set
 }
 const knobDisplays = new Map<string, { setDisplayValue: (value?: number) => void }>()
 const bypassedKnobs = new Map<string, Set<string>>()
+const runtimeSettings = new Map<string, (item: GridItem) => void>()
+const runtimeSettingsSnapshots = new Map<string, string>()
+const selectorDisplays = new Map<string, { setRuntimeDisplay(destination: string, value: string): boolean }>()
+const selectorDisplaySnapshots = new Map<string, string>()
+function setRuntimeSettings(id: string, instance: unknown) {
+  if (typeof instance === 'object' && instance !== null && 'setEffectiveSettings' in instance &&
+    typeof instance.setEffectiveSettings === 'function') {
+    const update = instance.setEffectiveSettings
+    runtimeSettings.set(id, (item) => {
+      if (item.type === 'lfo' || item.type === 'mod-wheel' || item.type === 'instrument-pad' || item.type === 'arpeggiator' ||
+        item.type === 'tone-element' && (item.settings.elementType === 'oscillator' || item.settings.elementType === 'noise')) {
+        const args = item.type === 'mod-wheel'
+          ? [item.settings, displayedAutomation(item.id, 'value')] : [item.settings]
+        Reflect.apply(update, instance, args)
+      }
+    })
+  } else {
+    runtimeSettings.delete(id)
+    runtimeSettingsSnapshots.delete(id)
+  }
+}
+function setSelectorDisplay(id: string, instance: unknown) {
+  if (typeof instance === 'object' && instance !== null && 'setRuntimeDisplay' in instance &&
+    typeof instance.setRuntimeDisplay === 'function') {
+    const update = instance.setRuntimeDisplay
+    selectorDisplays.set(id, {
+      setRuntimeDisplay: (destination, value) => Reflect.apply(update, instance, [destination, value]) === true,
+    })
+  } else {
+    selectorDisplays.delete(id)
+    selectorDisplaySnapshots.delete(id)
+  }
+}
+function setLoopRuntimeVisibility(id: string, instance: unknown) {
+  if (typeof instance === 'object' && instance !== null && 'isVisible' in instance &&
+    typeof instance.isVisible === 'function') {
+    const isVisible = instance.isVisible
+    loopRuntimeVisibility.set(id, () => Reflect.apply(isVisible, instance, []) === true)
+  } else {
+    loopRuntimeVisibility.delete(id)
+  }
+}
+function setPianoRuntimeVisibility(id: string, instance: unknown) {
+  if (typeof instance === 'object' && instance !== null && 'isVisible' in instance &&
+    typeof instance.isVisible === 'function') {
+    const isVisible = instance.isVisible
+    pianoRuntimeVisibility.set(id, () => Reflect.apply(isVisible, instance, []) === true)
+  } else pianoRuntimeVisibility.delete(id)
+}
 function setKnobDisplay(id: string, instance: unknown) {
   if (typeof instance === 'object' && instance !== null && 'setDisplayValue' in instance &&
     typeof instance.setDisplayValue === 'function') {
@@ -1041,7 +1226,7 @@ function publishLfo(item: Extract<GridItem, { type: 'lfo' }>, value: number, aud
     return
   }
   const key = `${item.id}:value`
-  if (signals.has(key)) signals.delete(key)
+  if (signals.has(key)) signalRuntime.delete(key, true)
   bypassedKnobs.set(item.id, knobs)
   for (const id of knobs) {
     const target = props.layout.items.find((candidate) => candidate.id === id)
@@ -1236,6 +1421,7 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
   })
 }
 
+defineExpose({ setBoundaryNumericInput })
 </script>
 
 <template>
@@ -1274,24 +1460,27 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
           <div v-show="!editing && !wiring && !volumeMode" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
             <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
             <Knob v-else-if="item.type === 'knob'" :ref="(instance) => setKnobDisplay(item.id, instance)" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
-            <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :source-id="item.id" :sample-lfo="sampleLfo" :publish-value="(value, available) => publishLfo(item, value, available)" />
-            <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
-            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :audio-output="audioGraph?.getOutput(item.id)" :audio-unavailable="!audioGraph?.getOutput(item.id)" :disabled="!audioGraph?.getOutput(item.id)" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
+            <LFO v-else-if="item.type === 'lfo'" :ref="(instance) => setRuntimeSettings(item.id, instance)" :label="item.label" :settings="item.settings" :bpm="bpm" :source-id="item.id" :sample-lfo="sampleLfo" :publish-value="(value, available) => publishLfo(item, value, available)" />
+            <ModWheel v-else-if="item.type === 'mod-wheel'" :ref="(instance) => setRuntimeSettings(item.id, instance)" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
+            <PianoRoll v-else-if="item.type === 'piano-roll'" :ref="(instance) => setPianoRuntimeVisibility(item.id, instance)" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :ref="(instance) => setRuntimeSettings(item.id, instance)" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :audio-output="audioGraph?.getOutput(item.id)" :audio-unavailable="!audioGraph?.getOutput(item.id)" :disabled="!audioGraph?.getOutput(item.id)" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
+              :ref="(instance) => setSelectorDisplay(item.id, instance)"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
               @advance="advanceSelector(item)" />
-            <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
+            <Arpeggiator v-else-if="item.type === 'arpeggiator'" :ref="(instance) => setRuntimeSettings(item.id, instance)" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
             <SubGrid v-else-if="item.type === 'sub-grid' && original.type === 'sub-grid'" :item="item" :original="original" @open="enterSubgrid(item.id)">
               <div :ref="(element) => setSurfaceTarget(item.id, element)" class="subgrid-surface"
                 :style="subgridSurfaceStyle(original)" />
             </SubGrid>
             <ToneOscillator v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'oscillator' && audioGraph?.getOutput(item.id)"
+              :ref="(instance) => setRuntimeSettings(item.id, instance)"
               :label="item.label" :settings="item.settings" :base-frequency="original.settings.frequency"
               :notes="receivedToneNotes(item.id)" :audio-output="audioGraph?.getInput(item.id)" :muted="!!original.settings.muted"
               @toggle-mute="original.settings.muted = !original.settings.muted" />
             <ToneNoise v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'noise' && audioGraph?.getOutput(item.id)"
+              :ref="(instance) => setRuntimeSettings(item.id, instance)"
               :label="item.label" :settings="item.settings" :notes="receivedToneNotes(item.id)"
               :audio-output="audioGraph?.getInput(item.id)" :muted="!!original.settings.muted"
               @toggle-mute="original.settings.muted = !original.settings.muted" />
@@ -1315,6 +1504,7 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
               :available="!!audioGraph?.getOutput(item.id) && ['filter', 'gain', 'delay', 'reverb'].includes(item.settings.elementType)"
               @toggle-mute="original.settings.tapMode === 'bypass' ? original.settings.bypassed = !original.settings.bypassed : original.settings.muted = !original.settings.muted" />
             <SequencedLoop v-else-if="item.type === 'sequenced-loop' && original.type === 'sequenced-loop'"
+              :ref="(instance) => setLoopRuntimeVisibility(item.id, instance)"
               :item="item" :original="original" :playing="playing" :status="loopStatus.get(item.id)"
               :playhead="loopPlayheads.get(item.id)" :wants-playback="loopWantsPlayback(item)" :gesture="loopGesture(item.id)"
               :get-curves="loopPreviewCurves" :notes="selectedLoopNotes(item)" :preview-x="previewX" :preview-y="previewY" :preview-color="previewColor"
@@ -1377,6 +1567,7 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
     </div>
     <template v-for="item in layout.items" :key="item.id">
       <GrooveGrid v-if="item.type === 'sub-grid' && audioGraph?.getInput(item.id) && audioGraph?.getOutput(item.id)"
+        :ref="(instance) => setNestedGridRuntime(item.id, instance)"
         v-show="openSubgridId === item.id" :layout="item.settings.layout" :root-layout="rootLayout ?? layout" :bank-id="`${bankId}/${item.id}`"
         :parent-audio-input="audioGraph.getInput(item.id)" :parent-audio-output="audioGraph.getOutput(item.id)"
         :parent-audio-ports="audioPortsForSubGrid(item)"

@@ -5,6 +5,7 @@ import type { HeldNote, ToneElementSettings } from '../../../grid'
 
 const props = defineProps<{ label: string; settings: ToneElementSettings; notes: HeldNote[]; audioOutput?: Tone.InputNode; muted: boolean }>()
 const emit = defineEmits<{ toggleMute: [] }>()
+let effectiveSettings = props.settings
 const continuous = ref(false)
 const error = ref('')
 let noise: Tone.Noise | undefined
@@ -13,16 +14,16 @@ let generation = 0
 let disposed = false
 
 function sync() {
-  const active = props.notes.length > 0 || (props.settings.noteMode === 'continuous' && continuous.value)
+  const active = props.notes.length > 0 || (effectiveSettings.noteMode === 'continuous' && continuous.value)
   if (!active) {
     generation++
     gain?.gain.rampTo(0, 0.02)
     return
   }
   if (noise && gain) {
-    noise.type = props.settings.noiseType
+    noise.type = effectiveSettings.noiseType
     const velocity = props.notes.length ? props.notes[props.notes.length - 1]!.velocity / 127 : 0.7
-    gain.gain.rampTo(props.settings.gain * velocity, 0.02)
+    gain.gain.rampTo(effectiveSettings.gain * velocity, 0.02)
     return
   }
   const request = ++generation
@@ -33,7 +34,7 @@ function sync() {
       gain = new Tone.Gain(0)
       if (props.audioOutput) gain.connect(props.audioOutput)
       else gain.toDestination()
-      noise = new Tone.Noise({ type: props.settings.noiseType, volume: -12 }).connect(gain).start()
+      noise = new Tone.Noise({ type: effectiveSettings.noiseType, volume: -12 }).connect(gain).start()
       sync()
       error.value = ''
     } catch (cause) {
@@ -48,12 +49,23 @@ function sync() {
   })()
 }
 
+function setEffectiveSettings(settings: ToneElementSettings) {
+  const changed = effectiveSettings.noiseType !== settings.noiseType ||
+    effectiveSettings.gain !== settings.gain || effectiveSettings.noteMode !== settings.noteMode
+  effectiveSettings = settings
+  if (changed) sync()
+}
+defineExpose({ setEffectiveSettings })
+
 watch(() => props.settings.noteMode, (mode) => {
   if (mode !== 'continuous') continuous.value = false
 }, { flush: 'sync' })
-watch(() => [props.settings.noiseType, props.settings.gain, props.settings.noteMode, continuous.value,
-  props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(',')], sync,
-{ immediate: true, flush: 'sync' })
+watch(() => [props.settings.noiseType, props.settings.gain, props.settings.noteMode], () => {
+    effectiveSettings = props.settings
+    sync()
+  }, { immediate: true, flush: 'sync' })
+watch(() => [continuous.value, props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(',')], sync,
+  { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => {
   disposed = true
   generation++

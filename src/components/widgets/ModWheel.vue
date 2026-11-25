@@ -4,15 +4,17 @@ import type { ModWheelSettings, ParameterOutput } from '../../grid'
 
 const props = defineProps<{ label: string; settings: ModWheelSettings; rotated?: boolean; automationValue?: number }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; activity: [active: boolean] }>()
-const position = ref(0.5)
 const pointer = ref<number | null>(null)
 let livePosition = 0.5
+let effectiveSettings = props.settings
+const track = ref<HTMLElement | null>(null)
+const thumb = ref<HTMLElement | null>(null)
 
 function setPosition(next: number, user = false) {
-  position.value = Math.max(0, Math.min(1, next))
-  livePosition = position.value
-  const normalized = props.settings.autoCenter ? position.value * 2 - 1 : position.value
-  emit('output', { parameter: 'value', value: normalized * props.settings.depth, wheelPosition: normalized,
+  livePosition = Math.max(0, Math.min(1, next))
+  drawPosition(livePosition)
+  const normalized = effectiveSettings.autoCenter ? livePosition * 2 - 1 : livePosition
+  emit('output', { parameter: 'value', value: normalized * effectiveSettings.depth, wheelPosition: normalized,
     ...(user ? { user: true } : {}) })
 }
 function move(event: PointerEvent) {
@@ -35,24 +37,44 @@ function start(event: PointerEvent) {
 function end(event: PointerEvent) {
   if (event.pointerId !== pointer.value) return
   pointer.value = null
-  if (props.settings.autoCenter) setPosition(0.5, true)
+  if (effectiveSettings.autoCenter) setPosition(0.5, true)
   emit('activity', false)
 }
 function key(event: KeyboardEvent) {
-  if (event.key === 'ArrowUp' || event.key === 'ArrowRight') setPosition(position.value + 0.05, true)
-  else if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') setPosition(position.value - 0.05, true)
+  if (event.key === 'ArrowUp' || event.key === 'ArrowRight') setPosition(livePosition + 0.05, true)
+  else if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') setPosition(livePosition - 0.05, true)
   else return
   event.preventDefault()
 }
-onBeforeUnmount(() => { if (props.settings.autoCenter && pointer.value !== null) setPosition(0.5) })
+onBeforeUnmount(() => { if (effectiveSettings.autoCenter && pointer.value !== null) setPosition(0.5) })
+function drawPosition(value: number) {
+  if (thumb.value) thumb.value.style.bottom = `${value * 100}%`
+  track.value?.setAttribute('aria-valuenow', String(value))
+}
 function showAutomation(value: number | undefined) {
   if (pointer.value !== null) return
-  if (value === undefined || props.settings.depth === 0) { position.value = livePosition; return }
-  const normalized = value / props.settings.depth
-  position.value = Math.max(0, Math.min(1, props.settings.autoCenter ? (normalized + 1) / 2 : normalized))
+  if (value === undefined || effectiveSettings.depth === 0) { drawPosition(livePosition); return }
+  const normalized = value / effectiveSettings.depth
+  drawPosition(Math.max(0, Math.min(1, effectiveSettings.autoCenter ? (normalized + 1) / 2 : normalized)))
 }
+function setEffectiveSettings(settings: ModWheelSettings, automationValue = props.automationValue) {
+  if (effectiveSettings.depth === settings.depth && effectiveSettings.autoCenter === settings.autoCenter) {
+    effectiveSettings = settings
+    showAutomation(automationValue)
+    return
+  }
+  effectiveSettings = settings
+  drawPosition(livePosition)
+  if (automationValue === undefined) {
+    const normalized = effectiveSettings.autoCenter ? livePosition * 2 - 1 : livePosition
+    emit('output', { parameter: 'value', value: normalized * effectiveSettings.depth, wheelPosition: normalized })
+  }
+  showAutomation(automationValue)
+}
+defineExpose({ setEffectiveSettings })
 onMounted(() => { setPosition(livePosition); showAutomation(props.automationValue) })
 watch([() => props.settings.depth, () => props.settings.autoCenter], () => {
+  effectiveSettings = props.settings
   setPosition(livePosition)
   showAutomation(props.automationValue)
 })
@@ -61,9 +83,9 @@ watch(() => props.automationValue, showAutomation)
 
 <template>
   <div class="wheel">
-    <div class="track" role="slider" tabindex="0" :aria-label="label" aria-valuemin="0" aria-valuemax="1" :aria-valuenow="position"
+    <div ref="track" class="track" role="slider" tabindex="0" :aria-label="label" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0.5"
       @pointerdown="start" @pointermove="move" @pointerup="end" @pointercancel="end" @lostpointercapture="end" @keydown="key">
-      <span :style="{ bottom: `${position * 100}%` }"></span>
+      <span ref="thumb"></span>
     </div>
     <small>{{ label }}</small>
   </div>

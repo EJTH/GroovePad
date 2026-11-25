@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type LoopNote, type SequencedLoopSettings } from '../../grid'
 import { nextUnusedClipIndex } from '../../loopRows'
 import type { useGridPlayback } from '../useGridPlayback'
@@ -20,6 +20,7 @@ const props = defineProps<{
   previewY: Playback['previewY']
   previewColor: Playback['previewColor']
 }>()
+const root = ref<HTMLElement | null>(null)
 const emptyAutomation: SequencedLoopSettings['automation'][string] = []
 const automation = computed(() => props.item.settings.automation[String(props.item.settings.clipIndex)] ?? emptyAutomation)
 const emit = defineEmits<{
@@ -35,10 +36,14 @@ const emit = defineEmits<{
 function widgetButtonCount(settings: SequencedLoopSettings) {
   return LOOP_WIDGET_BUTTONS.filter((button) => loopWidgetButtonVisible(settings, button.id)).length
 }
+function isVisible() {
+  return !!root.value?.getClientRects().length
+}
+defineExpose({ isVisible })
 </script>
 
 <template>
-<div class="loop-control"
+<div ref="root" class="loop-control"
   role="group" :aria-label="`${item.label} controls`" tabindex="0"
   :style="{ '--loop-color': item.settings.color }"
   aria-keyshortcuts="ArrowUp ArrowDown"

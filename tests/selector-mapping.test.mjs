@@ -25,6 +25,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
     dependencies['../audio/audioRoutes'] = await server.ssrLoadModule('/src/audio/audioRoutes.ts')
+    dependencies['../audio/signalRuntime'] = await server.ssrLoadModule('/src/audio/signalRuntime.ts')
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
@@ -32,6 +33,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     const selector = createControl('selector', 1, 0, 'output-selector')
     selector.settings.index = 1
     const targets = Array.from({ length: 4 }, (_, i) => createControl(`lfo-${i}`, i + 2, 0, 'lfo'))
+    targets.forEach((target, i) => { target.label = `Target ${i}` })
     const input = { id: 'selection', sourceId: 'pad', sourceParameter: 'pressure', targetId: 'selector',
       targetParameter: 'selection', mappingMode: 'mod', modulationMin: 25, modulationMax: 25 }
     const outgoing = targets.map((target, i) => ({ id: `out-${i}`, sourceId: 'selector', sourceParameter: 'value',
@@ -49,11 +51,16 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
       { expose() {}, emit() {} }))
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0 })
     await vue.nextTick()
+    assert.equal(api.effectiveSignals().get('pad:pressure'), 0)
     assert.equal(layout.items[1].settings.baseIndex, 1)
-    assert.equal(layout.items[1].settings.index, 2)
+    assert.equal(layout.items[1].settings.index, 1)
+    assert.equal(api.selectorDestination(layout.items[1]), 'Target 2 / Depth')
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 2)
+    const reactiveDisplaySnapshot = api.displayItems.value
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 127 })
     await vue.nextTick()
-    assert.equal(layout.items[1].settings.index, 2)
+    assert.strictEqual(api.displayItems.value, reactiveDisplaySnapshot)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 2)
     api.advanceSelector(layout.items[1])
     await vue.nextTick()
     assert.equal(layout.items[1].settings.baseIndex, 3)
@@ -61,21 +68,21 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     layout.connections[0].modulationMin = -25
     layout.connections[0].modulationMax = -25
     await vue.nextTick()
-    assert.equal(layout.items[1].settings.index, 2)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 2)
     assert.equal(layout.items[1].settings.baseIndex, 3)
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0, active: false })
     await vue.nextTick()
-    assert.equal(layout.items[1].settings.index, 3)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 3)
 
     dependencies['../modulation'].setConnectionMappingMode(layout, layout.connections[0], 'abs')
     layout.connections[0].absoluteMin = 10
     layout.connections[0].absoluteMax = 120
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0 })
     await vue.nextTick()
-    assert.equal(layout.items[1].settings.index, 0)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 0)
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 127 })
     await vue.nextTick()
-    assert.equal(layout.items[1].settings.index, 3)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'selector').settings.index, 3)
 
     const arp = createControl('arp', 7, 0, 'arpeggiator')
     layout.items.push(arp)
@@ -95,9 +102,9 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     assert.equal(mapping.choiceEndpoint('min'), '1')
     assert.equal(mapping.choiceEndpoint('max'), '0')
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0 })
-    assert.equal(api.displayItems.value.find((item) => item.id === 'arp').settings.enabled, true)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'arp').settings.enabled, true)
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 127 })
-    assert.equal(api.displayItems.value.find((item) => item.id === 'arp').settings.enabled, false)
+    assert.equal(api.getDisplayItems().find((item) => item.id === 'arp').settings.enabled, false)
     mapping.setChoiceEndpoint('min', { target: new SelectElement('') })
     assert.equal(mapping.choiceEndpoint('min'), '')
 
@@ -107,7 +114,7 @@ test('selector MOD uses the user-selected baseline without accumulating on updat
     layout.items.push(knob)
     layout.connections.push({ id: 'pressure-knob', sourceId: 'pad', sourceParameter: 'pressure',
       targetId: 'knob', targetParameter: 'value', mappingMode: 'abs' })
-    const displayedKnob = () => api.displayItems.value.find((item) => item.id === 'knob')
+    const displayedKnob = () => api.getDisplayItems().find((item) => item.id === 'knob')
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0, active: true })
     assert.equal(displayedKnob().settings.value, 0)
     api.handleOutput(layout.items[0], { parameter: 'pressure', value: 0, active: false })
@@ -128,6 +135,7 @@ test('connection dialog drafts mappings until connect and resets them when ports
       dependencies[`../${name}`] = await server.ssrLoadModule(`/src/${name}${name === 'instruments' ? '/index' : ''}.ts`)
     }
     dependencies['../audio/audioRoutes'] = await server.ssrLoadModule('/src/audio/audioRoutes.ts')
+    dependencies['../audio/signalRuntime'] = await server.ssrLoadModule('/src/audio/signalRuntime.ts')
     dependencies['./useGridInteraction'] = await server.ssrLoadModule('/src/components/useGridInteraction.ts')
     dependencies['./useGridPlayback'] = await loadGridPlayback(dependencies)
     const { createControl } = dependencies['../grid']
