@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { MAX_INFO_SCROLL_SPEED, MIN_INFO_SCROLL_SPEED } from '../project'
 import { RECORDING_FORMATS, type RecordingFormat } from '../audio/sessionRecording'
-import SettingsDialog from './SettingsDialog.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
 
 const props = defineProps<{ bpm: number; infoText: string; infoScrollSpeed: number; recordingFormat: RecordingFormat; supportedFormats: RecordingFormat[] }>()
 const emit = defineEmits<{ close: []; 'update:bpm': [value: number]; 'update:infoText': [value: string]; 'update:infoScrollSpeed': [value: number]; 'update:recordingFormat': [value: RecordingFormat] }>()

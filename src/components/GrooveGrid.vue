@@ -1,37 +1,40 @@
 <script setup lang="ts">
 import { computed, onBeforeMount, onBeforeUnmount, onMounted, onUnmounted, reactive, ref, shallowReactive, shallowRef, triggerRef, watch } from 'vue'
-import { createControl, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, nextLoopQuantize, MAX_GRID_COLUMNS, MAX_GRID_ROWS, MAX_LOOP_CLIP_INDEX, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision, type SequencedLoopSettings, type SubGridSettings } from '../grid'
+import { createControl, nextLoopQuantize, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type Connection, type GridItem, type GridLayout, type GridItemType, type HeldNote, type ParameterOutput, type RepeatDivision, type SubGridSettings } from '../grid'
 import { createsCycle, inputs, outputs, selectedSelectorWire, selectorConnectionsCompatible, selectorRoutingCompatible } from '../parameters'
 import { modulationOffset, normalizeSignal, numericSignal, selectorNumericValue, setConnectionMappingMode, signalSource, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { noteName } from '../music'
 import * as Tone from 'tone'
-import MPCPad from './MPCPad.vue'
-import Knob from './Knob.vue'
-import LFO from './LFO.vue'
-import ModWheel from './ModWheel.vue'
-import PianoRoll from './PianoRoll.vue'
-import Arpeggiator from './Arpeggiator.vue'
-import InstrumentPad from './InstrumentPad.vue'
-import ToneOscillator from './ToneOscillator.vue'
-import ToneNoise from './ToneNoise.vue'
-import ADSREnvelopeEditor from './ADSREnvelopeEditor.vue'
-import ChannelMixer from './ChannelMixer.vue'
+import MPCPad from './widgets/MPCPad.vue'
+import Knob from './UI/Knob.vue'
+import LFO from './widgets/LFO.vue'
+import ModWheel from './widgets/ModWheel.vue'
+import PianoRoll from './widgets/PianoRoll.vue'
+import Arpeggiator from './widgets/Arpeggiator.vue'
+import InstrumentPad from './widgets/tone/InstrumentPad.vue'
+import ToneOscillator from './widgets/tone/ToneOscillator.vue'
+import ToneNoise from './widgets/tone/ToneNoise.vue'
+import ToneElement from './widgets/tone/ToneElement.vue'
+import ADSREnvelopeEditor from './UI/ADSREnvelopeEditor.vue'
+import ChannelMixer from './widgets/tone/ChannelMixer.vue'
 import { BankAudio, type BoundaryAudio } from '../audio/bankAudio'
 import { audioBoundaryKey, audioOutput, AudioRouteError, validateAudioRoutes } from '../audio/audioRoutes'
 import { oscillatorPitch } from '../audio/toneOscillator'
-import NumericSetting from './NumericSetting.vue'
-import SettingsDialog from './SettingsDialog.vue'
-import OutputSelector from './OutputSelector.vue'
+import NumericSetting from './UI/NumericSetting.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
+import OutputSelector from './widgets/OutputSelector.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
 import GridControlSettingsDialog from './GridControlSettingsDialog.vue'
-import SequencedLoopSettingsPanel from './SequencedLoopSettingsPanel.vue'
-import VolumeControl from './VolumeControl.vue'
+import SequencedLoopSettingsPanel from './widgets/SequencedLoopSettingsPanel.vue'
+import SequencedLoop from './widgets/SequencedLoop.vue'
+import SubGrid from './widgets/SubGrid.vue'
+import VolumeControl from './widgets/VolumeControl.vue'
 import { controlTypes } from './gridControlTypes'
 import { useGridInteraction } from './useGridInteraction'
 import { BankEventBus, TransportClock } from '../sequencedLoop'
 import type { Bank } from '../project'
 import { useGridPlayback } from './useGridPlayback'
-import { cloneClip, nextUnusedClipIndex } from '../loopRows'
+import { cloneClip } from '../loopRows'
 import { pasteSubGridLayout, type SubGridClipboard } from '../subGridClipboard'
 import SubGridConfigDialog from './SubGridConfigDialog.vue'
 import type { ADSREnvelope } from '../instruments/types'
@@ -363,9 +366,6 @@ const widgetEditorPlayhead = computed(() => {
   const position = loopPlayheads.value.get(editor.id)
   return position === undefined ? undefined : position / 100
 })
-function widgetButtonCount(settings: SequencedLoopSettings) {
-  return LOOP_WIDGET_BUTTONS.filter((button) => loopWidgetButtonVisible(settings, button.id)).length
-}
 function mixerChannelLabel(key: string) {
   const source = props.layout.items.find((item) =>
     outputs(item).some((port) => port.kind === 'audio' && audioOutput(item.id, port.id) === key))
@@ -1168,12 +1168,10 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"
               @advance="advanceSelector(item)" />
             <Arpeggiator v-else-if="item.type === 'arpeggiator'" :label="item.label" :settings="item.settings" :bpm="bpm" :notes="receivedNotes(item.id)" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event)" @toggle="toggleArpeggiator(item.id)" />
-            <div v-else-if="item.type === 'sub-grid' && original.type === 'sub-grid'" class="sub-grid-control">
-              <button type="button" class="subgrid-open" :aria-label="`Open ${item.label}`" @click="enterSubgrid(item.id)">Open {{ item.label }}</button>
-              <strong v-if="!original.settings.surfaceItemIds.length">{{ item.label }}</strong>
+            <SubGrid v-else-if="item.type === 'sub-grid' && original.type === 'sub-grid'" :item="item" :original="original" @open="enterSubgrid(item.id)">
               <div :ref="(element) => setSurfaceTarget(item.id, element)" class="subgrid-surface"
                 :style="subgridSurfaceStyle(original)" />
-            </div>
+            </SubGrid>
             <ToneOscillator v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'oscillator' && audioGraph?.getOutput(item.id)"
               :label="item.label" :settings="item.settings" :base-frequency="original.settings.frequency"
               :notes="receivedToneNotes(item.id)" :audio-output="audioGraph?.getOutput(item.id)" />
@@ -1189,80 +1187,15 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
             <ChannelMixer v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'mixer'"
               :label="item.label" :color="item.settings.color" :channels="mixerChannelControls(original)"
               @change="(id, parameter, value) => changeMixerChannel(original, id, parameter, value)" />
-            <div v-else-if="item.type === 'tone-element'" class="tone-element-control"
-              :style="{ '--tone-color': item.settings.color }">
-              <strong>{{ item.label }}</strong>
-              <small>{{ item.settings.elementType }}</small>
-            </div>
-            <div v-else-if="item.type === 'sequenced-loop' && original.type === 'sequenced-loop'" class="loop-control"
-              role="group" :aria-label="`${item.label} controls`" tabindex="0"
-              :style="{ '--loop-color': item.settings.color }"
-              aria-keyshortcuts="ArrowUp ArrowDown"
-              title="Use the buttons to arm or play; swipe up or down to change clips"
-              @pointerdown="loopGesture(item.id).down" @pointermove="loopGesture(item.id).move" @pointerup="loopGesture(item.id).up"
-              @pointercancel="loopGesture(item.id).cancel" @lostpointercapture="loopGesture(item.id).cancel"
-              @click="loopGesture(item.id).click" @keydown="loopKeyDown($event, item.id)">
-              <strong>{{ item.label }}</strong>
-              <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ loopStatus.get(item.id)?.counting ? 'Count-in' : loopStatus.get(item.id)?.pending ? 'Waiting' : loopStatus.get(item.id)?.enabled ? 'On' : loopWantsPlayback(item) ? 'Ready' : 'Off' }}</span>
-              <svg class="loop-preview" viewBox="0 0 100 48" preserveAspectRatio="none" aria-hidden="true">
-                <path class="loop-preview-grid" d="M25 0v48 M50 0v48 M75 0v48 M0 12h100 M0 24h100 M0 36h100" />
-                <path v-for="curve in loopPreviewCurves(item)" :key="curve.key" class="loop-preview-curve" :d="curve.path" :style="{ stroke: curve.color }" />
-                <circle v-for="(note, index) in selectedLoopNotes(item)" :key="index" class="loop-preview-note"
-                  :cx="previewX(note.position, Math.max(1, item.settings.barLength * 4))"
-                  :cy="previewY(note.note, 36, 96)" r="1.5" :style="{ fill: previewColor(note.instrumentId, note.bankId) }" />
-                <line v-if="loopPlayheads.has(item.id)" class="loop-preview-playhead"
-                  :x1="loopPlayheads.get(item.id)" :x2="loopPlayheads.get(item.id)" y1="0" y2="48" />
-              </svg>
-              <div v-if="widgetButtonCount(item.settings)" class="loop-actions"
-                :style="{ '--button-columns': Math.min(4, widgetButtonCount(item.settings)), '--button-height': `${40 / Math.ceil(widgetButtonCount(item.settings) / 4)}cqh` }"
-                @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop @keydown.stop>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'arm')" type="button" class="loop-action loop-arm" :class="{ armed: item.settings.armed }"
-                  :aria-label="`${item.settings.armed ? 'Disarm' : 'Arm'} ${item.label} for recording`"
-                  :aria-pressed="item.settings.armed" :title="item.settings.armed ? 'Disarm recording' : 'Arm for recording'"
-                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="armLoop(item.id)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'play')" type="button" class="loop-action loop-play" :aria-label="`${loopWantsPlayback(item) ? 'Pause' : 'Play'} ${item.label}${playing ? '' : ' when playback starts'}`"
-                  :aria-pressed="loopWantsPlayback(item)"
-                  :title="playing ? (loopWantsPlayback(item) ? 'Pause loop' : 'Play loop') : (loopWantsPlayback(item) ? 'Do not start this loop when playback starts' : 'Start this loop when playback starts')"
-                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="toggleLoopPlayback(item.id)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                    <path v-if="loopWantsPlayback(item)" d="M5 4h4v12H5z M11 4h4v12h-4z" />
-                    <path v-else d="M6 3.5 17 10 6 16.5z" />
-                  </svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'clear')" type="button" class="loop-action loop-clear"
-                  :aria-label="`Clear clip ${item.settings.clipIndex} in ${item.label}`"
-                  :title="`Clear clip ${item.settings.clipIndex}`"
-                  @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop="clearLoopClip(item.id)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 6h10l-.8 11H5.8L5 6Zm2-3h6l1 2H6l1-2Zm1 5v6m4-6v6" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'clone')" type="button" class="loop-action loop-outline"
-                  :disabled="nextUnusedClipIndex(original.settings) === undefined" :aria-label="`Clone clip ${item.settings.clipIndex} in ${item.label}`"
-                  :title="nextUnusedClipIndex(original.settings) === undefined ? 'All clip indices are in use' : 'Clone clip'"
-                  @click="cloneWidgetClip(original, item.settings.clipIndex)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h9v10H6zM4 7H3v10h9v-1M10.5 7v4M8.5 9h4" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'previous')" type="button" class="loop-action loop-outline"
-                  :disabled="original.settings.clipIndex <= 0" :aria-label="`Previous clip in ${item.label}`" title="Previous clip"
-                  @click="changeLoopIndex(item.id, -1)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m14 4-7 6 7 6M5 4v12" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'next')" type="button" class="loop-action loop-outline"
-                  :disabled="original.settings.clipIndex >= MAX_LOOP_CLIP_INDEX" :aria-label="`Next clip in ${item.label}`" title="Next clip"
-                  @click="changeLoopIndex(item.id, 1)">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 4 7 6-7 6M15 4v12" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'editor')" type="button" class="loop-action loop-outline"
-                  :aria-label="`Open ${item.label} editor`" title="Open editor"
-                  @click="widgetEditor = { id: item.id, index: item.settings.clipIndex }">
-                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h14v14H3zM7 3v14M3 8h14M3 13h14" /></svg>
-                </button>
-                <button v-if="loopWidgetButtonVisible(item.settings, 'quantize')" type="button" class="loop-action loop-quantize"
-                  :aria-label="`Record quantization ${item.settings.quantize === 'off' ? 'off' : item.settings.quantize}; change quantization`"
-                  title="Change record quantization" @click="cycleQuantize(original)">Q {{ item.settings.quantize === 'off' ? 'OFF' : item.settings.quantize }}</button>
-              </div>
-            </div>
+            <ToneElement v-else-if="item.type === 'tone-element'" :label="item.label" :settings="item.settings" />
+            <SequencedLoop v-else-if="item.type === 'sequenced-loop' && original.type === 'sequenced-loop'"
+              :item="item" :original="original" :playing="playing" :status="loopStatus.get(item.id)"
+              :playhead="loopPlayheads.get(item.id)" :wants-playback="loopWantsPlayback(item)" :gesture="loopGesture(item.id)"
+              :curves="loopPreviewCurves(item)" :notes="selectedLoopNotes(item)" :preview-x="previewX" :preview-y="previewY" :preview-color="previewColor"
+              @keydown="loopKeyDown($event, item.id)" @arm="armLoop(item.id)" @toggle-playback="toggleLoopPlayback(item.id)"
+              @clear="clearLoopClip(item.id)" @clone="cloneWidgetClip(original, item.settings.clipIndex)"
+              @change-index="changeLoopIndex(item.id, $event)" @open-editor="widgetEditor = { id: item.id, index: item.settings.clipIndex }"
+              @quantize="cycleQuantize(original)" />
           </div>
           <VolumeControl v-if="volumeMode && (original.type === 'instrument-pad' || original.type === 'sequenced-loop')"
             :label="original.label" :color="original.settings.color" :value="volumeValue(original)" :muted="!!original.settings.muted"

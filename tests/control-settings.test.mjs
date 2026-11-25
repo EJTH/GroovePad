@@ -227,7 +227,7 @@ test('knob and mod wheel automation recording settings default on and migrate wi
     const items = ['knob', 'mod-wheel'].map((type, x) => createControl(type, x, 0, type))
     for (const item of items) {
       assert.equal(item.settings.recordAutomation, true)
-      const { default: Panel } = await server.ssrLoadModule(`/src/components/${item.type === 'knob' ? 'Knob' : 'ModWheel'}SettingsPanel.vue`)
+      const { default: Panel } = await server.ssrLoadModule(`/src/components/widgets/${item.type === 'knob' ? 'Knob' : 'ModWheel'}SettingsPanel.vue`)
       const html = await renderToString(createSSRApp({ render: () => h(Panel, { draft: item }) }))
       assert.match(html, /<input(?=[^>]*\bchecked\b)(?=[^>]*type="checkbox")[^>]*> Record automation for this control/)
       delete item.settings.recordAutomation
@@ -272,7 +272,7 @@ test('edit and wiring labels reflect the control orientation', async () => {
 test('instrument choices render icon buttons and mark the active type', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: Panel } = await server.ssrLoadModule('/src/components/instruments/InstrumentPadSettingsPanel.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/widgets/tone/InstrumentPadSettingsPanel.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const draft = createControl('bass', 0, 0, 'instrument-pad', '303')
     const html = await renderToString(createSSRApp({ render: () => h(Panel, { draft }) }))
@@ -295,8 +295,8 @@ test('instrument choices render icon buttons and mark the active type', async ()
 test('piano roll migrates old settings and renders each style in the requested rows', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: PianoRoll } = await server.ssrLoadModule('/src/components/PianoRoll.vue')
-    const { default: PianoRollSettingsPanel } = await server.ssrLoadModule('/src/components/PianoRollSettingsPanel.vue')
+    const { default: PianoRoll } = await server.ssrLoadModule('/src/components/widgets/PianoRoll.vue')
+    const { default: PianoRollSettingsPanel } = await server.ssrLoadModule('/src/components/widgets/PianoRollSettingsPanel.vue')
     const { createControl, validPianoRollSettings } = await server.ssrLoadModule('/src/grid.ts')
     const { migrateSavedProject, isSavedProject } = await server.ssrLoadModule('/src/project.ts')
     const piano = createControl('piano', 0, 0, 'piano-roll')
@@ -402,7 +402,7 @@ test('piano roll migrates old settings and renders each style in the requested r
 test('piano roll renders the added scale intervals', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: PianoRoll } = await server.ssrLoadModule('/src/components/PianoRoll.vue')
+    const { default: PianoRoll } = await server.ssrLoadModule('/src/components/widgets/PianoRoll.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const piano = createControl('piano', 0, 0, 'piano-roll')
     const expected = {
@@ -431,8 +431,8 @@ test('piano roll renders the added scale intervals', async () => {
 test('envelope widget visibility and colors persist and render correctly', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: EnvelopeEditor } = await server.ssrLoadModule('/src/components/ADSREnvelopeEditor.vue')
-    const { default: Visualizer } = await server.ssrLoadModule('/src/components/ADSRVisualizer.vue')
+    const { default: EnvelopeEditor } = await server.ssrLoadModule('/src/components/UI/ADSREnvelopeEditor.vue')
+    const { default: Visualizer } = await server.ssrLoadModule('/src/components/UI/ADSRVisualizer.vue')
     const { default: Dialog } = await server.ssrLoadModule('/src/components/GridControlSettingsDialog.vue')
     const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
@@ -495,7 +495,7 @@ test('envelope widget visibility and colors persist and render correctly', async
 })
 
 test('empty envelope widget emits a request to open settings when activated', async () => {
-  const source = await readFile(new URL('../src/components/ADSREnvelopeEditor.vue', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/components/UI/ADSREnvelopeEditor.vue', import.meta.url), 'utf8')
   const script = compileScript(parse(source).descriptor, { id: 'envelope', inlineTemplate: true }).content
   const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   const componentModule = { exports: {} }

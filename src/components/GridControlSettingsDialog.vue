@@ -5,20 +5,20 @@ import { isCompatible, inputs, outputs, selectorConnectionsCompatible, selectorR
 import { InstrumentFactory } from '../instruments'
 import type { InstrumentType } from '../instruments/types'
 import type ControlIdentitySettings from './ControlIdentitySettings.vue'
-import InstrumentPadSettingsPanel from './instruments/InstrumentPadSettingsPanel.vue'
-import KnobSettingsPanel from './KnobSettingsPanel.vue'
-import LFOSettingsPanel from './LFOSettingsPanel.vue'
-import ModWheelSettingsPanel from './ModWheelSettingsPanel.vue'
-import PianoRollSettingsPanel from './PianoRollSettingsPanel.vue'
-import ArpeggiatorSettingsPanel from './ArpeggiatorSettingsPanel.vue'
-import SequencedLoopSettingsPanel from './SequencedLoopSettingsPanel.vue'
+import InstrumentPadSettingsPanel from './widgets/tone/InstrumentPadSettingsPanel.vue'
+import KnobSettingsPanel from './widgets/KnobSettingsPanel.vue'
+import LFOSettingsPanel from './widgets/LFOSettingsPanel.vue'
+import ModWheelSettingsPanel from './widgets/ModWheelSettingsPanel.vue'
+import PianoRollSettingsPanel from './widgets/PianoRollSettingsPanel.vue'
+import ArpeggiatorSettingsPanel from './widgets/ArpeggiatorSettingsPanel.vue'
+import SequencedLoopSettingsPanel from './widgets/SequencedLoopSettingsPanel.vue'
+import ToneElementSettingsPanel from './widgets/tone/ToneElementSettingsPanel.vue'
+import SubGridSettingsPanel from './widgets/SubGridSettingsPanel.vue'
 import ControlIdentitySettingsComponent from './ControlIdentitySettings.vue'
-import SettingsDialog from './SettingsDialog.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
 import ConnectionMapping from './ConnectionMapping.vue'
-import InstrumentPad from './InstrumentPad.vue'
-import LFO from './LFO.vue'
-import NumericSetting from './NumericSetting.vue'
-import ADSREnvelopeEditor from './ADSREnvelopeEditor.vue'
+import InstrumentPad from './widgets/tone/InstrumentPad.vue'
+import LFO from './widgets/LFO.vue'
 import { controlTypes } from './gridControlTypes'
 import type { Bank } from '../project'
 import { captureSettings, settingGestureKey } from '../settingsAutomation'
@@ -383,131 +383,9 @@ function canSetModulationAmount(connection: Connection) {
         <ArpeggiatorSettingsPanel v-else-if="liveItem.type === 'arpeggiator'" :draft="liveItem" />
         <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId"
           :playhead="loopPlayhead" @arm-change="emit('armChange', $event)" />
-        <template v-else-if="liveItem.type === 'sub-grid'">
-          <h3>SubGrid</h3>
-          <p>{{ liveItem.settings.layout.columns }} × {{ liveItem.settings.layout.rows }} nested grid · {{ liveItem.settings.layout.items.length }} controls</p>
-          <div class="settings-actions"><button type="button" @click="openSubGrid">Open SubGrid</button></div>
-          <label>Exposed ports
-            <input :value="liveItem.settings.exposedPorts.map((port) => port.name).join(', ')"
-              readonly aria-label="Exposed SubGrid ports">
-          </label>
-        </template>
-        <template v-else-if="liveItem.type === 'tone-element'">
-          <h3>Tone.js element</h3>
-          <label>Element
-            <select :value="draft.type === 'tone-element' ? draft.settings.elementType : liveItem.settings.elementType" @change="changeToneElementType">
-              <option value="oscillator">Oscillator</option>
-              <option value="noise">Noise</option>
-              <option value="filter">Filter</option>
-              <option value="gain">Gain</option>
-              <option value="delay">Delay</option>
-              <option value="reverb">Reverb</option>
-              <option value="envelope">Envelope</option>
-              <option value="mixer">Mixer</option>
-            </select>
-          </label>
-          <template v-if="liveItem.settings.elementType === 'oscillator'">
-            <label>Waveform
-              <select v-model="liveItem.settings.oscillatorType">
-                <option value="sine">Sine</option>
-                <option value="triangle">Triangle</option>
-                <option value="square">Square</option>
-                <option value="sawtooth">Sawtooth</option>
-              </select>
-            </label>
-            <NumericSetting v-model="liveItem.settings.frequency" label="Frequency (Hz)" :min="20" :max="20000" :step="1" />
-            <NumericSetting v-model="liveItem.settings.detune" label="Detune (cents)" :min="-1200" :max="1200" :step="1" />
-            <template v-if="liveItem.settings.noteMode !== 'always-on'">
-              <NumericSetting v-model="liveItem.settings.attack" label="Attack (s)" :min="0.001" :max="5" :step="0.001" />
-              <NumericSetting v-model="liveItem.settings.release" label="Release (s)" :min="0.01" :max="10" :step="0.01" />
-            </template>
-            <label>Mode
-              <select v-model="liveItem.settings.noteMode">
-                <option value="gated">Gated oscillator</option>
-                <option value="continuous">Continuous oscillator</option>
-                <option value="always-on">Always on</option>
-              </select>
-            </label>
-            <NumericSetting v-model="liveItem.settings.polyphony" label="Polyphony" :min="1" :max="16" integer />
-            <label>Note priority
-              <select v-model="liveItem.settings.notePriority">
-                <option value="last">Last note</option>
-                <option value="highest">Highest note</option>
-                <option value="lowest">Lowest note</option>
-              </select>
-            </label>
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'noise'">
-            <label>Noise type
-              <select v-model="liveItem.settings.noiseType">
-                <option value="white">White</option>
-                <option value="pink">Pink</option>
-                <option value="brown">Brown</option>
-              </select>
-            </label>
-            <NumericSetting v-model="liveItem.settings.gain" label="Gain" :min="0" :max="2" :step="0.01" />
-            <label>Mode
-              <select v-model="liveItem.settings.noteMode">
-                <option value="gated">Gated noise</option>
-                <option value="continuous">Continuous noise</option>
-              </select>
-            </label>
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'filter'">
-            <NumericSetting v-model="liveItem.settings.cutoff" label="Filter cutoff (Hz)" :min="20" :max="20000" :step="1" />
-            <NumericSetting v-model="liveItem.settings.gain" label="Resonance" :min="0" :max="2" :step="0.01" />
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'gain'">
-            <NumericSetting v-model="liveItem.settings.gain" label="Gain" :min="0" :max="2" :step="0.01" />
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'delay'">
-            <NumericSetting v-model="liveItem.settings.delayTime" label="Delay time (s)" :min="0" :max="5" :step="0.01" />
-            <NumericSetting v-model="liveItem.settings.feedback" label="Feedback" :min="0" :max="1" :step="0.01" />
-            <NumericSetting v-model="liveItem.settings.gain" label="Wet level" :min="0" :max="1" :step="0.01" />
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'reverb'">
-            <NumericSetting v-model="liveItem.settings.decay" label="Decay (s)" :min="0.01" :max="10" :step="0.01" />
-            <NumericSetting v-model="liveItem.settings.gain" label="Wet level" :min="0" :max="1" :step="0.01" />
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'envelope'">
-            <label class="inline-checkbox"><input :checked="liveItem.settings.showVisualizer !== false" type="checkbox"
-              @change="liveItem.settings.showVisualizer = ($event.target as HTMLInputElement).checked" /> Show envelope visualizer</label>
-            <label class="inline-checkbox"><input :checked="liveItem.settings.showKnobs !== false" type="checkbox"
-              @change="liveItem.settings.showKnobs = ($event.target as HTMLInputElement).checked" /> Show envelope knobs</label>
-            <ADSREnvelopeEditor title="Envelope" :envelope="liveItem.settings" :color="liveItem.settings.color" :attack-max="5" :decay-min="0.01" :decay-max="10" />
-          </template>
-          <template v-else-if="liveItem.settings.elementType === 'mixer'">
-            <NumericSetting v-model="liveItem.settings.gain" label="Master level" :min="0" :max="2" :step="0.01" />
-          </template>
-          <label v-if="liveItem.settings.elementType !== 'oscillator' && liveItem.settings.elementType !== 'noise'">Audio source
-            <select :value="liveItem.settings.audioFrom" @change="changeAudioRoute('audioFrom', $event)">
-              <option value="auto">Automatic (wire or bank)</option>
-              <option value="wires">Wires</option>
-              <option value="bank-pre-fx">Bank pre-FX</option>
-              <option value="bank-post-fx">Bank post-FX</option>
-              <option v-if="!nested" value="main-pre-fx">Main pre-FX</option>
-              <option v-if="!nested" value="main-post-fx">Main post-FX</option>
-            </select>
-          </label>
-          <label>Audio destination
-            <select :value="liveItem.settings.audioTo" @change="changeAudioRoute('audioTo', $event)">
-              <option value="auto">Automatic (wire or bank)</option>
-              <option value="wires">Wires</option>
-              <option value="bank-out">Bank output</option>
-              <option v-if="!nested" value="main-out">Main output</option>
-            </select>
-          </label>
-          <label v-if="liveItem.settings.elementType !== 'oscillator' && liveItem.settings.elementType !== 'noise'">Route mode
-            <select :value="liveItem.settings.routeMode" @change="changeAudioRoute('routeMode', $event)">
-              <option value="insert">Insert</option>
-              <option value="parallel">Parallel send</option>
-            </select>
-          </label>
-          <p>Automatic routing uses connected audio wires, or the enclosing grid when unwired. Unwired inserts run in creation order.</p>
-          <p>Effective route: {{ effectiveAudioRoute }}</p>
-          <p v-if="liveItem.settings.elementType === 'oscillator'">Frequency modulation is added to played pitches; note priority determines which voices are used.</p>
-          <p v-if="liveItem.settings.elementType === 'envelope'">Wire notes to open the envelope.</p>
-        </template>
+        <SubGridSettingsPanel v-else-if="liveItem.type === 'sub-grid'" :draft="liveItem" @open="openSubGrid" />
+        <ToneElementSettingsPanel v-else-if="liveItem.type === 'tone-element'" :live-item="liveItem" :draft="draft"
+          :nested="nested" :effective-audio-route="effectiveAudioRoute" @change-type="changeToneElementType" @change-audio-route="changeAudioRoute" />
       </section>
 
       <div v-if="selectedId && layout.connections.some((connection) => connection.sourceId === selectedId || connection.targetId === selectedId)" class="control-parameters settings-section">

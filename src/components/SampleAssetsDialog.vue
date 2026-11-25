@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { inject, onBeforeUnmount, ref } from 'vue'
 import { readSampleFile, sampleAssetKey, type SampleAsset } from '../sampleAssets'
-import SettingsDialog from './SettingsDialog.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
 
 defineProps<{ selectable?: boolean }>()
 const emit = defineEmits<{ close: []; select: [asset: SampleAsset]; delete: [source: string] }>()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import SettingsDialog from './SettingsDialog.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
 import { isBeta } from '../appChannel'
 
 defineProps<{ version: string }>()

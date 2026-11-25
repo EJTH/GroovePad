@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import type { ExposedPort, GridItem, SubGridSettings } from '../grid'
 import { inputs, outputs, type ParameterMetadata } from '../parameters'
-import SettingsDialog from './SettingsDialog.vue'
+import SettingsDialog from './UI/SettingsDialog.vue'
 
 const props = defineProps<{ item: GridItem; settings: SubGridSettings; protectedPorts?: string[] }>()
 defineEmits<{ close: [] }>()

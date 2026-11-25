@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import vm from 'node:vm'
+import ts from 'typescript'
+import * as vue from 'vue'
+import { compileScript, parse } from '@vue/compiler-sfc'
 import { createServer } from 'vite'
 import { createRenderer, createSSRApp, h, reactive, ref } from 'vue'
 import { renderToString } from '@vue/server-renderer'
@@ -11,6 +16,53 @@ function testRenderer() {
     insert() {}, remove() {}, patchProp() {},
   })
 }
+
+test('extracted loop widget forwards gestures and button actions', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const grid = await server.ssrLoadModule('/src/grid.ts')
+    const loopRows = await server.ssrLoadModule('/src/loopRows.ts')
+    const source = await readFile(new URL('../src/components/widgets/SequencedLoop.vue', import.meta.url), 'utf8')
+    const script = compileScript(parse(source).descriptor, { id: 'loop-widget', inlineTemplate: true }).content
+    const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const module = { exports: {} }
+    vm.runInNewContext(code, { module, exports: module.exports,
+      require: (path) => path === 'vue' ? vue : path === '../../grid' ? grid : loopRows })
+    const item = grid.createControl('loop', 0, 0, 'sequenced-loop')
+    item.settings.widgetButtons = { ...grid.defaultLoopWidgetButtons(), next: true, editor: true }
+    const node = (type) => ({ type, children: [], props: {} })
+    const renderer = createRenderer({
+      createElement: node, createText: node, createComment: node,
+      setText() {}, setElementText() {}, parentNode: (el) => el.parent, nextSibling: () => null,
+      insert: (el, parent) => { el.parent = parent; parent.children.push(el) },
+      remove() {}, patchProp: (el, key, _old, value) => { el.props[key] = value },
+    })
+    const calls = []
+    const gesture = { down: () => calls.push('down'), move() {}, up() {}, cancel() {}, click() {} }
+    const root = node('root')
+    const app = renderer.createApp(module.exports.default, {
+      item, original: item, wantsPlayback: false, gesture, curves: [], notes: [],
+      previewX: () => 0, previewY: () => 0, previewColor: () => '',
+      onKeydown: (event) => calls.push(event.key), onArm: () => calls.push('arm'),
+      onChangeIndex: (delta) => calls.push(delta), onOpenEditor: () => calls.push('editor'),
+    })
+    app.mount(root)
+    const control = root.children[0]
+    control.props.onPointerdown({})
+    control.props.onKeydown({ key: 'ArrowUp' })
+    const actions = control.children.find((child) => child.props.class === 'loop-actions')
+    const buttons = actions.children.filter((child) => child.type === 'button')
+    const click = (label) => buttons.find((button) => button.props['aria-label'].startsWith(label))
+      .props.onClick({ stopPropagation() {} })
+    click('Arm ')
+    click('Next clip')
+    click('Open ')
+    assert.deepEqual(calls, ['down', 'ArrowUp', 'arm', 1, 'editor'])
+    app.unmount()
+  } finally {
+    await server.close()
+  }
+})
 
 test('held repeats follow the transport and division changes and record separate notes', async (t) => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
@@ -166,7 +218,7 @@ test('loop widget button settings persist, copy independently and control the vi
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
-    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/widgets/SequencedLoopSettingsPanel.vue')
     const { createControl, copyControl, defaultLoopWidgetButtons, nextLoopQuantize } = await server.ssrLoadModule('/src/grid.ts')
     const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
@@ -794,7 +846,7 @@ test('clip selection permits indices 0 to 15 and the settings input exposes the 
   try {
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
-    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/widgets/SequencedLoopSettingsPanel.vue')
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     const layout = { columns: 1, rows: 1, items: [loop], connections: [] }
     const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{
@@ -903,7 +955,7 @@ test('row mute releases only its own routed automation', async () => {
 test('empty muted rows remain accessible in the sequence editor', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/widgets/SequencedLoopSettingsPanel.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     loop.settings.mutedRows = { 0: [{ kind: 'note', instrumentId: 'piano', note: 60 }] }
@@ -917,7 +969,7 @@ test('empty muted rows remain accessible in the sequence editor', async () => {
 test('sequence editor shows the active playhead at the correct timeline position', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: Panel } = await server.ssrLoadModule('/src/components/SequencedLoopSettingsPanel.vue')
+    const { default: Panel } = await server.ssrLoadModule('/src/components/widgets/SequencedLoopSettingsPanel.vue')
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     const layout = { columns: 1, rows: 1, items: [loop], connections: [] }

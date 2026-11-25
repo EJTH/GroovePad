@@ -266,7 +266,7 @@ test('mixer widget renders a fader, pan control and solo action for every input'
   try {
     const { createSSRApp, h } = await import('vue')
     const { renderToString } = await import('@vue/server-renderer')
-    const { default: ChannelMixer } = await server.ssrLoadModule('/src/components/ChannelMixer.vue')
+    const { default: ChannelMixer } = await server.ssrLoadModule('/src/components/widgets/tone/ChannelMixer.vue')
     const html = await renderToString(createSSRApp({
       render: () => h(ChannelMixer, {
         label: 'Sub Mixer',

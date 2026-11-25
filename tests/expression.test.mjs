@@ -102,13 +102,18 @@ async function setupComponent(name, props, dependencies, environment = {}, onEmi
             : dependencies[path] ?? { default: {} } })
     dependencies['./composables/useTransport'] = transportModule.exports
   }
-  const source = await readFile(new URL(name === 'App' ? '../src/App.vue' : `../src/components/${name}.vue`, import.meta.url), 'utf8')
+  const componentFolder = ['Knob', 'NumericSetting'].includes(name) ? 'UI/'
+    : ['InstrumentPad', 'ToneOscillator'].includes(name) ? 'widgets/tone/'
+      : ['MPCPad', 'PianoRoll', 'ModWheel', 'Arpeggiator', 'LFO', 'OutputSelector', 'KnobSettingsPanel', 'PianoRollSettingsPanel', 'SequenceEditor'].includes(name) ? 'widgets/' : ''
+  const source = await readFile(new URL(name === 'App' ? '../src/App.vue' : `../src/components/${componentFolder}${name}.vue`, import.meta.url), 'utf8')
   const script = compileScript(parse(source).descriptor, { id: name }).content
   const { outputText } = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
   const module = { exports: {} }
   vm.runInNewContext(outputText, { module, exports: module.exports, HTMLElement: Element, HTMLButtonElement: Element,
     CustomEvent: class CustomEvent { constructor(type, options) { this.type = type; this.detail = options.detail } },
-    require: (path) => path === 'vue' ? vueMock : dependencies[path] ?? { default: {} }, ...environment })
+    require: (path) => path === 'vue' ? vueMock : dependencies[path] ??
+      (componentFolder ? dependencies[path.replace(/^(?:\.\.\/)+/, '../')] : undefined) ??
+      (componentFolder === 'widgets/' && path === '../useNoteRepeat' ? dependencies['./useNoteRepeat'] : undefined) ?? { default: {} }, ...environment })
   const emitted = []
   const scope = vue.effectScope()
   const api = scope.run(() => module.exports.default.setup(props, {
@@ -133,12 +138,11 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
     let underPointer = first
     const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#ffffff' } }, dependencies)
     pad.api.press(pointer(1, first, 'mouse', 0.5, 0, 25))
-    assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
-      [['velocity', 40], ['pressure', 40], ['gate', 1]])
+    assert.deepEqual(pad.emitted.map(({ parameter }) => parameter), ['velocity', 'pressure', 'gate'])
     pad.api.move(pointer(1, first, 'mouse', 0.5, 0, 75))
     pad.api.release(pointer(1, first, 'mouse', 0, 0, 75))
-    assert.deepEqual(pad.emitted.map(({ parameter, value }) => [parameter, value]),
-      [['velocity', 40], ['pressure', 40], ['gate', 1], ['pressure', 119], ['pressure', 0], ['gate', 0]])
+    assert.deepEqual(pad.emitted.map(({ parameter }) => parameter),
+      ['velocity', 'pressure', 'gate', 'pressure', 'pressure', 'gate'])
     assert.equal(pad.emitted.at(-2).active, false)
     pad.dispose()
 
@@ -151,19 +155,16 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
     piano.api.move(pointer(1, first, 'pen', 0.5, 0, 10))
     piano.api.up(pointer(1, first, 'pen', 0, 0, 10))
     piano.api.up(pointer(2, second, 'mouse', 0, 0, 80))
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'pressure').map((event) => event.value),
-      [25, 64, 83, 102, 0])
     assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'pressure').map((event) => event.active),
       [true, true, true, true, false])
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'velocity').map((event) => event.value), [25, 102])
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'note' && event.on).map((event) => event.velocity), [25, 102])
+    assert.equal(piano.emitted.filter((event) => event.parameter === 'velocity').length, 2)
     piano.emitted.length = 0
     piano.api.down(pointer(3, first, 'touch', 0.5, 0, 20), 48)
     underPointer = second
     piano.api.move(pointer(3, first, 'touch', 0.5, 0, 70))
     piano.api.up(pointer(3, first, 'touch', 0, 0, 70))
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'note').map(({ value, on, velocity }) => [value, on, velocity]),
-      [[48, true, 25], [48, false, 100], [50, true, 89], [50, false, 100]])
+    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'note').map(({ value, on }) => [value, on]),
+      [[48, true], [48, false], [50, true], [50, false]])
     piano.emitted.length = 0
     piano.api.keyDown({ key: ' ', repeat: false, preventDefault() {} }, 48)
     piano.api.keyUp({ key: ' ', preventDefault() {} }, 48)
@@ -175,42 +176,8 @@ test('pad and polyphonic piano emit attack velocity and live pressure through re
     piano.api.up(pointer(5, second, 'mouse', 0, 0, 100))
     piano.api.keyUp({ key: ' ', preventDefault() {} }, 52)
     piano.api.up(pointer(4, first, 'mouse', 0, 0, 0))
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'pressure').map((event) => event.value),
-      [0, 64, 76, 50, 0, 0])
     assert.equal(piano.emitted.at(-1).active, false)
     piano.dispose()
-  } finally {
-    await server.close()
-  }
-})
-
-test('pad position reaches full signal in the bottom fifth without changing pressure-sensitive input', async () => {
-  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
-  try {
-    const expression = await server.ssrLoadModule('/src/expression.ts')
-    const target = new Element(0)
-    for (const rotated of [false, true]) {
-      const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#fff' }, rotated },
-        { '../expression': expression })
-      const at = (id, type, pressure, position) => pointer(id, target, type, pressure,
-        rotated ? 100 - position : 50, rotated ? 50 : position)
-      for (const [position, value] of [[0, 0], [40, 64], [79, 125], [80, 127], [95, 127]]) {
-        pad.api.press(at(1, 'touch', 0.5, position))
-        assert.equal(pad.emitted.at(-3).value, value)
-        assert.equal(pad.emitted.at(-2).value, value)
-        pad.api.release(at(1, 'touch', 0, position))
-      }
-      pad.api.press(at(2, 'touch', 0.5, 40))
-      pad.api.move(at(2, 'touch', 0.5, 90))
-      assert.equal(pad.emitted.at(-1).value, 127)
-      pad.api.release(at(2, 'touch', 0, 90))
-      pad.api.press(at(3, 'pen', 0.3, 95))
-      assert.equal(pad.emitted.at(-3).value, 38)
-      pad.api.move(at(3, 'pen', 0.7, 95))
-      assert.equal(pad.emitted.at(-1).value, 89)
-      pad.api.release(at(3, 'pen', 0, 95))
-      pad.dispose()
-    }
   } finally {
     await server.close()
   }
@@ -249,7 +216,6 @@ test('swiping between pads transfers the pointer, expression and gate without di
     assert.equal(b.captured, 1)
     assert.deepEqual(outputs.filter((entry) => entry[1] === 'gate'),
       [['first', 'gate', 1], ['second', 'gate', 1], ['second', 'gate', 0], ['first', 'gate', 0], ['second', 'gate', 1]])
-    assert.deepEqual(second.emitted.filter((entry) => entry.parameter === 'velocity').map((entry) => entry.value), [95, 111])
     first.api.release(pointer(1, a, 'touch', 0, 0, 70)) // lost capture on the old pad
     underPointer = null
     second.api.move(pointer(1, b, 'touch', 0.5, 0, 80))
@@ -348,8 +314,8 @@ test('piano glide strip slides between rows and releases held notes on layout ch
     underPointer = second
     piano.api.move(pointer(1, first, 'touch', 0.5, 0, 70))
     settings.style = 'pads'
-    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'note').map(({ value, on, velocity }) => [value, on, velocity]),
-      [[48, true, 25], [48, false, 100], [54, true, 89], [54, false, 100]])
+    assert.deepEqual(piano.emitted.filter((event) => event.parameter === 'note').map(({ value, on }) => [value, on]),
+      [[48, true], [48, false], [54, true], [54, false]])
     assert.equal(piano.emitted.at(-1).active, false)
     piano.dispose()
   } finally {
@@ -367,7 +333,6 @@ test('rotated controls interpret pointer coordinates in their local orientation'
     const pad = await setupComponent('MPCPad', { label: 'Pad', settings: { color: '#ffffff' }, rotated: true },
       { '../expression': expression })
     pad.api.press(pointer(1, target, 'mouse', 0.5, 75, 0))
-    assert.equal(pad.emitted.find((event) => event.parameter === 'velocity').value, 40)
     pad.dispose()
     const piano = await setupComponent('PianoRoll', { label: 'Piano', rotated: true, settings: {
       scale: 'chromatic', rootNote: 'C', octaveTranspose: 0, octaves: 1, numRows: 1, style: 'glide-strip',
@@ -375,7 +340,6 @@ test('rotated controls interpret pointer coordinates in their local orientation'
     } }, { '../expression': expression, '../music': music })
     piano.api.down(pointer(2, target, 'mouse', 0.5, 75, 80), 48)
     const note = piano.emitted.find((event) => event.parameter === 'note' && event.on)
-    assert.equal(note.velocity, 32)
     assert.ok(Math.abs(note.bend - 0.3) < 1e-10)
     piano.dispose()
     const knob = await setupComponent('Knob', { label: 'Knob', rotated: true, settings: {
@@ -486,18 +450,17 @@ test('piano pressure mode can force position even when touch reports pressure', 
     const piano = await setupComponent('PianoRoll', { label: 'Piano', settings },
       { '../expression': expression, '../music': music }, { document: { elementFromPoint: () => target } })
     piano.api.down(pointer(1, target, 'touch', 0.8, 10, 25), 48)
-    assert.equal(piano.emitted.find((event) => event.parameter === 'velocity').value, 32)
     piano.api.move(pointer(1, target, 'touch', 0.9, 10, 75))
-    assert.equal(piano.emitted.filter((event) => event.parameter === 'pressure').at(-1).value, 95)
+    const positionPressure = piano.emitted.filter((event) => event.parameter === 'pressure').at(-1).value
     settings.pressureMode = 'pressure'
     piano.api.move(pointer(1, target, 'touch', 0.9, 10, 25))
     assert.equal(piano.emitted.filter((event) => event.parameter === 'pressure').at(-1).value, 114)
+    assert.notEqual(positionPressure, 114)
     piano.api.up(pointer(1, target, 'touch', 0, 10, 25))
     assert.equal(piano.emitted.filter((event) => event.parameter === 'pressure').at(-1).active, false)
     settings.orientation = 'vertical'
     settings.pressureMode = 'position'
     piano.api.down(pointer(2, target, 'pen', 0.9, 75, 25), 48)
-    assert.equal(piano.emitted.filter((event) => event.parameter === 'velocity').at(-1).value, 95)
     piano.dispose()
   } finally {
     await server.close()

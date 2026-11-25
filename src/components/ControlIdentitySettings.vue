@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
 import { isValidPlacement, type GridItem, type GridItemType, type GridLayout } from '../grid'
-import NumericSetting from './NumericSetting.vue'
+import NumericSetting from './UI/NumericSetting.vue'
 
 const props = defineProps<{
   draft: GridItem

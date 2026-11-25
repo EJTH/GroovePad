@@ -11,7 +11,7 @@ import { createServer } from 'vite'
 test('shared waveform reflects the LFO settings, phase and random value', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
-    const { default: Waveform } = await server.ssrLoadModule('/src/components/LFOWaveform.vue')
+    const { default: Waveform } = await server.ssrLoadModule('/src/components/widgets/LFOWaveform.vue')
     const settings = { waveform: 'square', rateMode: 'free', rate: 1, depth: 0.5, offset: 0.25, smoothness: 0 }
     const render = (phase, randomValue) => renderToString(vue.createSSRApp({
       render: () => vue.h(Waveform, { settings, phase, randomValue }),
@@ -36,7 +36,7 @@ test('LFO preview animation follows draft rate and tempo and can be held', async
   try {
     const lfo = await server.ssrLoadModule('/src/lfo.ts')
     const pointerTap = await server.ssrLoadModule('/src/pointerTap.ts')
-    const source = await readFile(new URL('../src/components/LFO.vue', import.meta.url), 'utf8')
+    const source = await readFile(new URL('../src/components/widgets/LFO.vue', import.meta.url), 'utf8')
     const script = compileScript(parse(source).descriptor, { id: 'lfo' }).content
     const { outputText } = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } })
     let mounted
@@ -46,7 +46,7 @@ test('LFO preview animation follows draft rate and tempo and can be held', async
     const vueMock = { ...vue, onMounted: (callback) => { mounted = callback }, onBeforeUnmount: (callback) => { unmounted = callback } }
     const module = { exports: {} }
     vm.runInNewContext(outputText, { module, exports: module.exports,
-      require: (path) => path === 'vue' ? vueMock : path === '../lfo' ? lfo : path === '../pointerTap' ? pointerTap : { default: {} },
+      require: (path) => path === 'vue' ? vueMock : path === '../../lfo' ? lfo : path === '../../pointerTap' ? pointerTap : { default: {} },
       requestAnimationFrame: (callback) => { frame = callback; return 42 },
       cancelAnimationFrame: (id) => { cancelled = id },
     })

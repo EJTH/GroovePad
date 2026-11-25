@@ -7,7 +7,7 @@ import * as vue from 'vue'
 import { compileScript, parse } from '@vue/compiler-sfc'
 
 test('knob drag uses at least 100 pixels for its range, or more when steps require it', async () => {
-  const source = await readFile(new URL('../src/components/Knob.vue', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/components/UI/Knob.vue', import.meta.url), 'utf8')
   const script = compileScript(parse(source).descriptor, { id: 'knob' }).content
   const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   const componentModule = { exports: {} }
