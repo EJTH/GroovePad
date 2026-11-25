@@ -13,12 +13,12 @@ export interface SubGridClipboard {
   externalReferences: boolean
 }
 
-function cloneLayout(layout: GridLayout, sourceRoot: string, destinationRoot: string, sourceScope = sourceRoot, destinationScope = destinationRoot): GridLayout {
+export function cloneLayout(layout: GridLayout, sourceRoot: string, destinationRoot: string, sourceScope = sourceRoot, destinationScope = destinationRoot, disarm = true): GridLayout {
   const items = layout.items.map((item) => {
     const copy = copyControl(item, item.id)
     if (item.type === 'sub-grid' && copy.type === 'sub-grid') {
       copy.settings.layout = cloneLayout(item.settings.layout, sourceRoot, destinationRoot,
-        `${sourceScope}/${item.id}`, `${destinationScope}/${item.id}`)
+        `${sourceScope}/${item.id}`, `${destinationScope}/${item.id}`, disarm)
       copy.settings.surfaceItemIds = [...item.settings.surfaceItemIds]
       copy.settings.exposedPorts = item.settings.exposedPorts.map((port) => ({ ...port }))
     }
@@ -35,7 +35,7 @@ function cloneLayout(layout: GridLayout, sourceRoot: string, destinationRoot: st
       for (const notes of Object.values(copy.settings.clips)) notes.forEach(remap)
       for (const events of Object.values(copy.settings.automation)) events.forEach(remap)
       for (const rows of Object.values(copy.settings.mutedRows ?? {})) rows.forEach(remap)
-      copy.settings.armed = false
+      if (disarm) copy.settings.armed = false
     }
     return copy
   })

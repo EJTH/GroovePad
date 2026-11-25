@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { gridScopes, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
+import { gridScopes, sameBankScope, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
 import { effectiveControls, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { outputs } from '../parameters'
 import { applySettingsAutomation } from '../settingsAutomation'
@@ -60,6 +60,7 @@ export function useGridPlayback(options: {
       const effective = displayItems.value.find((item) => item.id === loop.id)
       return effective?.type === 'sequenced-loop' ? effective.settings.clipIndex : loop.settings.clipIndex
     },
+    (first, second) => sameBankScope(options.banks() ?? [], first, second),
   )
   watch(() => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop')
     .map((item) => [item.id, item.settings.muted] as const), (loops) => {
@@ -183,8 +184,9 @@ export function useGridPlayback(options: {
     return [...notes.values()]
   }
 
+  const emptyLoopNotes: LoopNote[] = []
   function selectedLoopNotes(item: SequencedLoop): LoopNote[] {
-    return item.settings.clips[String(item.settings.clipIndex)] ?? []
+    return item.settings.clips[String(item.settings.clipIndex)] ?? emptyLoopNotes
   }
 
   function loopWantsPlayback(item: SequencedLoop) {
@@ -292,7 +294,7 @@ export function useGridPlayback(options: {
     if (event.kind === 'live-note') {
       if (options.playing()) {
         if (event.on) for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
-          loop.settings.armed && (loop.settings.recordScope === 'all' || event.bankId === options.bankId) && !loopEngine.isEnabled(loop.id)) {
+          loop.settings.armed && (loop.settings.recordScope === 'all' || sameBankScope(options.banks() ?? [], event.bankId, options.bankId)) && !loopEngine.isEnabled(loop.id)) {
           loop.settings.playing = true
           loopEngine.toggle(loop, options.clock.position(), true)
           updateLoopStatus()
@@ -378,7 +380,7 @@ export function useGridPlayback(options: {
       const layouts = banks ? gridScopes(banks).map((bank) => ({ bankId: bank.id, layout: bank.layout }))
         : [{ bankId: options.bankId, layout: options.layout() }]
       const recording = layouts.some(({ bankId, layout }) => layout.items.some((entry) => entry.type === 'sequenced-loop' &&
-        entry.settings.armed && (bankId === options.bankId || entry.settings.recordScope === 'all')))
+        entry.settings.armed && (sameBankScope(banks ?? [], bankId, options.bankId) || entry.settings.recordScope === 'all')))
       if (item && (item.type === 'knob' || item.type === 'mod-wheel')) {
         for (const output of outputs(item)) {
           if (recording && item.settings.recordAutomation) markManualOverride(id, output.id)
@@ -435,9 +437,9 @@ export function useGridPlayback(options: {
       (manualOverrides.get(key) ?? -1) < event.sequence ? event.value : undefined
   }
 
-  const displayItems = computed(() => {
+  const automationItems = computed(() => {
     const layout = options.layout()
-    const items = layout.items.map((item) => {
+    return layout.items.map((item) => {
       const settings = new Map<string, number>()
       for (const [key, event] of playbackAutomation.value) {
         if (event.sourceId !== item.id) continue
@@ -451,8 +453,11 @@ export function useGridPlayback(options: {
         ? { ...effective, settings: { ...effective.settings, enabled: enabled >= 0.5 } }
         : effective
     })
-    const modulationLayout = options.modulationLayout?.() ?? layout
-    return effectiveControls({ ...modulationLayout, items }, effectiveSignals.value, options.boundaryNumeric?.() ?? [], options.boundaryOutputs)
+  })
+  const displayItems = computed(() => {
+    const modulationLayout = options.modulationLayout?.() ?? options.layout()
+    return effectiveControls({ ...modulationLayout, items: automationItems.value }, effectiveSignals.value,
+      options.boundaryNumeric?.() ?? [], options.boundaryOutputs, true)
   })
   watch(() => displayItems.value.filter((item) => item.type === 'sequenced-loop').map((item) =>
     ({ id: item.id, index: item.settings.clipIndex })), (selections) => {
@@ -504,6 +509,7 @@ export function useGridPlayback(options: {
     loopEditorPlayheads,
     playbackAutomation,
     effectiveSignals,
+    automationItems,
     displayItems,
     startArmedLoops,
     updateLoopStatus,

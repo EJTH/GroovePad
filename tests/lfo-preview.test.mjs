@@ -8,30 +8,29 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import { renderToString } from '@vue/server-renderer'
 import { createServer } from 'vite'
 
-test('shared waveform reflects the LFO settings, phase and random value', async () => {
+test('shared waveform reflects the LFO settings and phase', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { default: Waveform } = await server.ssrLoadModule('/src/components/widgets/LFOWaveform.vue')
     const settings = { waveform: 'square', rateMode: 'free', rate: 1, depth: 0.5, offset: 0.25, smoothness: 0 }
-    const render = (phase, randomValue) => renderToString(vue.createSSRApp({
-      render: () => vue.h(Waveform, { settings, phase, randomValue }),
+    const render = (phase) => renderToString(vue.createSSRApp({
+      render: () => vue.h(Waveform, { settings, phase }),
     }))
-    let html = await render(0.25, 0)
+    let html = await render(0.25)
     assert.match(html, /d="M 0 12\.5 L 1\.5625 12\.5/)
     assert.match(html, /L 50 62\.5/)
     assert.match(html, /transform="translate\(-25 0\)"/)
-    settings.waveform = 'random'
+    settings.waveform = 'saw'
     settings.offset = 1
-    html = await render(0, 0.5)
-    assert.match(html, /d="M 0 0 L 1\.5625 0/)
-    html = await render(0, -1)
-    assert.match(html, /d="M 0 25 L 1\.5625 25/)
+    html = await render(0)
+    assert.match(html, /d="M 0 25 L 1\.5625 24\.21875/)
+    assert.match(html, /L 50 0/)
   } finally {
     await server.close()
   }
 })
 
-test('LFO preview animation follows draft rate and tempo and can be held', async () => {
+test('LFO preview animation follows draft rate and tempo', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const lfo = await server.ssrLoadModule('/src/lfo.ts')
@@ -53,26 +52,20 @@ test('LFO preview animation follows draft rate and tempo and can be held', async
     const props = vue.reactive({ label: 'Preview', bpm: 120,
       settings: { waveform: 'sine', rateMode: 'free', rate: 1, depth: 1, offset: 0, smoothness: 0 } })
     const output = []
-    const holds = []
     const api = module.exports.default.setup(props, { expose() {}, emit: (event, value) => {
       if (event === 'output') output.push(value)
-      if (event === 'hold-change') holds.push(value)
     } })
     mounted()
     frame(100)
     frame(200)
-    assert.ok(Math.abs(api.phase.value - 0.1) < 1e-10)
+    assert.ok(Math.abs(api.phase - 0.1) < 1e-10)
     assert.ok(Math.abs(output.at(-1).value - Math.sin(0.2 * Math.PI)) < 1e-10)
-    api.toggleHold()
     frame(300)
-    assert.equal(output.length, 1)
-    assert.deepEqual(holds, [true])
-    api.toggleHold()
+    assert.equal(output.length, 2)
     props.settings.rateMode = 'sync'
     frame(400)
-    assert.ok(Math.abs(api.phase.value - 0.3) < 1e-10)
-    assert.equal(output.length, 2)
-    assert.deepEqual(holds, [true, false])
+    assert.ok(Math.abs(api.phase - 0.4) < 1e-10)
+    assert.equal(output.length, 3)
     unmounted()
     assert.equal(cancelled, 42)
   } finally {

@@ -8,7 +8,7 @@ import SettingsDialog from './components/UI/SettingsDialog.vue'
 import TempoDialog from './components/TempoDialog.vue'
 import NumericSetting from './components/UI/NumericSetting.vue'
 import ToolBar from './components/ToolBar.vue'
-import { copyControl, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type GridLayout, type ToolMode, type RepeatDivision } from './grid'
+import { gridScopes, MAX_GRID_COLUMNS, MAX_GRID_ROWS, type GridLayout, type ToolMode, type RepeatDivision } from './grid'
 import { loadDefaultProject } from './defaultProject'
 import { DEFAULT_INFO_SCROLL_SPEED, isSavedProject, migrateSavedProject, type Bank } from './project'
 import { loadProjectFromFile, saveProjectToFile } from './saveManager'
@@ -21,7 +21,7 @@ import { RECORDING_FORMATS, startSessionRecording, supportedRecordingFormats, ty
 import { version } from '../package.json'
 import { isBeta } from './appChannel'
 import { registerSW } from 'virtual:pwa-register'
-import { copyBankAsSubGrid, type SubGridClipboard } from './subGridClipboard'
+import { cloneLayout, copyBankAsSubGrid, type SubGridClipboard } from './subGridClipboard'
 
 function createLayout(): GridLayout {
   return { columns: 4, rows: 4, items: [], connections: [] }
@@ -462,26 +462,20 @@ async function loadBank(event: Event) {
 }
 
 function addImportedBank(bank: Bank) {
-  const hasExternalTargets = bank.layout.items.some((item) => item.type === 'sequenced-loop' &&
-    (Object.values(item.settings.clips).some((notes) => notes.some((note) => note.bankId && note.bankId !== bank.id)) ||
-     Object.values(item.settings.automation).some((events) => events.some((event) => event.bankId && event.bankId !== bank.id))))
+  const scopes = gridScopes([bank])
+  const ids = new Set(scopes.map((scope) => scope.id))
+  const hasExternalTargets = scopes.some((scope) => scope.layout.items.some((item) => item.type === 'sequenced-loop' &&
+    [...Object.values(item.settings.clips).flat(), ...Object.values(item.settings.automation).flat(),
+      ...Object.values(item.settings.mutedRows ?? {}).flat()].some((entry) => entry.bankId && !ids.has(entry.bankId))))
   if (hasExternalTargets) {
     importedBanks.value = null
     projectError.value = 'This bank contains loops targeting other banks. Load the complete project to preserve those targets.'
     return
   }
-  const items = bank.layout.items.map((item) => {
-    if (item.type !== 'sequenced-loop') return item
-    const copy = copyControl(item, item.id)
-    if (copy.type === 'sequenced-loop') {
-      if (banks.value.some((entry) => entry.layout.items.some((existing) =>
-        existing.type === 'sequenced-loop' && existing.settings.armed))) copy.settings.armed = false
-      for (const notes of Object.values(copy.settings.clips)) for (const note of notes) if (note.bankId === bank.id) delete note.bankId
-      for (const events of Object.values(copy.settings.automation)) for (const event of events) if (event.bankId === bank.id) delete event.bankId
-    }
-    return copy
-  })
-  const imported = { ...bank, id: nextBankId(), layout: { ...bank.layout, items } }
+  const id = nextBankId()
+  const disarm = gridScopes(banks.value).some((scope) => scope.layout.items.some((item) =>
+    item.type === 'sequenced-loop' && item.settings.armed))
+  const imported = { ...bank, id, layout: cloneLayout(bank.layout, bank.id, id, bank.id, id, disarm) }
   banks.value.push(imported)
   for (const asset of samplesInBanks([imported])) addAsset(asset)
   selectedBankId.value = imported.id
@@ -536,6 +530,7 @@ onUnmounted(() => {
   </div>
   <main v-else class="app">
     <header class="header">
+      <div class="header-controls">
       <section class="transport" aria-label="Transport">
         <button class="transport-button record" type="button"
           :disabled="updating || recordingState === 'starting' || recordingState === 'stopping'"
@@ -588,8 +583,8 @@ onUnmounted(() => {
           </div>
         </div>
       </section>
-      <div class="header-actions">
         <ToolBar :mode="tool" :division="repeatDivision" @select="tool = $event" @division="repeatDivision = $event" />
+      </div>
       <div class="menu-container" @keydown.esc="menuOpen = false">
         <button
           class="icon-button"
@@ -628,7 +623,6 @@ onUnmounted(() => {
             <button type="button" @click="aboutOpen = true; menuOpen = false">About</button>
           </nav>
         </template>
-      </div>
       </div>
     </header>
     <div v-if="updateAvailable" class="update-banner" role="status">

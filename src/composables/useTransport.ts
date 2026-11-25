@@ -5,7 +5,7 @@ import { nextTick, onUnmounted, ref, watch, type Ref } from 'vue'
 import * as Tone from 'tone'
 import type { Bank } from '../project'
 import { Metronome, TransportClock } from '../sequencedLoop'
-import { gridScopes } from '../grid'
+import { gridScopes, sameBankScope } from '../grid'
 
 export function useTransport(options: {
   banks: Ref<Bank[]>
@@ -49,8 +49,24 @@ export function useTransport(options: {
     }
   }
 
+  function clearMetronomeTimer() {
+    if (metronomeTimer !== undefined) window.clearTimeout(metronomeTimer)
+    metronomeTimer = undefined
+  }
+
+  function scheduleMetronome(lastBeat?: number) {
+    if (!playing.value || !metronomeEnabled.value) return
+    const position = transportClock.position()
+    const remaining = (lastBeat ?? Math.floor(position)) + 1 - position
+    metronomeTimer = window.setTimeout(tickMetronome, Math.max(1, Math.ceil(remaining * 60000 / options.bpm.value)))
+  }
+
   function tickMetronome() {
-    metronome.tick(transportClock.position(), metronomeEnabled.value)
+    metronomeTimer = undefined
+    if (!playing.value || !metronomeEnabled.value) return
+    const position = transportClock.position()
+    metronome.tick(position, true)
+    scheduleMetronome(Math.floor(position))
   }
 
   function beginPlayback(fromInput: boolean) {
@@ -58,8 +74,7 @@ export function useTransport(options: {
     metronome.reset()
     transportClock.start(options.bpm.value)
     playing.value = true
-    tickMetronome()
-    metronomeTimer = window.setInterval(tickMetronome, 20)
+    if (metronomeEnabled.value) tickMetronome()
     beat.value = 0
     updateBeatTimer()
   }
@@ -68,7 +83,7 @@ export function useTransport(options: {
     if (playing.value) return true
     if (startingTransport || options.editing.value || !gridScopes(options.banks.value).some((bank) =>
       bank.layout.items.some((item) => item.type === 'sequenced-loop' && item.settings.armed &&
-        (bank.id === bankId || item.settings.recordScope === 'all')))) return false
+        (sameBankScope(options.banks.value, bank.id, bankId) || item.settings.recordScope === 'all')))) return false
     startingTransport = true
     try {
       await Tone.start()
@@ -87,8 +102,7 @@ export function useTransport(options: {
     if (playing.value) {
       playing.value = false
       transportClock.stop()
-      if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
-      metronomeTimer = undefined
+      clearMetronomeTimer()
       beat.value = 0
       updateBeatTimer()
       return
@@ -107,11 +121,21 @@ export function useTransport(options: {
   watch(options.bpm, () => {
     transportClock.setTempo(options.bpm.value)
     updateBeatTimer()
+    clearMetronomeTimer()
+    if (playing.value && metronomeEnabled.value) tickMetronome()
+  }, { flush: 'sync' })
+
+  watch(metronomeEnabled, (enabled) => {
+    clearMetronomeTimer()
+    if (playing.value && enabled) {
+      metronome.tick(transportClock.position(), false)
+      scheduleMetronome()
+    }
   }, { flush: 'sync' })
 
   onUnmounted(() => {
     if (beatTimer !== undefined) window.clearInterval(beatTimer)
-    if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
+    clearMetronomeTimer()
     clickSynth?.dispose()
   })
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { copyGridLayout, type GridLayout } from './grid'
+import { migrateLegacyLfos } from './lfo'
 
 export interface SubGridPreset {
   id: string
@@ -80,6 +81,7 @@ export function importPresetCollection(value: string | unknown): SubGridPreset[]
       !preset.layout || !('assets' in preset) || !Array.isArray(preset.assets)) {
       throw new Error('A preset in the collection is invalid or unsupported.')
     }
+    migrateLegacyLfos(preset.layout)
     return preset as unknown as SubGridPreset
   })
 }

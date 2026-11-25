@@ -102,6 +102,7 @@ export class SequencedLoopEngine {
   private sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void
   private bankId: string
   private clipIndex: (loop: Loop) => number
+  private sameBank: (first: string, second: string) => boolean
 
   constructor(
     loops: () => Loop[],
@@ -110,7 +111,8 @@ export class SequencedLoopEngine {
     sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void = () => {},
     bankId = '',
     clipIndex: (loop: Loop) => number = (loop) => loop.settings.clipIndex,
-  ) { this.loops = loops; this.position = position; this.send = send; this.sendAutomation = sendAutomation; this.bankId = bankId; this.clipIndex = clipIndex }
+    sameBank: (first: string, second: string) => boolean = (first, second) => first === second,
+  ) { this.loops = loops; this.position = position; this.send = send; this.sendAutomation = sendAutomation; this.bankId = bankId; this.clipIndex = clipIndex; this.sameBank = sameBank }
 
   isEnabled(id: string) { return this.states.get(id)?.enabled ?? false }
   isPending(id: string) { return !!this.states.get(id)?.pending }
@@ -254,7 +256,7 @@ export class SequencedLoopEngine {
     this.tick()
     const now = this.position()
     for (const loop of this.loops()) {
-      if (!loop.settings.armed || (loop.settings.recordScope !== 'all' && bankId !== this.bankId)) continue
+      if (!loop.settings.armed || (loop.settings.recordScope !== 'all' && !this.sameBank(bankId, this.bankId))) continue
       const state = this.states.get(loop.id)
       const index = state && !state.pending ? state.index : this.clipIndex(loop)
       const origin = state && !state.pending ? state.origin : 0
@@ -350,7 +352,7 @@ export class SequencedLoopEngine {
     const now = this.position()
     for (const loop of this.loops()) {
       const key = JSON.stringify([loop.id, bankId, instrumentId, note])
-      if (on && loop.settings.armed && (loop.settings.recordScope === 'all' || bankId === this.bankId)) {
+      if (on && loop.settings.armed && (loop.settings.recordScope === 'all' || this.sameBank(bankId, this.bankId))) {
         const state = this.states.get(loop.id)
         const index = state && !state.pending ? state.index : this.clipIndex(loop)
         const recording: Recording = { index, start: now, origin: state && !state.pending ? state.origin : 0, quantize: loop.settings.quantize,

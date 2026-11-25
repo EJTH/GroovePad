@@ -14,6 +14,7 @@ Sample Hit is suited to drums, one-shots, vocal fragments, and chopped phrases.
 - Set the start and end points of the playable region.
 - Add cut points to divide the region into slices.
 - Choose ordered playback or random playback.
+- Use Play and Pause to preview the trimmed region and follow its playhead. The preview plays the original audio once, without instrument playback settings or effects.
 
 ### Trigger behaviour
 

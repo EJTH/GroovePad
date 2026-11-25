@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import * as Tone from 'tone'
-import type { ExposedPort, GridItem, GridLayout, HeldNote, ToneElementSettings } from '../grid'
+import type { ExposedPort, GridItem, GridLayout, HeldNote, LfoSettings, ToneElementSettings } from '../grid'
 import { audioBoundaryKey, audioInput, audioOutput, isAudioSource, mixerAudioInputs, planAudioRoutes } from './audioRoutes'
-import { mappingEndpoint } from '../modulation'
-import { inputs } from '../parameters'
+import { numericContribution, type NumericSignal } from '../modulation'
+import { inputs, outputs } from '../parameters'
 
 type AudioItem = Extract<GridItem, { type: 'tone-element' | 'sub-grid' | 'instrument-pad' }>
 type Processor = Tone.Gain | Tone.Filter | Tone.FeedbackDelay | Tone.Reverb | Tone.Envelope
@@ -28,9 +28,13 @@ export interface BoundaryAudio {
 }
 
 export interface ModulationOptions {
-  hold?: ReadonlyMap<string, boolean>
   bpm?: number
   toneSettings?: ReadonlyMap<string, ToneElementSettings>
+  baseItems?: readonly GridItem[]
+  signals?: ReadonlyMap<string, number>
+  boundaryInputs?: ReadonlySet<string>
+  wheelPositions?: ReadonlyMap<string, number>
+  automatedWheels?: ReadonlySet<string>
 }
 
 type ModulationParam = { rampTo(value: number, rampTime: number): unknown }
@@ -59,8 +63,14 @@ export class BankAudio {
   private edges: { from: Tone.ToneAudioNode; to: Tone.InputNode }[] = []
   private signature = ''
   private boundary: BoundaryAudio[] = []
-  private lfos = new Map<string, Tone.LFO>()
+  private lfos = new Map<string, { node: Tone.LFO; waveform: Tone.Waveform; start: number; frequency: number;
+    type: LfoSettings['waveform'] }>()
   private modulationNodes: Tone.ToneAudioNode[] = []
+  private modulationEdges: { from: Tone.ToneAudioNode; to: Tone.InputNode }[] = []
+  private modulationValues: { node: Tone.Signal; read: (items: readonly GridItem[], options: ModulationOptions) => number | undefined }[] = []
+  private modulationMonitors = new Map<string, { waveform: Tone.Waveform; center: number; half: number }>()
+  private drivenParams = new Set<string>()
+  private rateDrivenLfos = new Set<string>()
 
   constructor(
     reportError: (message: string) => void,
@@ -75,6 +85,25 @@ export class BankAudio {
 
   getInput(id: string) { return this.entries.get(id)?.input }
   getOutput(id: string) { return this.entries.get(id)?.output }
+  isModulationDriven(id: string, parameter: string) { return this.drivenParams.has(`${id}:${parameter}`) }
+  hasModulationMonitor(id: string) { return this.modulationMonitors.has(id) }
+  getModulationSample(id: string) {
+    const monitor = this.modulationMonitors.get(id)
+    if (!monitor || monitor.waveform.context.state !== 'running') return undefined
+    const samples = monitor.waveform.getValue()
+    const sample = samples[samples.length - 1]
+    return sample === undefined ? undefined : monitor.center + sample * monitor.half
+  }
+  getLfoSample(id: string, settings: LfoSettings, bpm: number) {
+    const lfo = this.lfos.get(id)
+    const frequency = settings.rateMode === 'sync' ? settings.rate * bpm / 60 : settings.rate
+    if (!lfo || lfo.node.context.state !== 'running' || lfo.type !== settings.waveform || lfo.frequency !== frequency) return undefined
+    const samples = lfo.waveform.getValue()
+    return {
+      value: samples[samples.length - 1]!,
+      phase: (Math.max(0, lfo.node.context.currentTime - lfo.start) * lfo.frequency) % 1,
+    }
+  }
   getMixerInputs(id: string) { return [...(this.entries.get(id)?.channels?.keys() ?? [])] }
   getEnvelopeValue(id: string) {
     const node = this.entries.get(id)?.processor
@@ -158,6 +187,9 @@ export class BankAudio {
     const signature = JSON.stringify([planned, boundary.map(({ port }) => [port.id, port.direction, port.itemId, port.parameterId])])
     const rerouted = changed || signature !== this.signature
     if (rerouted) {
+      this.clearModulation()
+      this.modulationSignature = ''
+      this.appliedParams.clear()
       this.disconnectEdges()
       for (const [key, node] of this.ports) if (!portKeys.includes(key)) {
         node.dispose()
@@ -249,6 +281,7 @@ export class BankAudio {
       this.signature = signature
       this.boundary = boundary
     }
+    this.updateModulation(layout, modulationOptions)
     for (const item of items) {
       if (item.type !== 'tone-element') continue
       const entry = this.entries.get(item.id)
@@ -264,41 +297,47 @@ export class BankAudio {
         entry.bypassed = !!s.bypassed
       }
       const effective = modulationOptions.toneSettings?.get(item.id) ?? s
-      const audioDriven = (parameter: string) => layout.connections.some((wire) => {
-        if (wire.targetId !== item.id || wire.targetParameter !== parameter || wire.sourceParameter !== 'value') return false
-        const source = layout.items.find((candidate) => candidate.id === wire.sourceId)
-        return source?.type === 'lfo' || (source?.type === 'tone-element' && source.settings.elementType === 'envelope')
-      })
+      const audioDriven = (parameter: string) => this.drivenParams.has(`${item.id}:${parameter}`)
+      // Skips redundant rampTo calls; each one appends automation events to the param.
+      const ramp = (key: string, param: ModulationParam, value: number, driven = false) => {
+        const cacheKey = `${item.id}:${key}`
+        if (driven) {
+          this.appliedParams.delete(cacheKey)
+          return
+        }
+        if (this.appliedParams.get(cacheKey) === value) return
+        this.appliedParams.set(cacheKey, value)
+        param.rampTo(value, 0.02)
+      }
       if (node instanceof Tone.Filter) {
-        if (!audioDriven('cutoff')) node.frequency.rampTo(effective.cutoff, 0.02)
-        if (!audioDriven('gain')) node.Q.rampTo(effective.gain, 0.02)
+        ramp('cutoff', node.frequency, effective.cutoff, audioDriven('cutoff'))
+        ramp('gain', node.Q, effective.gain, audioDriven('gain'))
       } else if (node instanceof Tone.FeedbackDelay) {
-        if (!audioDriven('delayTime')) node.delayTime.rampTo(effective.delayTime, 0.02)
-        if (!audioDriven('feedback')) node.feedback.rampTo(Math.min(effective.feedback, 0.99), 0.02)
-        if (!audioDriven('gain')) node.wet.rampTo(Math.min(effective.gain, 1), 0.02)
+        ramp('delayTime', node.delayTime, effective.delayTime, audioDriven('delayTime'))
+        ramp('feedback', node.feedback, Math.min(effective.feedback, 0.99), audioDriven('feedback'))
+        ramp('gain', node.wet, Math.min(effective.gain, 1), audioDriven('gain'))
       } else if (node instanceof Tone.Reverb) {
         this.updateReverbDecay(this.entries.get(item.id)!, node, effective.decay)
-        if (!audioDriven('gain')) node.wet.rampTo(Math.min(effective.gain, 1), 0.02)
+        ramp('gain', node.wet, Math.min(effective.gain, 1), audioDriven('gain'))
       } else if (node instanceof Tone.Envelope) {
         node.attack = effective.attack
         node.decay = effective.decay
         node.sustain = effective.sustain
         node.release = effective.release
       } else if (node instanceof Tone.Gain && !isAudioSource(item)) {
-        if (!audioDriven('gain')) node.gain.rampTo(effective.gain, 0.02)
+        ramp('gain', node.gain, effective.gain, audioDriven('gain'))
       }
       if (item.settings.elementType === 'mixer') {
         const entry = this.entries.get(item.id)
         const soloed = [...(entry?.channels?.keys() ?? [])].some((key) => s.mixerChannels?.[key]?.solo)
         for (const [key, channel] of entry?.channels ?? []) {
           const settings = s.mixerChannels?.[key]
-          channel.volume.rampTo(settings?.volume ?? 0, 0.02)
-          channel.pan.rampTo(settings?.pan ?? 0, 0.02)
+          ramp(`${key}:volume`, channel.volume, settings?.volume ?? 0)
+          ramp(`${key}:pan`, channel.pan, settings?.pan ?? 0)
           channel.mute = soloed && !settings?.solo
         }
       }
     }
-    this.updateModulation(layout, modulationOptions)
     return rerouted
   }
 
@@ -324,7 +363,7 @@ export class BankAudio {
     })()
   }
 
-  private getModulationParam(id: string, parameter: string): ModulationParam | undefined {
+  private getModulationParam(id: string, parameter: string): Tone.InputNode | undefined {
     const entry = this.entries.get(id)
     if (!entry) return undefined
     const node = entry.processor
@@ -344,127 +383,282 @@ export class BankAudio {
   }
 
   private updateModulation(layout: GridLayout, options: ModulationOptions) {
-    const lfoItems = layout.items.filter((item) => item.type === 'lfo')
+    const items = options.baseItems ?? layout.items
+    const lfoItems = items.filter((item) => item.type === 'lfo')
     const signature = JSON.stringify([
-      lfoItems.map((item) => [item.id, item.settings]),
-      options.hold ? [...options.hold.entries()] : [],
       options.bpm ?? 120,
-      layout.connections.map((wire) => [
-        wire.id, wire.sourceId, wire.sourceParameter, wire.targetId, wire.targetParameter,
-        wire.mappingMode, wire.modulationAmount, wire.modulationMin, wire.modulationMax,
-        wire.absoluteMin, wire.absoluteMax,
-      ]),
-      layout.items.map((item) => [item.id, item.type, item.type === 'tone-element' ? item.settings : undefined]),
+      layout.connections,
+      items.map((item) => [item.id, item.type,
+        item.type === 'lfo' ? [item.settings.waveform, item.settings.rateMode, item.settings.rate, item.settings.smoothness] :
+          item.type === 'knob' ? [item.settings.min, item.settings.max] :
+            item.type === 'mod-wheel' ? [item.settings.autoCenter, options.wheelPositions?.has(item.id),
+              options.automatedWheels?.has(item.id)] :
+              item.type === 'tone-element' ? item.settings.elementType :
+                item.type === 'output-selector' ? item.settings : undefined,
+        outputs(item)]),
+      [...(options.boundaryInputs ?? [])].sort(),
+      items.flatMap((item) => outputs(item).filter((output) => output.kind === 'number' &&
+        item.type !== 'knob' && item.type !== 'lfo' &&
+        !(item.type === 'tone-element' && item.settings.elementType === 'envelope'))
+        .map((output) => [item.id, output.id, options.signals?.has(`${item.id}:${output.id}`) ?? false])),
     ])
-    if (signature === this.modulationSignature) return
+    if (signature !== this.modulationSignature) {
+      this.clearModulation()
+      for (const [id, lfo] of this.lfos) {
+        const item = lfoItems.find((candidate) => candidate.id === id)
+        const frequency = item && (item.settings.rateMode === 'sync'
+          ? item.settings.rate * (options.bpm ?? 120) / 60 : item.settings.rate)
+        if (!item || lfo.frequency !== frequency || lfo.type !== item.settings.waveform) {
+          lfo.waveform.dispose()
+          lfo.node.dispose()
+          this.lfos.delete(id)
+        }
+      }
+      for (const item of lfoItems) {
+        if (this.lfos.has(item.id)) continue
+        const frequency = item.settings.rateMode === 'sync'
+          ? item.settings.rate * (options.bpm ?? 120) / 60 : item.settings.rate
+        const node = new Tone.LFO({
+          frequency, min: -1, max: 1,
+          type: item.settings.waveform === 'saw' ? 'sawtooth' : item.settings.waveform === 'square' ? 'square' : 'sine',
+        })
+        const waveform = new Tone.Waveform(16)
+        node.connect(waveform)
+        const start = node.context.now()
+        node.start(start)
+        this.lfos.set(item.id, { node, waveform, start, frequency, type: item.settings.waveform })
+      }
 
-    for (const node of this.modulationNodes) node.dispose()
-    this.modulationNodes = []
-    for (const lfo of this.lfos.values()) lfo.dispose()
-    this.lfos.clear()
-
-    for (const item of lfoItems) {
-      if (item.type !== 'lfo') continue
-      const lfo = new Tone.LFO({
-        frequency: item.settings.rateMode === 'sync'
-          ? item.settings.rate * (options.bpm ?? 120) / 60
-          : item.settings.rate,
-        min: -1,
-        max: 1,
-        type: item.settings.waveform === 'saw' ? 'sawtooth' : item.settings.waveform === 'square' ? 'square' : 'sine',
+      type Source = { node: Tone.ToneAudioNode; signal: NumericSignal }
+      const sources = new Map<string, Source | null | undefined>()
+      const resolving = new Set<string>()
+      const create = <T extends Tone.ToneAudioNode>(node: T): T => {
+        this.modulationNodes.push(node)
+        return node
+      }
+      const connect = (from: Tone.ToneAudioNode, to: Tone.InputNode) => {
+        from.connect(to)
+        this.modulationEdges.push({ from, to })
+      }
+      const constant = (value: number, read?: (items: readonly GridItem[], options: ModulationOptions) => number | undefined) => {
+        const node = create(new Tone.Signal(value))
+        if (read) this.modulationValues.push({ node, read })
+        return node
+      }
+      const inputBase = (target: GridItem, parameter: string, value: number) => constant(value, (current, next) => {
+        const item = current.find((candidate) => candidate.id === target.id)
+        if (!item) return undefined
+        if (item.type === 'knob' && parameter === 'value') {
+          const nextValue = next.signals?.get(`${item.id}:value`) ?? item.settings.value
+          return Math.max(item.settings.min, Math.min(item.settings.max, nextValue))
+        }
+        if ((item.type === 'lfo' || item.type === 'mod-wheel' || item.type === 'tone-element') && parameter in item.settings) {
+          const nextValue: unknown = Reflect.get(item.settings, parameter)
+          return typeof nextValue === 'number' ? nextValue : undefined
+        }
+        return undefined
       })
-      if (item.settings.waveform === 'random') Reflect.set(lfo, 'type', 'random')
-      if (item.settings.rateMode === 'sync') lfo.sync()
-      if (options.hold?.get(item.id)) lfo.stop()
-      else lfo.start()
-      this.lfos.set(item.id, lfo)
-    }
+      const canSource = (id: string, parameter: string, path: ReadonlySet<string>): boolean => {
+        const key = `${id}:${parameter}`
+        if (path.has(key)) return false
+        const item = items.find((candidate) => candidate.id === id)
+        const output = item && outputs(item).find((entry) => entry.id === parameter && entry.kind === 'number')
+        if (!item || !output || output.min === undefined || output.max === undefined || output.min >= output.max ||
+          item.type === 'output-selector' || item.type === 'sub-grid') return false
+        const next = new Set(path)
+        next.add(key)
+        if (item.type === 'knob' && parameter === 'value') return canInput(item, parameter, next)
+        if (item.type === 'mod-wheel' && parameter === 'value' &&
+          options.wheelPositions?.has(id) && !options.automatedWheels?.has(id)) return canInput(item, 'depth', next)
+        if (item.type === 'lfo' && parameter === 'value') {
+          if (item.settings.smoothness > 0) return false
+          if (layout.connections.some((wire) => wire.targetId === id &&
+            (wire.targetParameter === 'waveform' || wire.targetParameter === 'rateMode')) ||
+            options.boundaryInputs?.has(`${id}:waveform`) || options.boundaryInputs?.has(`${id}:rateMode`)) return false
+          return ['depth', 'offset', 'rate'].every((input) => canInput(item, input, next))
+        }
+        return true
+      }
+      const canInput = (target: GridItem, parameter: string, path: ReadonlySet<string>): boolean =>
+        !options.boundaryInputs?.has(`${target.id}:${parameter}`) &&
+        layout.connections.filter((wire) => wire.targetId === target.id && wire.targetParameter === parameter)
+          .every((wire) => canSource(wire.sourceId, wire.sourceParameter, path))
+      const inputGraph = (target: GridItem, parameter: string, base: number): Tone.ToneAudioNode | null | undefined => {
+        const input = inputs(target).find((entry) => entry.id === parameter && entry.kind === 'number')
+        if (!input || input.choices || input.min === undefined || input.max === undefined || input.min >= input.max ||
+          options.boundaryInputs?.has(`${target.id}:${parameter}`)) return null
+        const min = input.min
+        const max = input.max
+        let absolute: Tone.ToneAudioNode | undefined
+        const adjustments: Tone.ToneAudioNode[] = []
+        for (const wire of layout.connections.filter((entry) => entry.targetId === target.id && entry.targetParameter === parameter)) {
+          const source = sourceGraph(wire.sourceId, wire.sourceParameter)
+          if (source === null) return null
+          if (!source) continue
+          const { signal } = source
+          const center = (signal.max + signal.min) / 2
+          const half = (signal.max - signal.min) / 2
+          const translate = create(new Tone.Add(-center))
+          const normalize = create(new Tone.Multiply(1 / half))
+          const result = numericContribution(wire, signal, target, min, max)
+          const shape = create(new Tone.WaveShaper((value) => {
+            const mapped = numericContribution(wire, { ...signal, value: center + value * half }, target, min, max)
+            return mapped.absolute ?? mapped.adjustment ?? 0
+          }, 2049))
+          connect(source.node, translate)
+          connect(translate, normalize)
+          connect(normalize, shape)
+          if (result.absolute !== undefined) absolute = shape
+          else adjustments.push(shape)
+        }
+        if (!absolute && !adjustments.length) return undefined
+        const sum = create(new Tone.Gain(1))
+        connect(absolute ?? inputBase(target, parameter, base), sum)
+        for (const adjustment of adjustments) connect(adjustment, sum)
+        const center = (max + min) / 2
+        const half = (max - min) / 2
+        const translate = create(new Tone.Add(-center))
+        const normalize = create(new Tone.Multiply(1 / half))
+        const clamp = create(new Tone.WaveShaper((value) => {
+          const mapped = center + value * half
+          return target.type === 'tone-element' && target.settings.elementType === 'delay' && parameter === 'feedback'
+            ? Math.min(0.99, mapped) : mapped
+        }, 2049))
+        connect(sum, translate)
+        connect(translate, normalize)
+        connect(normalize, clamp)
+        return clamp
+      }
+      const sourceGraph = (id: string, parameter: string): Source | null | undefined => {
+        const key = `${id}:${parameter}`
+        if (sources.has(key)) return sources.get(key)
+        if (resolving.has(key)) return null
+        const item = items.find((candidate) => candidate.id === id)
+        const output = item && outputs(item).find((entry) => entry.id === parameter && entry.kind === 'number')
+        if (!item || !output || output.min === undefined || output.max === undefined || output.min >= output.max) return null
+        if (item.type === 'output-selector' || item.type === 'sub-grid') return null
+        resolving.add(key)
+        let node: Tone.ToneAudioNode | null | undefined
+        let value = options.signals?.get(key)
+        if (item.type === 'lfo' && parameter === 'value') {
+          if (layout.connections.some((wire) => wire.targetId === id &&
+            (wire.targetParameter === 'waveform' || wire.targetParameter === 'rateMode')) ||
+            options.boundaryInputs?.has(`${id}:waveform`) || options.boundaryInputs?.has(`${id}:rateMode`)) node = null
+          else {
+            const oscillator = this.lfos.get(id)?.node
+            if (!oscillator) node = null
+            else {
+              const depthInput = inputGraph(item, 'depth', item.settings.depth)
+              const offsetInput = inputGraph(item, 'offset', item.settings.offset)
+              const rateInput = inputGraph(item, 'rate', item.settings.rate)
+              if (depthInput === null || offsetInput === null || rateInput === null) node = null
+              else {
+                const depth = create(new Tone.Multiply(0))
+                const offset = create(new Tone.Add(0))
+                const clamp = create(new Tone.WaveShaper((sample) => sample, 2049))
+                connect(depthInput ?? inputBase(item, 'depth', item.settings.depth), depth.factor)
+                connect(offsetInput ?? inputBase(item, 'offset', item.settings.offset), offset.addend)
+                if (rateInput) {
+                  const rate = create(new Tone.Multiply(item.settings.rateMode === 'sync' ? (options.bpm ?? 120) / 60 : 1))
+                  connect(rateInput, rate)
+                  connect(rate, oscillator.frequency)
+                  this.rateDrivenLfos.add(id)
+                }
+                connect(oscillator, depth)
+                connect(depth, offset)
+                connect(offset, clamp)
+                node = clamp
+              }
+            }
+          }
+          value = 0
+        } else if (item.type === 'tone-element' && item.settings.elementType === 'envelope' && parameter === 'value') {
+          node = this.getEnvelopeSignal(id) ?? null
+          value = 0
+        } else if (item.type === 'knob' && parameter === 'value') {
+          value = Math.max(output.min, Math.min(output.max, value ?? item.settings.value))
+          const input = inputGraph(item, parameter, value)
+          node = input === null ? null : input ?? inputBase(item, parameter, value)
+        } else if (item.type === 'mod-wheel' && parameter === 'value' &&
+          options.wheelPositions?.has(id) && !options.automatedWheels?.has(id)) {
+          const depth = inputGraph(item, 'depth', item.settings.depth)
+          const position = options.wheelPositions.get(id)!
+          if (depth === null) node = null
+          else {
+            const multiply = create(new Tone.Multiply(0))
+            const wheel = constant(position, (_items, next) => next.wheelPositions?.get(id))
+            connect(depth ?? inputBase(item, 'depth', item.settings.depth), multiply.factor)
+            connect(wheel, multiply)
+            node = multiply
+          }
+          value = 0
+        } else if (value !== undefined && Number.isFinite(value)) {
+          node = constant(value, (_items, next) => next.signals?.get(key))
+        }
+        const result: Source | null | undefined = node && value !== undefined
+          ? { node, signal: { value, min: output.min, max: output.max, source: item } }
+          : node === null ? null : undefined
+        resolving.delete(key)
+        sources.set(key, result)
+        return result
+      }
 
-    for (const wire of layout.connections) {
-      if (wire.sourceParameter !== 'value') continue
-      const source = layout.items.find((item) => item.id === wire.sourceId)
-      if (!source || (source.type !== 'lfo' && source.type !== 'tone-element')) continue
-      let sourceNode: Tone.ToneAudioNode | undefined
-      if (source.type === 'lfo') {
-        sourceNode = this.lfos.get(source.id)
-      } else if (source.settings.elementType === 'envelope') {
-        sourceNode = this.getEnvelopeSignal(source.id)
-      }
-      if (!sourceNode) continue
-      const target = layout.items.find((item) => item.id === wire.targetId)
-      if (target?.type !== 'tone-element') continue
-      const param = this.getModulationParam(wire.targetId, wire.targetParameter)
-      if (!param) continue
-      const input = inputs(target).find((entry) => entry.id === wire.targetParameter && entry.kind === 'number')
-      if (!input || input.min === undefined || input.max === undefined) continue
-      const targetSpan = input.max - input.min
-      let normalizedSource: Tone.ToneAudioNode = sourceNode
-      if (source.type === 'lfo') {
-        const depth = new Tone.Multiply(source.settings.depth)
-        const offset = new Tone.Add(source.settings.offset)
-        sourceNode.connect(depth)
-        depth.connect(offset)
-        let level: Tone.ToneAudioNode = offset
-        if (wire.mappingMode !== 'mod' && wire.modulationAmount === undefined &&
-          wire.modulationMin === undefined && wire.modulationMax === undefined) {
-          const add = new Tone.Add(1)
-          const half = new Tone.Multiply(0.5)
-          offset.connect(add)
-          add.connect(half)
-          level = half
-          this.modulationNodes.push(add, half)
-        } else if (wire.mappingMode === 'abs') {
-          const add = new Tone.Add(1)
-          const half = new Tone.Multiply(0.5)
-          offset.connect(add)
-          add.connect(half)
-          level = half
-          this.modulationNodes.push(add, half)
+      for (const item of items) {
+        if (item.type !== 'tone-element' || item.settings.elementType === 'oscillator' || item.settings.elementType === 'noise') continue
+        for (const input of inputs(item)) {
+          if (input.kind !== 'number') continue
+          const param = this.getModulationParam(item.id, input.id)
+          const base = this.baseToneParameter(item, input.id)
+          if (!param || base === undefined || !canInput(item, input.id, new Set())) continue
+          const node = inputGraph(item, input.id, base)
+          if (node) {
+            connect(node, param)
+            this.drivenParams.add(`${item.id}:${input.id}`)
+          }
         }
-        normalizedSource = level
-        this.modulationNodes.push(depth, offset)
       }
-
-      const mappingMode = wire.mappingMode ?? (wire.modulationAmount !== undefined ||
-        wire.modulationMin !== undefined || wire.modulationMax !== undefined ? 'mod' : 'abs')
-      if (mappingMode === 'abs') {
-        const min = wire.absoluteMin ?? mappingEndpoint(layout, wire, 'min') ?? input.min
-        const max = wire.absoluteMax ?? mappingEndpoint(layout, wire, 'max') ?? input.max
-        const scale = new Tone.Scale(min, max)
-        normalizedSource.connect(scale)
-        scale.connect(param as Tone.InputNode)
-        this.modulationNodes.push(scale)
-      } else {
-        const base = this.baseToneParameter(target, wire.targetParameter)
-        let minOffset = 0
-        let maxOffset = 100
-        if (wire.modulationAmount !== undefined) {
-          minOffset = source.type === 'lfo' ? -wire.modulationAmount : 0
-          maxOffset = wire.modulationAmount
-        } else if (wire.modulationMin !== undefined || wire.modulationMax !== undefined) {
-          minOffset = wire.modulationMin ?? 0
-          maxOffset = wire.modulationMax ?? 100
-        }
-        const scale = new Tone.Scale(
-          minOffset / 100 * targetSpan,
-          maxOffset / 100 * targetSpan,
-        )
-        normalizedSource.connect(scale)
-        if (base === undefined) {
-          scale.connect(param as Tone.InputNode)
-        } else {
-          const add = new Tone.Add(base)
-          scale.connect(add)
-          add.connect(param as Tone.InputNode)
-          this.modulationNodes.push(add)
-        }
-        this.modulationNodes.push(scale)
+      for (const item of items) {
+        if (item.type !== 'knob') continue
+        const source = sources.get(`${item.id}:value`)
+        if (!source) continue
+        const center = (source.signal.max + source.signal.min) / 2
+        const half = (source.signal.max - source.signal.min) / 2
+        const translate = create(new Tone.Add(-center))
+        const normalize = create(new Tone.Multiply(1 / half))
+        const waveform = create(new Tone.Waveform(16))
+        connect(source.node, translate)
+        connect(translate, normalize)
+        connect(normalize, waveform)
+        this.modulationMonitors.set(item.id, { waveform, center, half })
       }
+      this.modulationSignature = signature
     }
-    this.modulationSignature = signature
+    for (const { node, read } of this.modulationValues) {
+      const value = read(items, options)
+      if (value !== undefined && Number.isFinite(value) && node.value !== value) node.value = value
+    }
   }
 
   private modulationSignature = ''
+  private readonly appliedParams = new Map<string, number>()
+
+  private clearModulation() {
+    for (const { from, to } of this.modulationEdges) {
+      if (!from.disposed) from.disconnect(to)
+      if (to instanceof Tone.Signal && !to.disposed) to.overridden = false
+    }
+    this.modulationEdges = []
+    for (const node of this.modulationNodes) node.dispose()
+    this.modulationNodes = []
+    this.modulationValues = []
+    this.modulationMonitors.clear()
+    this.drivenParams.clear()
+    for (const id of this.rateDrivenLfos) {
+      const lfo = this.lfos.get(id)
+      if (lfo && !lfo.node.disposed) lfo.node.frequency.value = lfo.frequency
+    }
+    this.rateDrivenLfos.clear()
+  }
 
   private baseToneParameter(item: Extract<GridItem, { type: 'tone-element' }>, parameter: string): number | undefined {
     const value = item.settings[parameter as keyof typeof item.settings]
@@ -498,9 +692,8 @@ export class BankAudio {
 
   dispose() {
     this.disconnectEdges()
-    for (const node of this.modulationNodes) node.dispose()
-    this.modulationNodes = []
-    for (const lfo of this.lfos.values()) lfo.dispose()
+    this.clearModulation()
+    for (const lfo of this.lfos.values()) { lfo.waveform.dispose(); lfo.node.dispose() }
     this.lfos.clear()
     if (this.parentInput && !this.parentInput.disposed) this.parentInput.disconnect(this.input)
     for (const entry of this.entries.values()) {

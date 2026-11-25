@@ -22,14 +22,15 @@ GroovePad is a highly customizable, modular, flexible and open-source music groo
   - Pads, pad grids, piano rolls.
   - A loop sequencer that can record notes and automation on any other compoenent!
   - A simple to use grid system with an optional but powerful wire system that lets you route any value, note or signal for advanced synth modulation or even workflows.
-
+  - SubGrid components that can be used to built reusable patches and workflows.
+  - Tone.js exposed as building blocks.
 
 ## Planned features (Soon)
 Within 14 day I hope to have implemented the following features:
 - More and more refined synth models.
-- FX (Punch in, global send channels, wireing etc)
+- FX (Punch in, global send channels, wireing etc - ~70% done now!)
 - Planned FX: Beat repeat, Stutter, Reverb, Echo, Filters, EQ, Limiter, Bitcrush, Flanger, Pitch shift, spectral freeze, gain, tube amp and more!
-- Entire tone.js backend as modular tools for custom patches that can be reused.
+
 
 
 

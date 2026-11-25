@@ -53,7 +53,7 @@ export interface KnobSettings {
 
 export interface LfoSettings {
   color: string
-  waveform: 'sine' | 'saw' | 'square' | 'random'
+  waveform: 'sine' | 'saw' | 'square'
   rateMode: 'free' | 'sync'
   rate: number
   depth: number
@@ -221,6 +221,7 @@ export interface ParameterOutput {
   bend?: number
   user?: boolean
   pointer?: boolean
+  wheelPosition?: number
 }
 
 export const DEFAULT_GRID_COLOR = '#b8d986'
@@ -323,6 +324,14 @@ export function gridScopes(banks: { id: string; title: string; layout: GridLayou
   }
   for (const bank of banks) collect(bank.id, bank.title, bank.layout)
   return scopes
+}
+
+export function sameBankScope(banks: { id: string; title: string; layout: GridLayout }[], first: string, second: string) {
+  if (first === second) return true
+  return banks.some((bank) => {
+    const scopes = gridScopes([bank])
+    return scopes.some((scope) => scope.id === first) && scopes.some((scope) => scope.id === second)
+  })
 }
 
 export function copyGridLayout(layout: GridLayout): GridLayout {

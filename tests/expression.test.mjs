@@ -1277,7 +1277,7 @@ test('armed loops record and replay control setting changes without mutating the
       const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
       assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
       loop.settings.armed = false
-      layout.items[1].settings.waveform = 'random'
+      layout.items[1].settings.waveform = 'saw'
       const recordedChanges = changes.length
       beat = 4.5
       grid.api.loopEngine.tick()
@@ -1295,7 +1295,7 @@ test('armed loops record and replay control setting changes without mutating the
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[1].settings.waveform, 'square')
       assert.equal(lfoDialog.api.liveItem.value.settings.waveform, 'square')
-      assert.equal(layout.items[1].settings.waveform, 'random')
+      assert.equal(layout.items[1].settings.waveform, 'saw')
       grid.api.loopEngine.stop()
       assert.equal(grid.api.displayItems.value[0].settings.instrumentParams.resonance, 12.5)
     } finally { lfoDialog.dispose(); dialog.dispose(); grid.dispose() }
@@ -2242,7 +2242,7 @@ test('pasting and opening a SubGrid edits an independent nested layout', async (
   } finally { await server.close() }
 })
 
-test('arpeggiator toggles and LFO holds record and replay as control state', async () => {
+test('arpeggiator toggles record and replay as control state', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const dependencies = {}
@@ -2262,30 +2262,14 @@ test('arpeggiator toggles and LFO holds record and replay as control state', asy
       bpm: 120, playing: true, transportClock: { position: () => beat } })
     const grid = await setupComponent('GrooveGrid', props, dependencies,
       { setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {} })
-    const oscillatorProps = vue.reactive({ label: 'LFO', settings: lfo.settings, bpm: 120,
-      get automationHold() { return grid.api.lfoAutomationHold('lfo') } })
-    const oscillator = await setupComponent('LFO', oscillatorProps, dependencies,
-      { requestAnimationFrame: () => 1, cancelAnimationFrame() {} }, (event, value) => {
-        if (event === 'hold-change') grid.api.recordToggle('lfo', 'hold', value)
-      })
     try {
-      oscillator.api.tick(1000)
-      oscillator.api.tick(1100)
       beat = 0.5
       grid.api.toggleArpeggiator('arp')
-      beat = 0.75
-      oscillator.api.toggleHold()
-      const phase = oscillator.api.phase.value
-      oscillator.api.tick(1200)
-      assert.equal(oscillator.api.phase.value, phase)
       beat = 1.25
       grid.api.toggleArpeggiator('arp')
-      beat = 1.5
-      oscillator.api.toggleHold()
       assert.deepEqual(loop.settings.automation[0].map(({ sourceId, parameter, value, position }) =>
         [sourceId, parameter, value, position]), [
-        ['arp', 'enabled', 0, 0.5], ['lfo', 'hold', 1, 0.75],
-        ['arp', 'enabled', 1, 1.25], ['lfo', 'hold', 0, 1.5],
+        ['arp', 'enabled', 0, 0.5], ['arp', 'enabled', 1, 1.25],
       ])
       const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [{ id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout }] }
       assert.equal(isSavedProject(JSON.parse(JSON.stringify(project))), true)
@@ -2294,31 +2278,17 @@ test('arpeggiator toggles and LFO holds record and replay as control state', asy
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[0].settings.enabled, false)
       assert.equal(arp.settings.enabled, true)
-      beat = 4.75
-      grid.api.loopEngine.tick()
-      assert.equal(oscillator.api.held.value, true)
-      oscillator.api.tick(1300)
-      assert.equal(oscillator.api.phase.value, phase)
-      oscillator.api.toggleHold()
-      assert.equal(oscillator.api.held.value, false)
       grid.api.toggleArpeggiator('arp')
       assert.equal(grid.api.displayItems.value[0].settings.enabled, true)
       beat = 5.25
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[0].settings.enabled, true)
-      beat = 5.5
-      grid.api.loopEngine.tick()
-      assert.equal(oscillator.api.held.value, false)
       beat = 8.5
       grid.api.loopEngine.tick()
       assert.equal(grid.api.displayItems.value[0].settings.enabled, false)
-      beat = 8.75
-      grid.api.loopEngine.tick()
-      assert.equal(oscillator.api.held.value, true)
-      assert.equal(loop.settings.automation[0].length, 4)
+      assert.equal(loop.settings.automation[0].length, 2)
       grid.api.loopEngine.stop()
-      assert.equal(grid.api.lfoAutomationHold('lfo'), undefined)
-    } finally { oscillator.dispose(); grid.dispose() }
+    } finally { grid.dispose() }
   } finally { await server.close() }
 })
 
@@ -2597,9 +2567,8 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       assert.equal(loop.settings.automation[0][0].bankId, 'B')
       beat = 0.9
       gridB.api.toggleArpeggiator('arp')
-      gridB.api.recordToggle('lfo', 'hold', true)
       assert.deepEqual(loop.settings.automation[0].slice(1).map((event) => [event.bankId, event.parameter, event.value]),
-        [['B', 'enabled', 1], ['B', 'hold', 1]])
+        [['B', 'enabled', 1]])
       secondArp.settings.enabled = false
       beat = 4.5
       gridA.api.loopEngine.tick()
@@ -2615,8 +2584,6 @@ test('all-bank loops record and replay in the correct bank even when control IDs
       gridA.api.loopEngine.tick()
       assert.equal(gridB.api.displayItems.value[2].settings.enabled, true)
       assert.equal(gridA.api.displayItems.value[2].settings.enabled, false)
-      assert.equal(gridA.api.lfoAutomationHold('lfo'), undefined)
-      assert.equal(gridB.api.lfoAutomationHold('lfo'), true)
       gridA.api.loopEngine.stop()
       assert.equal(gridB.api.loopAutomation.size, 0)
     } finally { gridA.dispose(); gridB.dispose() }
@@ -2735,17 +2702,19 @@ test('global metronome follows playback and can be toggled without an armed loop
       dispose() {}
     }
     const intervals = new Map()
+    const timeouts = new Map()
     let timerId = 0
     const window = {
       setInterval: (fn, delay) => { intervals.set(++timerId, { fn, delay }); return timerId },
       clearInterval: (id) => intervals.delete(id),
-      clearTimeout: () => {},
-      setTimeout: () => 1,
+      clearTimeout: (id) => timeouts.delete(id),
+      setTimeout: (fn, delay) => { timeouts.set(++timerId, { fn, delay }); return timerId },
       removeEventListener: () => {},
     }
     const app = await setupComponent('App', {}, {
       './grid': gridModule,
       './sequencedLoop': { ...loopModule, TransportClock: Clock },
+      './subGridClipboard': await server.ssrLoadModule('/src/subGridClipboard.ts'),
       tone: { start: async () => {}, Synth, getContext: () => ({ rawContext: { destination: {} } }) },
       './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
     }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
@@ -2757,9 +2726,15 @@ test('global metronome follows playback and can be toggled without an armed loop
         layout: { columns: 1, rows: 1, items: [loop], connections: [] } })
       await app.api.togglePlayback()
       assert.deepEqual(clicks, [])
+      assert.equal(timeouts.size, 0)
       loop.settings.armed = false
       app.api.metronomeEnabled.value = true
-      const tick = () => [...intervals.values()].filter((timer) => timer.delay === 20).forEach((timer) => timer.fn())
+      const tick = () => {
+        assert.equal(timeouts.size, 1)
+        const [id, timer] = timeouts.entries().next().value
+        timeouts.delete(id)
+        timer.fn()
+      }
       position = 1
       tick()
       assert.deepEqual(clicks, ['G5'])
@@ -2769,7 +2744,7 @@ test('global metronome follows playback and can be toggled without an armed loop
       assert.deepEqual(clicks, ['G5', 'G5'])
       app.api.metronomeEnabled.value = false
       position = 3
-      tick()
+      assert.equal(timeouts.size, 0)
       assert.deepEqual(clicks, ['G5', 'G5'])
       app.api.metronomeEnabled.value = true
       position = 4
@@ -2777,83 +2752,9 @@ test('global metronome follows playback and can be toggled without an armed loop
       assert.deepEqual(clicks, ['G5', 'G5', 'C6'])
       await app.api.togglePlayback()
       assert.equal(intervals.size, 0)
+      assert.equal(timeouts.size, 0)
       await app.api.togglePlayback()
       assert.deepEqual(clicks, ['G5', 'G5', 'C6', 'C6'])
-    } finally { app.dispose() }
-  } finally { await server.close() }
-})
-
-test('legacy count-in does not delay transport playback or input start', async () => {
-  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
-  try {
-    const gridModule = await server.ssrLoadModule('/src/grid.ts')
-    const loopModule = await server.ssrLoadModule('/src/sequencedLoop.ts')
-    let position = 0
-    class Clock {
-      start() { position = 0 }
-      stop() {}
-      setTempo() {}
-      position() { return position }
-    }
-    const clicks = []
-    class Synth {
-      connect() { return this }
-      triggerAttackRelease(note) { clicks.push(note) }
-      dispose() {}
-    }
-    const intervals = new Map()
-    let timerId = 0
-    const window = {
-      setInterval: (fn) => { intervals.set(++timerId, fn); return timerId },
-      clearInterval: (id) => intervals.delete(id),
-      clearTimeout: () => {},
-      setTimeout: () => 1,
-      removeEventListener: () => {},
-    }
-    const app = await setupComponent('App', {}, {
-      './grid': gridModule,
-      './sequencedLoop': { ...loopModule, TransportClock: Clock },
-      tone: { start: async () => {}, Synth, getContext: () => ({ rawContext: { destination: {} } }) },
-      './sampleAssets': { sampleAssetKey: Symbol('assets'), samplesInBanks: () => [] },
-    }, { window, document: { removeEventListener: () => {} }, localStorage: { getItem: () => null, setItem: () => {} }, console })
-    try {
-      const loop = gridModule.createControl('loop', 0, 0, 'sequenced-loop')
-      loop.settings.armed = true
-      loop.settings.countIn = true
-      loop.settings.metronome = false
-      app.api.banks.value.push({ id: 'A', title: 'A', icon: 'A', color: '#ffffff',
-        layout: { columns: 1, rows: 1, items: [loop], connections: [] } })
-      assert.equal(await app.api.startFromInput('B'), false)
-      assert.equal(await app.api.startFromInput('A'), true)
-      assert.equal(app.api.playing.value, true)
-      assert.equal(app.api.triggeredByInput.value, true)
-      assert.deepEqual(clicks, [])
-      await app.api.togglePlayback()
-      await app.api.togglePlayback()
-      assert.equal(app.api.playing.value, true)
-      assert.deepEqual(clicks, [])
-      await app.api.togglePlayback()
-      assert.equal(intervals.size, 0)
-      const nested = gridModule.createControl('nested', 0, 0, 'sub-grid')
-      const nestedLoop = gridModule.createControl('inner-loop', 0, 0, 'sequenced-loop')
-      nestedLoop.settings.armed = true
-      nestedLoop.settings.countIn = true
-      nested.settings.layout.items.push(nestedLoop)
-      loop.settings.armed = false
-      app.api.banks.value[0].layout.items.push(nested)
-      assert.equal(await app.api.startFromInput('A/nested'), true)
-      await app.api.togglePlayback()
-      await app.api.togglePlayback()
-      assert.equal(app.api.playing.value, true)
-      await app.api.togglePlayback()
-      nestedLoop.settings.armed = false
-      loop.settings.armed = true
-      const importedLoop = gridModule.createControl('imported', 0, 0, 'sequenced-loop')
-      importedLoop.settings.armed = true
-      app.api.addImportedBank({ id: 'X', title: 'Imported', icon: 'X', color: '#ffffff',
-        layout: { columns: 1, rows: 1, items: [importedLoop], connections: [] } })
-      assert.equal(loop.settings.armed, true)
-      assert.equal(app.api.banks.value.at(-1).layout.items[0].settings.armed, false)
     } finally { app.dispose() }
   } finally { await server.close() }
 })

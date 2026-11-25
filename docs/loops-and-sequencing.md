@@ -12,7 +12,8 @@ A Loop Sequencer stores multiple clips of notes and automation. Its compact widg
 - Open the editor
 - Cycle quantisation
 
-The visible buttons are configurable in loop settings.
+The visible buttons are configurable in loop settings. The clip preview scales its note display to the pitches present in the current clip, with grid lines for bars and octaves.
+Preview notes and automation curves update at most five times per second and pause off-screen; playback timing is unaffected.
 
 ## Recording a clip
 
@@ -23,7 +24,7 @@ The visible buttons are configurable in loop settings.
 5. Play the source control while transport is running.
 6. Disarm or stop recording, then play the clip.
 
-Recording scope controls whether events from the current bank or all banks are captured. Loop notes may target instruments in another bank, so complete-project loading is required to preserve those references.
+Recording scope controls whether events from the current bank or all banks are captured. The current bank includes controls inside its SubGrids, including surface controls. Loop notes may target instruments in another bank, so complete-project loading is required to preserve those references.
 
 ## Sequenced Loop Editor
 

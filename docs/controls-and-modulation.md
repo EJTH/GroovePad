@@ -17,6 +17,9 @@ The grid control picker provides nine control families:
 | Loop Sequencer | Record and play clips |
 
 Each control exposes outputs and/or inputs appropriate to its role. The settings dialog previews the live control while parameters are edited.
+The LFO waveform preview updates at most 12 times per second and pauses off-screen; modulation continues at its normal rate.
+LFO waveforms are sine, saw and square. Older projects using random LFOs are converted to sine when loaded.
+LFO hold is no longer available; previously recorded hold automation has no effect.
 
 For a Pad, position-based velocity and pressure reach their maximum in the bottom 20% of the pad. When rotated, this region is on the left. Pressure-sensitive input uses the reported pressure instead.
 
@@ -33,7 +36,9 @@ Choose **Wire**, then select a source and destination control. GroovePad filters
 
 Connections are validated before they are saved. Existing wires can be edited or removed from control settings. Cycles and duplicate source/target mappings are rejected.
 
-An unconfigured local knob-to-Tone-processor connection defaults to absolute mapping across the parameter's range. Choose **MOD** to apply an offset to its saved value instead. Reverb decay changes regenerate the impulse asynchronously and may take time to become audible. A direct audio-rate LFO or envelope connection to a processor parameter currently takes precedence over sampled controls on that parameter.
+An unconfigured local knob-to-Tone-processor connection defaults to absolute mapping across the parameter's range. Choose **MOD** to apply an offset to its saved value instead. Supported processor parameters combine their numeric sources in a Tone signal graph, including LFOs routed through knobs and mod-wheel depth. When all LFO paths lead to supported processor parameters, with or without intermediate knobs, the knob displays are sampled directly from the audio graph rather than updating the grid each frame. Mixed routes still update the grid where needed.
+
+Selectors, SubGrid boundaries, instruments, oscillator and noise settings, smoothed LFOs, and parameters without a Tone audio input continue to use control-rate updates. Reverb decay changes regenerate the impulse asynchronously and may take time to become audible.
 
 ## Automation
 

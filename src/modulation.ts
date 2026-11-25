@@ -161,6 +161,27 @@ export function modulationOffset(wire: Connection, signal: NumericSignal): numbe
   return undefined
 }
 
+export function numericContribution(
+  wire: Connection,
+  signal: NumericSignal,
+  target: GridItem,
+  min: number,
+  max: number,
+  boundary = false,
+): { absolute?: number; adjustment?: number } {
+  const offset = modulationOffset(wire, signal)
+  const span = max - min
+  if (wire.mappingMode === 'abs' || (!boundary && !hasMapping(wire) && absoluteToneKnob(target, signal.source))) {
+    return { absolute: absoluteMappingValue(wire, signal, min, max) }
+  }
+  if (offset !== undefined) return { adjustment: offset * span }
+  if (signal.source.type === 'knob') return { adjustment: signal.value }
+  if (signal.source.type === 'mod-wheel' && signal.source.settings.autoCenter) {
+    return { adjustment: signal.value * span }
+  }
+  return { absolute: min + normalizeSignal(signal.value, signal.min, signal.max) * span }
+}
+
 export function selectorNumericValue(wire: Connection, signal: NumericSignal, modBase: number): number {
   if (wire.mappingMode === 'abs') return Math.max(0, Math.min(127, absoluteMappingValue(wire, signal, 0, 127)))
   const mapped = modulationOffset(wire, signal)
@@ -280,7 +301,7 @@ function setInput(item: GridItem, input: ParameterMetadata, value: number) {
 }
 
 export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<string, number>, boundary: BoundaryNumeric[] = [],
-  boundaryOutputs: ReadonlyMap<string, NumericSignal> = new Map()): GridItem[] {
+  boundaryOutputs: ReadonlyMap<string, NumericSignal> = new Map(), reuseUnmodified = false): GridItem[] {
   const resolved = new Map<string, GridItem>()
   const resolving = new Set<string>()
   const incoming = new Map<string, Map<string, { wire: Connection; signal?: NumericSignal }[]>>()
@@ -305,13 +326,28 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
     const original = layout.items.find((item) => item.id === id)
     if (!original || resolving.has(id)) return undefined
     resolving.add(id)
-    // Recorded events are not modified during modulation resolution.
-    const item = original.type === 'sequenced-loop'
-      ? { ...original, settings: { ...original.settings } }
-      : copyControl(original, original.id)
+    // Recorded events and nested grids are not modified during modulation resolution.
+    let item = original
+    let copied = false
+    function writableItem(): GridItem {
+      if (!copied) {
+        if (item.type === 'sequenced-loop') item = { ...item, settings: { ...item.settings } }
+        else if (item.type === 'sub-grid') item = { ...item, settings: { ...item.settings } }
+        else item = copyControl(item, item.id)
+        copied = true
+      }
+      return item
+    }
+    if (!reuseUnmodified) writableItem()
     if (item.type === 'knob') {
       const value = signals.get(`${item.id}:value`)
-      if (value !== undefined) item.settings.value = Math.max(item.settings.min, Math.min(item.settings.max, value))
+      if (value !== undefined) {
+        const next = Math.max(item.settings.min, Math.min(item.settings.max, value))
+        if (next !== item.settings.value) {
+          const writable = writableItem()
+          if (writable.type === 'knob') writable.settings.value = next
+        }
+      }
     }
     const targetWires = incoming.get(id)
     for (const input of targetWires ? inputs(item) : []) {
@@ -328,19 +364,11 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
         const signal = entry.signal ?? numericSignal(layout, wire, signals, resolve, boundary, boundaryOutputs)
         if (!signal) continue
         driven = true
-        const offset = modulationOffset(wire, signal)
-        if (wire.mappingMode === 'abs' || (!entry.signal && !hasMapping(wire) && absoluteToneKnob(item, signal.source))) {
-          absolute = absoluteMappingValue(wire, signal, input.min, input.max)
-        }
-        else if (offset !== undefined) adjustment += offset * (input.max - input.min)
-        else if (signal.source.type === 'knob') adjustment += signal.value
-        else if (signal.source.type === 'mod-wheel' && signal.source.settings.autoCenter) adjustment += signal.value * (input.max - input.min)
-        else {
-          const normalized = normalizeSignal(signal.value, signal.min, signal.max)
-          absolute = input.min + normalized * (input.max - input.min)
-        }
+        const contribution = numericContribution(wire, signal, item, input.min, input.max, !!entry.signal)
+        if (contribution.absolute !== undefined) absolute = contribution.absolute
+        if (contribution.adjustment !== undefined) adjustment += contribution.adjustment
       }
-      if (driven) setInput(item, input, Math.max(input.min, Math.min(input.max, (absolute ?? base) + adjustment)))
+      if (driven) setInput(writableItem(), input, Math.max(input.min, Math.min(input.max, (absolute ?? base) + adjustment)))
     }
     resolving.delete(id)
     resolved.set(id, item)

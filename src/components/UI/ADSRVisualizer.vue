@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useId } from 'vue'
+import { computed, useId } from 'vue'
 import type { ADSREnvelope } from '../../instruments/types'
 
 interface Props {
@@ -16,9 +16,15 @@ const props = withDefaults(defineProps<Props>(), {
 })
 const gradientId = `adsr-gradient-${useId()}`
 
-function getPathData(): string {
+const envelope = computed<ADSREnvelope>((previous) => {
   const { attack, decay, sustain, release } = props.envelope
+  return previous && previous.attack === attack && previous.decay === decay &&
+    previous.sustain === sustain && previous.release === release
+    ? previous : { attack, decay, sustain, release }
+})
 
+const pathData = computed(() => {
+  const { attack, decay, sustain, release } = envelope.value
   const w = props.width
   const h = props.height
 
@@ -36,12 +42,12 @@ function getPathData(): string {
   const y4 = h
 
   return `M 0 ${y0} L ${x1} ${y1} L ${x2} ${y2} L ${x3} ${y3} L ${x4} ${y4}`
-}
+})
 
-function getLabels(): Array<{ label: string; x: string; y: string }> {
+const labels = computed((): Array<{ label: string; x: string; y: string }> => {
   const labels: Array<{ label: string; x: string; y: string }> = []
 
-  const { attack, decay, sustain, release } = props.envelope
+  const { attack, decay, sustain, release } = envelope.value
   const w = props.width
   const h = props.height
 
@@ -60,7 +66,7 @@ function getLabels(): Array<{ label: string; x: string; y: string }> {
   )
 
   return labels
-}
+})
 </script>
 
 <template>
@@ -72,10 +78,10 @@ function getLabels(): Array<{ label: string; x: string; y: string }> {
           <stop offset="100%" style="stop-color: var(--adsr-color); stop-opacity: 0.1" />
         </linearGradient>
       </defs>
-      <path :d="getPathData()" :fill="`url(#${gradientId})`" stroke="var(--adsr-color)" stroke-width="2" />
+      <path :d="pathData" :fill="`url(#${gradientId})`" stroke="var(--adsr-color)" stroke-width="2" />
       <line x1="0" :y1="height" :x2="width" :y2="height" stroke="var(--adsr-color)" stroke-width="1" opacity="0.3" />
       <text
-        v-for="(label, idx) in getLabels()"
+        v-for="(label, idx) in labels"
         :key="idx"
         :x="label.x"
         :y="label.y"

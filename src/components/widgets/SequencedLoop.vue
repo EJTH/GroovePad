@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type LoopNote, type SequencedLoopSettings } from '../../grid'
 import { nextUnusedClipIndex } from '../../loopRows'
 import type { useGridPlayback } from '../useGridPlayback'
+import LoopPreview from './LoopPreview.vue'
 
 type Playback = ReturnType<typeof useGridPlayback>
-defineProps<{
+const props = defineProps<{
   item: Extract<GridItem, { type: 'sequenced-loop' }>
   original: Extract<GridItem, { type: 'sequenced-loop' }>
   playing?: boolean
@@ -12,12 +14,14 @@ defineProps<{
   playhead?: number
   wantsPlayback: boolean
   gesture: ReturnType<Playback['loopGesture']>
-  curves: ReturnType<Playback['loopPreviewCurves']>
+  getCurves: Playback['loopPreviewCurves']
   notes: LoopNote[]
   previewX: Playback['previewX']
   previewY: Playback['previewY']
   previewColor: Playback['previewColor']
 }>()
+const emptyAutomation: SequencedLoopSettings['automation'][string] = []
+const automation = computed(() => props.item.settings.automation[String(props.item.settings.clipIndex)] ?? emptyAutomation)
 const emit = defineEmits<{
   keydown: [event: KeyboardEvent]
   arm: []
@@ -42,17 +46,13 @@ function widgetButtonCount(settings: SequencedLoopSettings) {
   @pointerdown="gesture.down" @pointermove="gesture.move" @pointerup="gesture.up"
   @pointercancel="gesture.cancel" @lostpointercapture="gesture.cancel"
   @click="gesture.click" @keydown="emit('keydown', $event)">
-  <strong>{{ item.label }}</strong>
-  <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ status?.pending ? 'Waiting' : status?.enabled ? 'On' : wantsPlayback ? 'Ready' : 'Off' }}</span>
-  <svg class="loop-preview" viewBox="0 0 100 48" preserveAspectRatio="none" aria-hidden="true">
-    <path class="loop-preview-grid" d="M25 0v48 M50 0v48 M75 0v48 M0 12h100 M0 24h100 M0 36h100" />
-    <path v-for="curve in curves" :key="curve.key" class="loop-preview-curve" :d="curve.path" :style="{ stroke: curve.color }" />
-    <circle v-for="(note, index) in notes" :key="index" class="loop-preview-note"
-      :cx="previewX(note.position, Math.max(1, item.settings.barLength * 4))"
-      :cy="previewY(note.note, 36, 96)" r="1.5" :style="{ fill: previewColor(note.instrumentId, note.bankId) }" />
-    <line v-if="playhead !== undefined" class="loop-preview-playhead"
-      :x1="playhead" :x2="playhead" y1="0" y2="48" />
-  </svg>
+  <div class="loop-header">
+    <strong>{{ item.label }}</strong>
+    <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ status?.pending ? 'Waiting' : status?.enabled ? 'On' : wantsPlayback ? 'Ready' : 'Off' }}</span>
+  </div>
+  <LoopPreview :item="item" :clip-index="item.settings.clipIndex" :automation="automation" :notes="notes"
+    :get-curves="getCurves" :length="item.settings.barLength * 4" :playhead="playhead"
+    :preview-x="previewX" :preview-y="previewY" :preview-color="previewColor" />
   <div v-if="widgetButtonCount(item.settings)" class="loop-actions"
     :style="{ '--button-columns': Math.min(4, widgetButtonCount(item.settings)), '--button-height': `${40 / Math.ceil(widgetButtonCount(item.settings) / 4)}cqh` }"
     @pointerdown.stop @pointermove.stop @pointerup.stop @pointercancel.stop @lostpointercapture.stop @click.stop @keydown.stop>
@@ -104,3 +104,33 @@ function widgetButtonCount(settings: SequencedLoopSettings) {
   </div>
 </div>
 </template>
+<style>
+
+.loop-header {
+  display: flex;
+  flex-direction: column;
+  position:absolute;
+  top: 0;
+  width:100%;
+}
+.loop-control { position: relative; box-sizing: border-box; width: 100%; height: 100%; padding: 5px; display: grid; grid-template-rows: auto auto minmax(4px, 1fr) auto; align-items: center; gap: 3px; overflow: hidden; border: 1px solid var(--loop-color); border-radius: 4px; background: color-mix(in srgb, var(--loop-color) 7%, #171816); color: #e2edd9; touch-action: none; -webkit-tap-highlight-color: transparent; }
+.loop-control:focus-visible { outline: 2px solid var(--loop-color); outline-offset: 2px; }
+.loop-control strong, .loop-control .loop-status { max-width: 100%; overflow: hidden; text-align: center; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.loop-actions { 
+  width: 50%; display: grid; grid-template-columns: repeat(var(--button-columns), minmax(0, 1fr)); gap: 4px;
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+}
+.loop-action { opacity: 0.5; box-sizing: border-box; width: 100%; min-width: 0; height: clamp(16px, var(--button-height), 36px); padding: 2px; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--loop-color) 55%, #555); border-radius: 4px; background: #20221f; color: #e2edd9; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; appearance: none; }
+.loop-action:hover { opacity: 1; }
+.loop-action:focus-visible { outline: 2px solid var(--loop-color); outline-offset: 2px; }
+.loop-action svg { display: block; width: min(20px, 100%); height: auto; aspect-ratio: 1; fill: currentColor; }
+.loop-action.loop-arm svg { fill: none; stroke: #ff6262; stroke-width: 2; }
+.loop-action.loop-arm.armed svg { fill: #ff6262; }
+.loop-action.loop-clear svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.loop-action.loop-outline svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.loop-action.loop-quantize { font-size: 9px; white-space: nowrap; }
+.loop-action:disabled { opacity: .4; cursor: not-allowed; }
+
+</style>

@@ -12,7 +12,8 @@ function setPosition(next: number, user = false) {
   position.value = Math.max(0, Math.min(1, next))
   livePosition = position.value
   const normalized = props.settings.autoCenter ? position.value * 2 - 1 : position.value
-  emit('output', { parameter: 'value', value: normalized * props.settings.depth, ...(user ? { user: true } : {}) })
+  emit('output', { parameter: 'value', value: normalized * props.settings.depth, wheelPosition: normalized,
+    ...(user ? { user: true } : {}) })
 }
 function move(event: PointerEvent) {
   if (event.pointerId !== pointer.value) return

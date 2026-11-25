@@ -16,15 +16,26 @@ const error = ref('')
 const loading = ref(false)
 const recording = ref<'idle' | 'requesting' | 'recording' | 'stopping'>('idle')
 const fileInput = ref<HTMLInputElement | null>(null)
+const previewState = ref<'stopped' | 'starting' | 'playing' | 'paused'>('stopped')
+const playhead = ref(0)
 let request = 0
 let decodedSource = ''
 let disposed = false
+let previewContext: AudioContext | undefined
+let previewSource: AudioBufferSourceNode | undefined
+let previewGeneration = 0
+let previewFrame = 0
+let previewOffset = 0
+let previewStartedAt = 0
 let microphone: MediaStream | undefined
 let recordingContext: AudioContext | undefined
 let recordingNode: AudioWorkletNode | undefined
 const busy = computed(() => loading.value || recording.value !== 'idle')
 const hitLooping = computed(() => 'loopMode' in props.params && props.params.loopMode !== 'once')
-watch(busy, (value) => emit('loading-change', value), { flush: 'sync' })
+watch(busy, (value) => {
+  if (value) stopPreview()
+  emit('loading-change', value)
+}, { flush: 'sync' })
 const start = computed({
   get: () => 'loopStart' in props.params ? props.params.loopStart : props.params.start,
   set: (value: number) => { if ('loopStart' in props.params) props.params.loopStart = value; else props.params.start = value },
@@ -33,6 +44,77 @@ const end = computed({
   get: () => 'loopEnd' in props.params ? props.params.loopEnd : props.params.end,
   set: (value: number) => { if ('loopEnd' in props.params) props.params.loopEnd = value; else props.params.end = value },
 })
+
+function stopPreview() {
+  previewGeneration++
+  cancelAnimationFrame(previewFrame)
+  if (previewSource) {
+    previewSource.onended = null
+    previewSource.stop()
+    previewSource.disconnect()
+    previewSource = undefined
+  }
+  previewState.value = 'stopped'
+  playhead.value = start.value
+}
+
+watch([buffer, start, end], stopPreview, { flush: 'sync', immediate: true })
+
+function updatePlayhead() {
+  if (!buffer.value || !previewContext) return
+  playhead.value = Math.min(end.value, (previewOffset + previewContext.currentTime - previewStartedAt) / buffer.value.duration)
+}
+
+async function togglePreview() {
+  if (previewState.value === 'playing') {
+    updatePlayhead()
+    const position = playhead.value
+    stopPreview()
+    playhead.value = position
+    previewState.value = 'paused'
+    return
+  }
+  const audio = buffer.value
+  if (!audio || busy.value || previewState.value === 'starting') return
+  const generation = ++previewGeneration
+  previewState.value = 'starting'
+  error.value = ''
+  let source: AudioBufferSourceNode | undefined
+  try {
+    const context = previewContext ??= new AudioContext()
+    await context.resume()
+    if (disposed || generation !== previewGeneration) return
+    const position = playhead.value >= end.value ? start.value : Math.max(start.value, playhead.value)
+    previewOffset = position * audio.duration
+    previewStartedAt = context.currentTime
+    const node = context.createBufferSource()
+    source = node
+    node.buffer = audio
+    node.connect(context.destination)
+    node.onended = () => {
+      if (previewSource !== node) return
+      node.disconnect()
+      previewSource = undefined
+      cancelAnimationFrame(previewFrame)
+      playhead.value = end.value
+      previewState.value = 'stopped'
+    }
+    node.start(0, previewOffset, (end.value - position) * audio.duration)
+    previewSource = node
+    previewState.value = 'playing'
+    const tick = () => {
+      updatePlayhead()
+      previewFrame = requestAnimationFrame(tick)
+    }
+    tick()
+  } catch (cause) {
+    source?.disconnect()
+    if (!disposed && generation === previewGeneration) {
+      stopPreview()
+      error.value = `Could not play sample: ${cause instanceof Error ? cause.message : String(cause)}`
+    }
+  }
+}
 
 async function decode(data: ArrayBuffer): Promise<AudioBuffer> {
   const context = new AudioContext()
@@ -232,6 +314,10 @@ function updatePlayback(event: Event) {
 onBeforeUnmount(() => {
   disposed = true
   request++
+  stopPreview()
+  if (previewContext && previewContext.state !== 'closed') {
+    void previewContext.close().catch((cause: unknown) => console.error('Could not close preview audio context:', cause))
+  }
   stopMicrophone()
   emit('loading-change', false)
 })
@@ -245,6 +331,15 @@ onBeforeUnmount(() => {
       </button>
       <button type="button" aria-label="Open sample file" title="Open sample file" :disabled="busy" @click="fileInput?.click()">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 2h9v12H3z" /><path d="M3 10h18" /></svg>
+      </button>
+      <button type="button" :disabled="!buffer || busy || previewState === 'starting'"
+        :aria-label="previewState === 'playing' ? 'Pause sample preview' : 'Play sample preview'"
+        @click="togglePreview">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path v-if="previewState === 'playing'" d="M8 5v14M16 5v14" />
+          <path v-else d="M8 5l11 7-11 7z" />
+        </svg>
+        {{ previewState === 'playing' ? 'Pause' : 'Play' }}
       </button>
       <button type="button" :disabled="loading || recording === 'requesting' || recording === 'stopping'"
         :aria-label="recording === 'recording' ? 'Stop recording' : 'Record from microphone'"
@@ -273,7 +368,7 @@ onBeforeUnmount(() => {
     <p v-if="loading" role="status">Loading waveform…</p>
     <p v-if="error" role="alert" class="sample-error">{{ error }}</p>
     <WaveformEditor v-if="buffer" v-model:start="start" v-model:end="end" :cuts="params.cuts"
-      :buffer="buffer" @update:cuts="updateCuts" />
+      :buffer="buffer" :playhead="playhead" @update:cuts="updateCuts" />
     <label v-if="params.cuts.length || 'loopMode' in params">Playback
       <select :value="params.playback" @change="updatePlayback">
         <option v-if="params.cuts.length" value="random">Play random</option>

@@ -8,6 +8,7 @@ import type { SampleAsset } from './sampleAssets'
 import { RECORDING_FORMATS, type RecordingFormat } from './audio/sessionRecording'
 import type { SubGridPreset } from './presets'
 import { AudioRouteError, validateAudioRoutes } from './audio/audioRoutes'
+import { migrateLegacyLfos } from './lfo'
 
 export const DEFAULT_INFO_SCROLL_SPEED = 20
 export const MIN_INFO_SCROLL_SPEED = 1
@@ -99,7 +100,7 @@ function isItem(value: unknown): value is GridItem {
       finite(s.step) && s.step > 0 && s.step <= s.max - s.min &&
       within(s.defaultValue, s.min, s.max) && within(s.value, s.min, s.max) && typeof s.unit === 'string' &&
       typeof s.recordAutomation === 'boolean'
-    case 'lfo': return color(s.color) && oneOf(s.waveform, ['sine', 'saw', 'square', 'random']) &&
+    case 'lfo': return color(s.color) && oneOf(s.waveform, ['sine', 'saw', 'square']) &&
       oneOf(s.rateMode, ['free', 'sync']) && within(s.rate, 0.01, 20) &&
       within(s.depth, 0, 1) && within(s.offset, -1, 1) && within(s.smoothness, 0, 0.99)
     case 'mod-wheel': return within(s.depth, 0, 1) && typeof s.autoCenter === 'boolean' && typeof s.recordAutomation === 'boolean'
@@ -280,6 +281,7 @@ export function migrateSavedProject(value: unknown): void {
   let armedLoopFound = false
   for (const bank of value.banks) {
     if (!object(bank) || !object(bank.layout) || !Array.isArray(bank.layout.items)) continue
+    migrateLegacyLfos(bank.layout)
     migrateLayout(bank.layout)
     for (const item of bank.layout.items) {
       if (object(item) && item.orientation === undefined) item.orientation = 'horizontal'
@@ -381,7 +383,10 @@ export function migrateSavedProject(value: unknown): void {
     }
   }
   if (Array.isArray(value.subGridPresets)) {
-    for (const preset of value.subGridPresets) if (object(preset)) migrateLayout(preset.layout)
+    for (const preset of value.subGridPresets) if (object(preset)) {
+      migrateLegacyLfos(preset.layout)
+      migrateLayout(preset.layout)
+    }
   }
 }
 

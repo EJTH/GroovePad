@@ -13,7 +13,7 @@ export interface ParameterMetadata {
 }
 
 // Common parameter metadata and utility functions for GroovePad components
-export const waveforms = ['sine', 'saw', 'square', 'random'] as const
+export const waveforms = ['sine', 'saw', 'square'] as const
 export const rateModes = ['free', 'sync'] as const
 export const scales = ['chromatic', 'major', 'minor', 'major-pentatonic', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'locrian', 'minor-pentatonic', 'blues'] as const
 export const orientations = ['horizontal', 'vertical'] as const

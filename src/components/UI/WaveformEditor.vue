@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-const props = defineProps<{ buffer: AudioBuffer; start: number; end: number; cuts: number[] }>()
+const props = defineProps<{ buffer: AudioBuffer; start: number; end: number; cuts: number[]; playhead?: number }>()
 const emit = defineEmits<{
   'update:start': [value: number]
   'update:end': [value: number]
@@ -146,6 +146,8 @@ function addCut(event: PointerEvent) {
       <svg viewBox="0 0 600 100" preserveAspectRatio="none" aria-hidden="true">
         <path :d="waveform" />
       </svg>
+      <div v-if="playhead !== undefined && playhead >= left && playhead <= right" class="playhead"
+        :style="{ left: `${(playhead - left) / width * 100}%` }" aria-hidden="true"></div>
       <template v-for="marker in markers" :key="marker.name">
         <button v-if="marker.value >= left && marker.value <= right" type="button" class="marker"
           :class="{ boundary: marker.index === -1 || marker.index === cuts.length }"
@@ -176,6 +178,7 @@ function addCut(event: PointerEvent) {
 .waveform.adding { cursor: crosshair; }
 svg { width: 100%; height: 100%; pointer-events: none; }
 path { fill: none; stroke: #83c9bb; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.playhead { position: absolute; z-index: 1; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); background: white; pointer-events: none; }
 .marker { position: absolute; top: 0; bottom: 0; width: 16px; padding: 0; transform: translateX(-50%); border: 0; background: linear-gradient(90deg, transparent 7px, #ffd36c 7px, #ffd36c 9px, transparent 9px); touch-action: none; cursor: ew-resize; }
 .marker.boundary { background: linear-gradient(90deg, transparent 7px, #ff6b9d 7px, #ff6b9d 9px, transparent 9px); }
 .marker span { position: absolute; top: 0; left: 8px; background: #343734; color: white; font-size: 10px; white-space: nowrap; pointer-events: none; }

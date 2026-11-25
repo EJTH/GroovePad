@@ -736,14 +736,17 @@ test('bank audio updates processors and gates an envelope without restarting the
         else this.ready = Promise.resolve()
       }
     }
-    class Scale extends Node {}
+    class Signal extends Node { constructor(value) { super(); this.value = value } }
+    class Add extends Node { constructor() { super(); this.addend = signal() } }
+    class Multiply extends Node { constructor() { super(); this.factor = signal() } }
+    class WaveShaper extends Node {}
     class Envelope extends Node {
       constructor(options) { super(); Object.assign(this, options); this.context = { immediate: () => 3 }; this.value = 0 }
       getValueAtTime(time) { calls.push(['sample', time]); return this.value }
       triggerAttack(_, velocity) { calls.push(['attack', velocity]) }
       triggerRelease() { calls.push(['release']) }
     }
-    const tone = { ToneAudioNode: Node, Gain, Channel, Filter, FeedbackDelay, Reverb, Envelope, Scale }
+    const tone = { ToneAudioNode: Node, Gain, Channel, Filter, FeedbackDelay, Reverb, Envelope, Signal, Add, Multiply, WaveShaper }
     const module = { exports: {} }
     vm.runInNewContext(code, { module, exports: module.exports,
       require: (name) => name === 'tone' ? tone : name === '../modulation' ? modulation : name === '../parameters' ? parameters : routes })
@@ -834,7 +837,7 @@ test('bank audio updates processors and gates an envelope without restarting the
     toneSettings.get('delay').gain = 0.9
     graph.update(processorLayout, [], { toneSettings })
     assert.equal(graph.getInput('delay').wet.value, 0.3)
-    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof Scale && to === graph.getInput('delay').wet))
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof WaveShaper && to === graph.getInput('delay').wet))
 
     const reverb = createControl('reverb', 2, 0, 'tone-element')
     reverb.settings.elementType = 'reverb'
@@ -878,7 +881,7 @@ test('bank audio updates processors and gates an envelope without restarting the
     await new Promise((resolve) => setImmediate(resolve))
     assert.deepEqual(reverbNode.generations, [2, 4, 5, 5])
     assert.equal(reverbNode.wet.value, 0.75)
-    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof Scale && to === reverbNode.wet))
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof WaveShaper && to === reverbNode.wet))
 
     for (const type of ['oscillator', 'noise']) {
       const source = createControl(type, 0, 0, 'tone-element')

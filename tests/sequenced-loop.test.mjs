@@ -162,6 +162,74 @@ test('loop volume scales notes, mute releases them, and automation remains activ
   } finally { await server.close() }
 })
 
+test('current-bank loops record and replay surfaced controls in nested grids', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  const apps = []
+  try {
+    const { useGridPlayback } = await server.ssrLoadModule('/src/components/useGridPlayback.ts')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const { BankEventBus } = await server.ssrLoadModule('/src/sequencedLoop.ts')
+    const loop = createControl('loop', 0, 0, 'sequenced-loop')
+    Object.assign(loop.settings, { armed: true, syncMode: 'immediate' })
+    const sub = createControl('sub', 1, 0, 'sub-grid')
+    const inner = createControl('inner', 0, 0, 'sub-grid')
+    const knob = createControl('knob', 0, 0, 'knob')
+    const piano = createControl('piano', 1, 0, 'piano-roll')
+    inner.settings.layout.items.push(knob, piano)
+    inner.settings.surfaceItemIds.push(knob.id, piano.id)
+    sub.settings.layout.items.push(inner)
+    const layout = reactive({ columns: 2, rows: 1, items: [loop, sub], connections: [] })
+    const other = reactive({ columns: 1, rows: 1, items: [createControl('knob', 0, 0, 'knob')], connections: [] })
+    const banks = [{ id: 'A', title: 'A', layout }, { id: 'B', title: 'B', layout: other }]
+    const bus = new BankEventBus()
+    const routed = []
+    let beat = 0
+    const createPlayback = (id, grid) => {
+      let playback
+      const app = testRenderer().createApp({
+        setup() {
+          playback = useGridPlayback({
+            layout: () => grid, banks: () => banks, bankId: id, bankEvents: bus,
+            clock: { position: () => beat }, playing: () => true, editing: () => false,
+            transportStartImmediate: () => true, triggeredByInput: () => false,
+            startOnInput: () => undefined, signals: new Map(), routeNote: (id, output) => routed.push([id, output.on]),
+          })
+          return () => h('div')
+        },
+      })
+      app.mount({})
+      apps.push(app)
+      return playback
+    }
+    const root = createPlayback('A', layout)
+    const nested = createPlayback('A/sub/inner', layout.items[1].settings.layout.items[0].settings.layout)
+    const unrelated = createPlayback('B', other)
+    root.toggleLoop('loop')
+    beat = 0.5
+    nested.controlActivity('knob', true)
+    bus.emit({ kind: 'live-automation', bankId: 'A/sub/inner', sourceId: 'knob', parameter: 'value', value: 30, motion: true })
+    nested.controlActivity('knob', false)
+    bus.emit({ kind: 'live-automation', bankId: 'B', sourceId: 'knob', parameter: 'value', value: 90 })
+    assert.deepEqual(loop.settings.automation[0].map((event) => [event.bankId, event.value]), [['A/sub/inner', 30]])
+    nested.captureNote('piano', 60, true, 100)
+    beat = 0.75
+    nested.captureNote('piano', 60, false, 100)
+    assert.equal(loop.settings.clips[0][0].bankId, 'A/sub/inner')
+    loop.settings.armed = false
+    beat = 4.5
+    root.loopEngine.tick()
+    assert.equal(nested.displayItems.value[0].settings.value, 30)
+    assert.equal(unrelated.displayItems.value[0].settings.value, 64)
+    assert.deepEqual(routed, [['piano', true]])
+    beat = 4.75
+    root.loopEngine.tick()
+    assert.deepEqual(routed, [['piano', true], ['piano', false]])
+  } finally {
+    for (const app of apps.reverse()) app.unmount()
+    await server.close()
+  }
+})
+
 test('volume mode presents sliders and mute buttons only for controls with volume', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {

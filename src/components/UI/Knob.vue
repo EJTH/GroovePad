@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import type { KnobSettings, ParameterOutput } from '../../grid'
 
 const props = defineProps<{ label: string; settings: KnobSettings; emitInitial?: boolean; rotated?: boolean }>()
@@ -10,12 +10,47 @@ let lastY = 0
 let lastX = 0
 let dragValue = 0
 let lastDragValue = 0
-const rotation = computed(() => props.settings.max === props.settings.min
-  ? 0
-  : (props.settings.value - props.settings.min) / (props.settings.max - props.settings.min) * 270 - 135)
-const displayedValue = computed(() => Number(props.settings.value.toPrecision(10)).toString())
+const control = ref<HTMLElement | null>(null)
+const indicator = ref<HTMLElement | null>(null)
+const valueLabel = ref<HTMLElement | null>(null)
+let shownValue = props.settings.value
+let sampled = false
+function rotation(value: number, min: number, max: number) {
+  return max === min ? 0 : (value - min) / (max - min) * 270 - 135
+}
+function displayedValue(value: number, unit: string) {
+  return `${Number(value.toPrecision(10))}${unit}`
+}
+const initial = {
+  min: props.settings.min, max: props.settings.max, value: props.settings.value,
+  text: displayedValue(props.settings.value, props.settings.unit),
+  transform: `rotate(${rotation(props.settings.value, props.settings.min, props.settings.max)}deg)`,
+}
+const initialStyle = { transform: initial.transform }
+function updateDisplay(value = props.settings.value) {
+  const { min, max, unit } = props.settings
+  shownValue = value
+  const text = displayedValue(value, unit)
+  if (indicator.value) indicator.value.style.transform = `rotate(${rotation(value, min, max)}deg)`
+  if (valueLabel.value) valueLabel.value.textContent = text
+  if (control.value) {
+    control.value.setAttribute('aria-valuemin', String(min))
+    control.value.setAttribute('aria-valuemax', String(max))
+    control.value.setAttribute('aria-valuenow', String(value))
+    control.value.setAttribute('aria-valuetext', text)
+  }
+}
+function setDisplayValue(value?: number) {
+  sampled = value !== undefined
+  if (value !== undefined && value === shownValue) return
+  updateDisplay(value)
+}
+defineExpose({ setDisplayValue })
+watch([() => props.settings.value, () => props.settings.min, () => props.settings.max, () => props.settings.unit],
+  () => updateDisplay(), { flush: 'post' })
 
-function setValue(value: number, previous = props.settings.value, pointer = false): number {
+function currentValue() { return sampled ? shownValue : props.settings.value }
+function setValue(value: number, previous = currentValue(), pointer = false): number {
   const { min, max, step } = props.settings
   const snapped = min + Math.round((value - min) / step) * step
   const next = Number(Math.max(min, Math.min(max, snapped)).toPrecision(12))
@@ -33,7 +68,7 @@ function start(event: PointerEvent) {
   emit('activity', true)
   lastX = event.clientX
   lastY = event.clientY
-  dragValue = props.settings.value
+  dragValue = currentValue()
   lastDragValue = dragValue
 }
 
@@ -53,7 +88,7 @@ function move(event: PointerEvent) {
 function wheel(event: WheelEvent) {
   const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
     ? event.deltaX : props.rotated ? event.deltaY : -event.deltaY
-  if (delta !== 0) setValue(props.settings.value + Math.sign(delta) * props.settings.step)
+  if (delta !== 0) setValue(currentValue() + Math.sign(delta) * props.settings.step)
 }
 
 function end(event: PointerEvent) {
@@ -61,14 +96,15 @@ function end(event: PointerEvent) {
 }
 
 function keyDown(event: KeyboardEvent) {
-  if (event.key === 'ArrowUp' || event.key === 'ArrowRight') setValue(props.settings.value + props.settings.step)
-  else if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') setValue(props.settings.value - props.settings.step)
+  if (event.key === 'ArrowUp' || event.key === 'ArrowRight') setValue(currentValue() + props.settings.step)
+  else if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') setValue(currentValue() - props.settings.step)
   else if (event.key === 'Home') setValue(props.settings.min)
   else if (event.key === 'End') setValue(props.settings.max)
   else return
   event.preventDefault()
 }
 onMounted(() => {
+  updateDisplay()
   if (props.emitInitial) emit('output', { parameter: 'value', value: props.settings.value })
 })
 </script>
@@ -76,14 +112,15 @@ onMounted(() => {
 <template>
   <div class="knob" :style="{ '--knob-color': settings.color }">
     <div
+      ref="control"
       class="knob-control"
       role="slider"
       tabindex="0"
       :aria-label="label"
-      :aria-valuemin="settings.min"
-      :aria-valuemax="settings.max"
-      :aria-valuenow="settings.value"
-      :aria-valuetext="`${displayedValue}${settings.unit}`"
+      :aria-valuemin="initial.min"
+      :aria-valuemax="initial.max"
+      :aria-valuenow="initial.value"
+      :aria-valuetext="initial.text"
       @pointerdown="start"
       @pointermove="move"
       @pointerup="end"
@@ -92,8 +129,8 @@ onMounted(() => {
       @keydown="keyDown"
       @wheel.prevent="wheel"
     >
-      <span class="indicator" :style="{ transform: `rotate(${rotation}deg)` }"></span>
-      <span class="value">{{ displayedValue }}{{ settings.unit }}</span>
+      <span ref="indicator" class="indicator" :style="initialStyle"></span>
+      <span ref="valueLabel" class="value">{{ initial.text }}</span>
     </div>
     <span class="label">{{ label }}</span>
   </div>
