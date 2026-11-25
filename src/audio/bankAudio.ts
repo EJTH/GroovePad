@@ -4,6 +4,8 @@
 import * as Tone from 'tone'
 import type { ExposedPort, GridItem, GridLayout, HeldNote } from '../grid'
 import { audioBoundaryKey, audioInput, audioOutput, isAudioSource, mixerAudioInputs, planAudioRoutes } from './audioRoutes'
+import { mappingEndpoint } from '../modulation'
+import { inputs } from '../parameters'
 
 type AudioItem = Extract<GridItem, { type: 'tone-element' | 'sub-grid' | 'instrument-pad' }>
 type Processor = Tone.Gain | Tone.Filter | Tone.FeedbackDelay | Tone.Reverb | Tone.Envelope
@@ -19,6 +21,13 @@ export interface BoundaryAudio {
   port: ExposedPort
   node: Tone.ToneAudioNode
 }
+
+export interface ModulationOptions {
+  hold?: ReadonlyMap<string, boolean>
+  bpm?: number
+}
+
+type ModulationParam = { rampTo(value: number, rampTime: number): unknown }
 
 let master: { pre: Tone.Gain; post: Tone.Gain; users: number } | undefined
 function acquireMaster() {
@@ -44,6 +53,8 @@ export class BankAudio {
   private edges: { from: Tone.ToneAudioNode; to: Tone.InputNode }[] = []
   private signature = ''
   private boundary: BoundaryAudio[] = []
+  private lfos = new Map<string, Tone.LFO>()
+  private modulationNodes: Tone.ToneAudioNode[] = []
 
   constructor(
     reportError: (message: string) => void,
@@ -104,7 +115,7 @@ export class BankAudio {
     return { type: elementType, input: node, output: node, processor: node }
   }
 
-  update(layout: GridLayout, boundary: BoundaryAudio[] = []) {
+  update(layout: GridLayout, boundary: BoundaryAudio[] = [], modulationOptions: ModulationOptions = {}) {
     if ((this.parentInput || this.parentOutput) && layout.items.some((item) => item.type === 'tone-element' &&
       (item.settings.audioFrom === 'main-pre-fx' || item.settings.audioFrom === 'main-post-fx' ||
         item.settings.audioTo === 'main-out'))) {
@@ -240,7 +251,160 @@ export class BankAudio {
         }
       }
     }
+    this.updateModulation(layout, modulationOptions)
     return rerouted
+  }
+
+  private getModulationParam(id: string, parameter: string): ModulationParam | undefined {
+    const entry = this.entries.get(id)
+    if (!entry) return undefined
+    const node = entry.processor
+    if (node instanceof Tone.Filter) {
+      if (parameter === 'cutoff') return node.frequency
+      if (parameter === 'gain') return node.Q
+    } else if (node instanceof Tone.FeedbackDelay) {
+      if (parameter === 'delayTime') return node.delayTime
+      if (parameter === 'feedback') return node.feedback
+      if (parameter === 'gain') return node.wet
+    } else if (node instanceof Tone.Reverb) {
+      if (parameter === 'gain') return node.wet
+    } else if (node instanceof Tone.Gain) {
+      if (parameter === 'gain') return node.gain
+    } else if (node instanceof Tone.Envelope) {
+      if (parameter === 'attack') return node.attack as unknown as ModulationParam
+      if (parameter === 'decay') return node.decay as unknown as ModulationParam
+      if (parameter === 'sustain') return node.sustain as unknown as ModulationParam
+      if (parameter === 'release') return node.release as unknown as ModulationParam
+    }
+    return undefined
+  }
+
+  private updateModulation(layout: GridLayout, options: ModulationOptions) {
+    const lfoItems = layout.items.filter((item) => item.type === 'lfo')
+    const signature = JSON.stringify([
+      lfoItems.map((item) => [item.id, item.settings]),
+      options.hold ? [...options.hold.entries()] : [],
+      options.bpm ?? 120,
+      layout.connections.map((wire) => [
+        wire.id, wire.sourceId, wire.sourceParameter, wire.targetId, wire.targetParameter,
+        wire.mappingMode, wire.modulationAmount, wire.modulationMin, wire.modulationMax,
+        wire.absoluteMin, wire.absoluteMax,
+      ]),
+      layout.items.map((item) => [item.id, item.type, item.type === 'tone-element' ? item.settings : undefined]),
+    ])
+    if (signature === this.modulationSignature) return
+
+    for (const node of this.modulationNodes) node.dispose()
+    this.modulationNodes = []
+    for (const lfo of this.lfos.values()) lfo.dispose()
+    this.lfos.clear()
+
+    for (const item of lfoItems) {
+      if (item.type !== 'lfo') continue
+      const lfo = new Tone.LFO({
+        frequency: item.settings.rateMode === 'sync'
+          ? item.settings.rate * (options.bpm ?? 120) / 60
+          : item.settings.rate,
+        min: -1,
+        max: 1,
+        type: item.settings.waveform === 'saw' ? 'sawtooth' : item.settings.waveform === 'square' ? 'square' : 'sine',
+      })
+      if (item.settings.waveform === 'random') Reflect.set(lfo, 'type', 'random')
+      if (item.settings.rateMode === 'sync') lfo.sync()
+      if (options.hold?.get(item.id)) lfo.stop()
+      else lfo.start()
+      this.lfos.set(item.id, lfo)
+    }
+
+    for (const wire of layout.connections) {
+      if (wire.sourceParameter !== 'value') continue
+      const source = layout.items.find((item) => item.id === wire.sourceId)
+      if (!source || (source.type !== 'lfo' && source.type !== 'tone-element')) continue
+      let sourceNode: Tone.ToneAudioNode | undefined
+      if (source.type === 'lfo') {
+        sourceNode = this.lfos.get(source.id)
+      } else if (source.settings.elementType === 'envelope') {
+        sourceNode = this.getEnvelopeSignal(source.id)
+      }
+      if (!sourceNode) continue
+      const target = layout.items.find((item) => item.id === wire.targetId)
+      if (target?.type !== 'tone-element') continue
+      const param = this.getModulationParam(wire.targetId, wire.targetParameter)
+      if (!param) continue
+      const input = inputs(target).find((entry) => entry.id === wire.targetParameter && entry.kind === 'number')
+      if (!input || input.min === undefined || input.max === undefined) continue
+      const targetSpan = input.max - input.min
+      let normalizedSource: Tone.ToneAudioNode = sourceNode
+      if (source.type === 'lfo') {
+        const depth = new Tone.Multiply(source.settings.depth)
+        const offset = new Tone.Add(source.settings.offset)
+        sourceNode.connect(depth)
+        depth.connect(offset)
+        let level: Tone.ToneAudioNode = offset
+        if (wire.mappingMode !== 'mod' && wire.modulationAmount === undefined &&
+          wire.modulationMin === undefined && wire.modulationMax === undefined) {
+          const add = new Tone.Add(1)
+          const half = new Tone.Multiply(0.5)
+          offset.connect(add)
+          add.connect(half)
+          level = half
+          this.modulationNodes.push(add, half)
+        } else if (wire.mappingMode === 'abs') {
+          const add = new Tone.Add(1)
+          const half = new Tone.Multiply(0.5)
+          offset.connect(add)
+          add.connect(half)
+          level = half
+          this.modulationNodes.push(add, half)
+        }
+        normalizedSource = level
+        this.modulationNodes.push(depth, offset)
+      }
+
+      const mappingMode = wire.mappingMode ?? (wire.modulationAmount !== undefined ||
+        wire.modulationMin !== undefined || wire.modulationMax !== undefined ? 'mod' : 'abs')
+      if (mappingMode === 'abs') {
+        const min = wire.absoluteMin ?? mappingEndpoint(layout, wire, 'min') ?? input.min
+        const max = wire.absoluteMax ?? mappingEndpoint(layout, wire, 'max') ?? input.max
+        const scale = new Tone.Scale(min, max)
+        normalizedSource.connect(scale)
+        scale.connect(param as Tone.InputNode)
+        this.modulationNodes.push(scale)
+      } else {
+        const base = this.baseToneParameter(target, wire.targetParameter)
+        let minOffset = 0
+        let maxOffset = 100
+        if (wire.modulationAmount !== undefined) {
+          minOffset = source.type === 'lfo' ? -wire.modulationAmount : 0
+          maxOffset = wire.modulationAmount
+        } else if (wire.modulationMin !== undefined || wire.modulationMax !== undefined) {
+          minOffset = wire.modulationMin ?? 0
+          maxOffset = wire.modulationMax ?? 100
+        }
+        const scale = new Tone.Scale(
+          minOffset / 100 * targetSpan,
+          maxOffset / 100 * targetSpan,
+        )
+        normalizedSource.connect(scale)
+        if (base === undefined) {
+          scale.connect(param as Tone.InputNode)
+        } else {
+          const add = new Tone.Add(base)
+          scale.connect(add)
+          add.connect(param as Tone.InputNode)
+          this.modulationNodes.push(add)
+        }
+        this.modulationNodes.push(scale)
+      }
+    }
+    this.modulationSignature = signature
+  }
+
+  private modulationSignature = ''
+
+  private baseToneParameter(item: Extract<GridItem, { type: 'tone-element' }>, parameter: string): number | undefined {
+    const value = item.settings[parameter as keyof typeof item.settings]
+    return typeof value === 'number' ? value : undefined
   }
 
   setNotes(id: string, notes: HeldNote[]) {
@@ -268,6 +432,10 @@ export class BankAudio {
 
   dispose() {
     this.disconnectEdges()
+    for (const node of this.modulationNodes) node.dispose()
+    this.modulationNodes = []
+    for (const lfo of this.lfos.values()) lfo.dispose()
+    this.lfos.clear()
     if (this.parentInput && !this.parentInput.disposed) this.parentInput.disconnect(this.input)
     for (const entry of this.entries.values()) {
       this.disposeEntry(entry)

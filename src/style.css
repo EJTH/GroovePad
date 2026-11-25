@@ -1096,7 +1096,7 @@ button:focus-visible {
 .subgrid-surface {
   display: grid;
   width: min(100%, calc((100cqh - 36px) * var(--surface-ratio)));
-  max-height: calc(100% - 36px);
+  height: calc(100% - 36px);
   min-height: 0;
   overflow: hidden;
 }

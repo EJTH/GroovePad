@@ -112,7 +112,10 @@ onBeforeMount(() => {
       processorError.value = error
       console.error(error)
     }, props.parentAudioInput, props.parentAudioOutput)
-    audioGraph.value.update(props.layout, props.parentAudioPorts)
+    audioGraph.value.update(props.layout, props.parentAudioPorts, {
+      hold: new Map(props.layout.items.filter((item) => item.type === 'lfo').map((item) => [item.id, false])),
+      bpm: props.bpm,
+    })
   } catch (error) {
     audioError.value = `Audio routing error: ${error instanceof Error ? error.message : String(error)}`
     console.error(audioError.value, error)
@@ -329,7 +332,12 @@ watch(() => (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.kind
 function updateAudioGraph(layout: GridLayout) {
   if (!audioGraph.value) return
   try {
-    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts)
+    const hold = new Map<string, boolean>()
+    for (const item of layout.items) if (item.type === 'lfo') {
+      const value = effectiveSignals.value.get(`${item.id}:hold`)
+      hold.set(item.id, value !== undefined ? value >= 0.5 : false)
+    }
+    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts, { hold, bpm: props.bpm })
     for (const item of layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
       audioGraph.value.setNotes(item.id, receivedToneNotes(item.id))
     }
@@ -340,12 +348,14 @@ function updateAudioGraph(layout: GridLayout) {
     console.error(audioError.value, error)
   }
 }
-watch(() => ({ ...props.layout, items: displayItems.value }), updateAudioGraph, { deep: true })
+watch(() => ({ ...props.layout, items: props.layout.items }), updateAudioGraph, { deep: true })
+watch([() => props.bpm, () => effectiveSignals.value], () => updateAudioGraph({ ...props.layout, items: props.layout.items }),
+  { flush: 'post' })
 watch(() => props.parentAudioPorts?.map(({ port, node }) => [node, port.id, port.direction, port.itemId, port.parameterId] as const),
   (current, previous) => {
     if (current?.length === previous?.length && current?.every((entry, index) =>
       entry.every((value, part) => value === previous?.[index]?.[part]))) return
-    updateAudioGraph({ ...props.layout, items: displayItems.value })
+    updateAudioGraph({ ...props.layout, items: props.layout.items })
   }, { flush: 'post' })
 watch([activeNotes, boundaryActiveNotes], () => {
   for (const item of props.layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
