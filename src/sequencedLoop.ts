@@ -11,7 +11,6 @@ export type BankEvent =
   | { kind: 'live-automation-end'; bankId: string; sourceId: string; parameter: string }
   | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean }
   | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation; remove?: boolean }
-  | { kind: 'count-in-click'; beat: number }
 
 export class BankEventBus {
   private listeners = new Set<(event: BankEvent) => void>()
@@ -88,7 +87,7 @@ export class Metronome {
 
 type Loop = Extract<GridItem, { type: 'sequenced-loop' }>
 type Voice = { id: number; note: LoopNote; end: number }
-type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; countInUntil?: number; lastCountBeat?: number; voices: Voice[]; automation: Map<string, LoopAutomation> }
+type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; voices: Voice[]; automation: Map<string, LoopAutomation> }
 type Recording = { index: number; start: number; origin: number; quantize: LoopQuantize; note: Omit<LoopNote, 'position' | 'duration'> }
 type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; event: LoopAutomation; pending?: LoopAutomation; last: number; recorded: Map<LoopAutomation, number> }
 
@@ -103,7 +102,6 @@ export class SequencedLoopEngine {
   private sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void
   private bankId: string
   private clipIndex: (loop: Loop) => number
-  private countInClick: (beat: number) => void
 
   constructor(
     loops: () => Loop[],
@@ -112,27 +110,22 @@ export class SequencedLoopEngine {
     sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void = () => {},
     bankId = '',
     clipIndex: (loop: Loop) => number = (loop) => loop.settings.clipIndex,
-    countInClick: (beat: number) => void = () => {},
-  ) { this.loops = loops; this.position = position; this.send = send; this.sendAutomation = sendAutomation; this.bankId = bankId; this.clipIndex = clipIndex; this.countInClick = countInClick }
+  ) { this.loops = loops; this.position = position; this.send = send; this.sendAutomation = sendAutomation; this.bankId = bankId; this.clipIndex = clipIndex }
 
   isEnabled(id: string) { return this.states.get(id)?.enabled ?? false }
   isPending(id: string) { return !!this.states.get(id)?.pending }
-  isCounting(id: string) { return this.states.get(id)?.countInUntil !== undefined }
   playhead(id: string, index: number) {
     const state = this.states.get(id)
     const loop = this.loops().find((item) => item.id === id)
     const now = this.position()
-    if (!state || !loop || state.index !== index || state.countInUntil !== undefined || now < state.origin) return undefined
+    if (!state || !loop || state.index !== index || now < state.origin) return undefined
     const length = loop.settings.barLength * 4
     return ((now - state.origin) % length + length) % length / length
   }
 
   private startTime(loop: Loop, now: number) {
     const length = loop.settings.barLength * 4
-    const counting = loop.settings.armed && loop.settings.countIn
-    const earliest = counting ? Math.max(0, Math.ceil(now - 0.05)) + 4 : now
-    const at = loop.settings.syncMode === 'sync' ? Math.ceil(earliest / length) * length : earliest
-    return { at, counting }
+    return loop.settings.syncMode === 'sync' ? Math.ceil(now / length) * length : now
   }
 
   toggle(loop: Loop, now = this.position(), immediate = false) {
@@ -142,11 +135,10 @@ export class SequencedLoopEngine {
       this.states.delete(loop.id)
       return
     }
-    const { at, counting } = immediate ? { at: now, counting: false } : this.startTime(loop, now)
+    const at = immediate ? now : this.startTime(loop, now)
     const index = this.clipIndex(loop)
     this.states.set(loop.id, { id: loop.id, enabled: true, index, origin: at,
-      last: at - 1e-8, pending: at > now ? { index, at } : undefined,
-      ...(counting ? { countInUntil: at, lastCountBeat: at - 5 } : {}), voices: [], automation: new Map() })
+      last: at - 1e-8, pending: at > now ? { index, at } : undefined, voices: [], automation: new Map() })
   }
 
   private release(state: State) {
@@ -197,25 +189,6 @@ export class SequencedLoopEngine {
       }
       const clipIndex = this.clipIndex(loop)
       const length = barLength * 4
-      if (state.countInUntil !== undefined) {
-        if (!loop.settings.armed) {
-          state.countInUntil = undefined
-          const at = syncMode === 'sync' ? Math.ceil(now / length) * length : now
-          state.index = clipIndex
-          state.origin = at
-          state.last = at - 1e-8
-          state.pending = at > now ? { index: clipIndex, at } : undefined
-        } else {
-          const beat = Math.floor(now)
-          if (beat >= state.countInUntil - 4 && beat < state.countInUntil && beat > (state.lastCountBeat ?? -1)) {
-            state.lastCountBeat = beat
-            this.countInClick(beat)
-          }
-          state.pending = { index: clipIndex, at: state.countInUntil }
-          if (now < state.countInUntil) continue
-          state.countInUntil = undefined
-        }
-      }
       if (state.index !== clipIndex && state.pending?.index !== clipIndex) {
         const at = syncMode === 'sync' ? Math.ceil(now / length) * length : now
         state.pending = { index: clipIndex, at }
@@ -283,7 +256,6 @@ export class SequencedLoopEngine {
     for (const loop of this.loops()) {
       if (!loop.settings.armed || (loop.settings.recordScope !== 'all' && bankId !== this.bankId)) continue
       const state = this.states.get(loop.id)
-      if (state?.countInUntil !== undefined && now < state.countInUntil) continue
       const index = state && !state.pending ? state.index : this.clipIndex(loop)
       const origin = state && !state.pending ? state.origin : 0
       const length = loop.settings.barLength * 4
@@ -380,7 +352,6 @@ export class SequencedLoopEngine {
       const key = JSON.stringify([loop.id, bankId, instrumentId, note])
       if (on && loop.settings.armed && (loop.settings.recordScope === 'all' || bankId === this.bankId)) {
         const state = this.states.get(loop.id)
-        if (state?.countInUntil !== undefined && now < state.countInUntil) continue
         const index = state && !state.pending ? state.index : this.clipIndex(loop)
         const recording: Recording = { index, start: now, origin: state && !state.pending ? state.origin : 0, quantize: loop.settings.quantize,
           note: { instrumentId, note, velocity, ...(bankId !== this.bankId ? { bankId } : {}), ...(bend === undefined ? {} : { bend }) } }
@@ -427,13 +398,11 @@ export class SequencedLoopEngine {
     for (const [id, state] of this.states) {
       const loop = this.loops().find((item) => item.id === id)
       if (!loop) { this.states.delete(id); continue }
-      const { at, counting } = this.startTime(loop, now)
+      const at = this.startTime(loop, now)
       state.index = this.clipIndex(loop)
       state.origin = at
       state.last = at - 1e-8
       state.pending = at > now ? { index: state.index, at } : undefined
-      state.countInUntil = counting ? at : undefined
-      state.lastCountBeat = counting ? at - 5 : undefined
     }
   }
 

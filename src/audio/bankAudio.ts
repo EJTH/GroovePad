@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import * as Tone from 'tone'
-import type { ExposedPort, GridItem, GridLayout, HeldNote } from '../grid'
+import type { ExposedPort, GridItem, GridLayout, HeldNote, ToneElementSettings } from '../grid'
 import { audioBoundaryKey, audioInput, audioOutput, isAudioSource, mixerAudioInputs, planAudioRoutes } from './audioRoutes'
 import { mappingEndpoint } from '../modulation'
 import { inputs } from '../parameters'
@@ -15,7 +15,12 @@ interface Entry {
   output: Tone.ToneAudioNode
   processor?: Processor
   active?: boolean
+  muted?: boolean
+  bypassed?: boolean
+  dry?: Tone.Gain
+  wet?: Tone.Gain
   channels?: Map<string, Tone.Channel>
+  reverbDecay?: { desired: number; pending: boolean; failed: boolean }
 }
 export interface BoundaryAudio {
   port: ExposedPort
@@ -25,6 +30,7 @@ export interface BoundaryAudio {
 export interface ModulationOptions {
   hold?: ReadonlyMap<string, boolean>
   bpm?: number
+  toneSettings?: ReadonlyMap<string, ToneElementSettings>
 }
 
 type ModulationParam = { rampTo(value: number, rampTime: number): unknown }
@@ -82,6 +88,18 @@ export class BankAudio {
     return this.ports.get(port.direction === 'input' ? audioInput(id, port.id) : audioOutput(id, port.id))
   }
 
+  private makeBypassEntry(type: string, input: Tone.ToneAudioNode, processor: Processor, settings: ToneElementSettings): Entry {
+    const bypassed = !!settings.bypassed
+    const muted = type === 'envelope' || type === 'mixer' ? undefined : !!settings.muted
+    const output = new Tone.Gain(muted ? 0 : 1)
+    const wet = new Tone.Gain(bypassed ? 0 : 1)
+    const dry = new Tone.Gain(bypassed ? 1 : 0)
+    input.connect(wet)
+    wet.connect(output)
+    dry.connect(output)
+    return { type, input, output, processor, muted, bypassed, dry, wet }
+  }
+
   private makeEntry(item: AudioItem): Entry {
     if (item.type === 'sub-grid') {
       return { type: 'sub-grid', input: new Tone.Gain(1), output: new Tone.Gain(1) }
@@ -109,10 +127,16 @@ export class BankAudio {
         const envelope = new Tone.Envelope({ attack, decay, sustain, release })
         const gainNode = new Tone.Gain(0)
         envelope.connect(gainNode.gain)
-        return { type: elementType, input: gainNode, output: gainNode, processor: envelope }
+        return this.makeBypassEntry(elementType, gainNode, envelope, item.settings)
       }
     }
-    return { type: elementType, input: node, output: node, processor: node }
+    if (elementType === 'oscillator' || elementType === 'noise') {
+      const muted = !!item.settings.muted
+      const output = new Tone.Gain(muted ? 0 : 1)
+      node.connect(output)
+      return { type: elementType, input: node, output, processor: node, muted }
+    }
+    return this.makeBypassEntry(elementType, node, node, item.settings)
   }
 
   update(layout: GridLayout, boundary: BoundaryAudio[] = [], modulationOptions: ModulationOptions = {}) {
@@ -180,9 +204,13 @@ export class BankAudio {
         const to = edge.from === 'bank-post' && edge.to === 'main-pre' && this.parentOutput
           ? this.parentOutput : nodes.get(edge.to)
         if (!from || !to) throw new Error('An audio route references a missing element.')
-        const target = items.find((item) => item.type === 'tone-element' && item.settings.elementType === 'mixer' &&
-          edge.to === audioInput(item.id))
-        const channel = target ? this.entries.get(target.id)?.channels?.get(edge.from) : undefined
+        const target = items.find((item) => item.type === 'tone-element' && edge.to === audioInput(item.id))
+        const targetEntry = target ? this.entries.get(target.id) : undefined
+        if (targetEntry?.dry) {
+          from.connect(targetEntry.dry)
+          this.edges.push({ from, to: targetEntry.dry })
+        }
+        const channel = targetEntry?.channels?.get(edge.from)
         if (channel) {
           from.connect(channel)
           channel.connect(to)
@@ -200,6 +228,12 @@ export class BankAudio {
         const mixer = port.direction === 'input' && port.parameterId === 'audio'
           ? items.find((item) => item.id === port.itemId && item.type === 'tone-element' && item.settings.elementType === 'mixer')
           : undefined
+        const dry = port.direction === 'input' && port.parameterId === 'audio'
+          ? this.entries.get(port.itemId)?.dry : undefined
+        if (dry) {
+          node.connect(dry)
+          this.edges.push({ from: node, to: dry })
+        }
         const channel = mixer ? this.entries.get(mixer.id)?.channels?.get(audioBoundaryKey(port)) : undefined
         if (channel) {
           node.connect(channel)
@@ -217,28 +251,41 @@ export class BankAudio {
     }
     for (const item of items) {
       if (item.type !== 'tone-element') continue
-      const node = this.entries.get(item.id)?.processor
+      const entry = this.entries.get(item.id)
+      const node = entry?.processor
       const s = item.settings
+      if (entry?.output instanceof Tone.Gain && entry.muted !== undefined && entry.muted !== !!s.muted) {
+        entry.output.gain.rampTo(s.muted ? 0 : 1, 0.02)
+        entry.muted = !!s.muted
+      }
+      if (entry?.dry && entry.wet && entry.bypassed !== !!s.bypassed) {
+        entry.wet.gain.rampTo(s.bypassed ? 0 : 1, 0.02)
+        entry.dry.gain.rampTo(s.bypassed ? 1 : 0, 0.02)
+        entry.bypassed = !!s.bypassed
+      }
+      const effective = modulationOptions.toneSettings?.get(item.id) ?? s
+      const audioDriven = (parameter: string) => layout.connections.some((wire) => {
+        if (wire.targetId !== item.id || wire.targetParameter !== parameter || wire.sourceParameter !== 'value') return false
+        const source = layout.items.find((candidate) => candidate.id === wire.sourceId)
+        return source?.type === 'lfo' || (source?.type === 'tone-element' && source.settings.elementType === 'envelope')
+      })
       if (node instanceof Tone.Filter) {
-        node.frequency.rampTo(s.cutoff, 0.02)
-        node.Q.rampTo(s.gain, 0.02)
+        if (!audioDriven('cutoff')) node.frequency.rampTo(effective.cutoff, 0.02)
+        if (!audioDriven('gain')) node.Q.rampTo(effective.gain, 0.02)
       } else if (node instanceof Tone.FeedbackDelay) {
-        node.delayTime.rampTo(s.delayTime, 0.02)
-        node.feedback.rampTo(Math.min(s.feedback, 0.99), 0.02)
-        node.wet.rampTo(Math.min(s.gain, 1), 0.02)
+        if (!audioDriven('delayTime')) node.delayTime.rampTo(effective.delayTime, 0.02)
+        if (!audioDriven('feedback')) node.feedback.rampTo(Math.min(effective.feedback, 0.99), 0.02)
+        if (!audioDriven('gain')) node.wet.rampTo(Math.min(effective.gain, 1), 0.02)
       } else if (node instanceof Tone.Reverb) {
-        if (node.decay !== s.decay) {
-          node.decay = s.decay
-          void node.ready.catch((error: unknown) => this.reportError(`Reverb could not be generated: ${error instanceof Error ? error.message : String(error)}`))
-        }
-        node.wet.rampTo(Math.min(s.gain, 1), 0.02)
+        this.updateReverbDecay(this.entries.get(item.id)!, node, effective.decay)
+        if (!audioDriven('gain')) node.wet.rampTo(Math.min(effective.gain, 1), 0.02)
       } else if (node instanceof Tone.Envelope) {
-        node.attack = s.attack
-        node.decay = s.decay
-        node.sustain = s.sustain
-        node.release = s.release
+        node.attack = effective.attack
+        node.decay = effective.decay
+        node.sustain = effective.sustain
+        node.release = effective.release
       } else if (node instanceof Tone.Gain && !isAudioSource(item)) {
-        node.gain.rampTo(s.gain, 0.02)
+        if (!audioDriven('gain')) node.gain.rampTo(effective.gain, 0.02)
       }
       if (item.settings.elementType === 'mixer') {
         const entry = this.entries.get(item.id)
@@ -253,6 +300,28 @@ export class BankAudio {
     }
     this.updateModulation(layout, modulationOptions)
     return rerouted
+  }
+
+  private updateReverbDecay(entry: Entry, node: Tone.Reverb, decay: number) {
+    const state = entry.reverbDecay ??= { desired: decay, pending: false, failed: false }
+    state.desired = decay
+    if (state.pending || (node.decay === decay && !state.failed)) return
+    state.pending = true
+    void (async () => {
+      try {
+        if (!state.failed) await node.ready
+        while (!node.disposed && (node.decay !== state.desired || state.failed)) {
+          state.failed = false
+          node.decay = state.desired
+          await node.ready
+        }
+      } catch (error) {
+        state.failed = true
+        this.reportError(`Reverb could not be generated: ${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        state.pending = false
+      }
+    })()
   }
 
   private getModulationParam(id: string, parameter: string): ModulationParam | undefined {
@@ -270,11 +339,6 @@ export class BankAudio {
       if (parameter === 'gain') return node.wet
     } else if (node instanceof Tone.Gain) {
       if (parameter === 'gain') return node.gain
-    } else if (node instanceof Tone.Envelope) {
-      if (parameter === 'attack') return node.attack as unknown as ModulationParam
-      if (parameter === 'decay') return node.decay as unknown as ModulationParam
-      if (parameter === 'sustain') return node.sustain as unknown as ModulationParam
-      if (parameter === 'release') return node.release as unknown as ModulationParam
     }
     return undefined
   }
@@ -425,6 +489,8 @@ export class BankAudio {
 
   private disposeEntry(entry: Entry) {
     for (const channel of entry.channels?.values() ?? []) channel.dispose()
+    entry.dry?.dispose()
+    entry.wet?.dispose()
     if (entry.processor && entry.processor !== entry.input && entry.processor !== entry.output) entry.processor.dispose()
     entry.input.dispose()
     if (entry.output !== entry.input) entry.output.dispose()

@@ -174,10 +174,10 @@ export function inputs(item: GridItem): ParameterMetadata[] {
       if (item.settings.elementType === 'delay') {
         ports.push(numeric('delayTime', 'Delay time', 0, 5),
           numeric('feedback', 'Feedback', 0, 1),
-          numeric('gain', 'Wet level', 0, 2))
+          numeric('gain', 'Wet level', 0, 1))
       }
       if (item.settings.elementType === 'reverb') {
-        ports.push(numeric('decay', 'Decay', 0.01, 10), numeric('gain', 'Wet level', 0, 2))
+        ports.push(numeric('decay', 'Decay', 0.01, 10), numeric('gain', 'Wet level', 0, 1))
       }
       if (item.settings.elementType === 'envelope') {
         ports.push({ id: 'note', label: 'Note input', kind: 'note' },

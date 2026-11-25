@@ -36,7 +36,7 @@ export function useGridPlayback(options: {
   const settingTimers = reactive(new Map<string, ReturnType<typeof setTimeout> | undefined>())
   let settingGesture = false
   let automationSequence = 0
-  const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>())
+  const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
   const loopEditorPlayheads = ref(new Map<string, { index: number; position: number }>())
   const silentVoices = new Set<number>()
@@ -60,7 +60,6 @@ export function useGridPlayback(options: {
       const effective = displayItems.value.find((item) => item.id === loop.id)
       return effective?.type === 'sequenced-loop' ? effective.settings.clipIndex : loop.settings.clipIndex
     },
-    (beat) => options.bankEvents.emit({ kind: 'count-in-click', beat }),
   )
   watch(() => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop')
     .map((item) => [item.id, item.settings.muted] as const), (loops) => {
@@ -68,11 +67,11 @@ export function useGridPlayback(options: {
   }, { flush: 'sync' })
 
   function updateLoopStatus() {
-    const next = new Map<string, { enabled: boolean; pending: boolean; counting: boolean }>()
+    const next = new Map<string, { enabled: boolean; pending: boolean }>()
     const playheads = new Map<string, number>()
     const editorPlayheads = new Map<string, { index: number; position: number }>()
     for (const item of options.layout().items) if (item.type === 'sequenced-loop') {
-      next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id), counting: loopEngine.isCounting(item.id) })
+      next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id) })
       const displayed = displayItems.value.find((entry) => entry.id === item.id)
       const position = loopEngine.playhead(item.id, displayed?.type === 'sequenced-loop' ? displayed.settings.clipIndex : item.settings.clipIndex)
       if (position !== undefined) playheads.set(item.id, position * 100)
@@ -82,8 +81,7 @@ export function useGridPlayback(options: {
     loopPlayheads.value = playheads
     loopEditorPlayheads.value = editorPlayheads
     if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
-      status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending ||
-      status.counting !== loopStatus.value.get(id)?.counting)) loopStatus.value = next
+      status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending)) loopStatus.value = next
   }
 
   function startArmedLoops() {

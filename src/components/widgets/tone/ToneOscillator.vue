@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import type { HeldNote, ToneElementSettings } from '../../../grid'
 import { ToneOscillator } from '../../../audio/toneOscillator'
@@ -10,11 +10,15 @@ const props = defineProps<{
   baseFrequency: number
   notes: HeldNote[]
   audioOutput?: Tone.InputNode
+  muted: boolean
 }>()
+const emit = defineEmits<{ toggleMute: [] }>()
 
 const continuous = ref(false)
 const error = ref('')
 const waitingForAudio = ref(false)
+const hasControls = computed(() => props.settings.noteMode === 'continuous' ||
+  (props.settings.noteMode === 'always-on' && (waitingForAudio.value || !!error.value)))
 let oscillator: ToneOscillator | undefined
 let generation = 0
 let disposed = false
@@ -80,7 +84,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="tone-element-control" :style="{ '--tone-color': settings.color }">
+  <component :is="hasControls ? 'div' : 'button'" class="tone-element-control" :class="{ muted }"
+    :type="hasControls ? undefined : 'button'" :style="{ '--tone-color': settings.color }"
+    :aria-label="hasControls ? undefined : `${muted ? 'Unmute' : 'Mute'} ${label}`"
+    :aria-pressed="hasControls ? undefined : muted" @click="!hasControls && emit('toggleMute')">
     <strong>{{ label }}</strong>
     <small>{{ settings.noteMode === 'always-on' ? 'Always on' : 'Oscillator' }}</small>
     <button v-if="settings.noteMode === 'always-on' && (waitingForAudio || error)" type="button" @click="sync">Enable audio</button>
@@ -88,6 +95,8 @@ onBeforeUnmount(() => {
       @click="continuous = !continuous">
       {{ continuous ? 'Stop' : 'Start' }}
     </button>
+    <button v-if="muted && hasControls" type="button" @click.stop="emit('toggleMute')">Unmute</button>
     <small v-if="error" role="alert">{{ error }}</small>
-  </div>
+    <small v-if="muted && !hasControls">Muted</small>
+  </component>
 </template>

@@ -19,7 +19,7 @@ The visible buttons are configurable in loop settings.
 1. Add an Instrument Pad or other note source.
 2. Add a Loop Sequencer.
 3. Choose a clip and arm recording.
-4. Set count-in, metronome, sync mode, quantisation, and recording scope as needed.
+4. Set metronome, sync mode, quantisation, and recording scope as needed.
 5. Play the source control while transport is running.
 6. Disarm or stop recording, then play the clip.
 

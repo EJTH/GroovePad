@@ -8,7 +8,7 @@ defineProps<{
   item: Extract<GridItem, { type: 'sequenced-loop' }>
   original: Extract<GridItem, { type: 'sequenced-loop' }>
   playing?: boolean
-  status?: { enabled: boolean; pending: boolean; counting: boolean }
+  status?: { enabled: boolean; pending: boolean }
   playhead?: number
   wantsPlayback: boolean
   gesture: ReturnType<Playback['loopGesture']>
@@ -43,7 +43,7 @@ function widgetButtonCount(settings: SequencedLoopSettings) {
   @pointercancel="gesture.cancel" @lostpointercapture="gesture.cancel"
   @click="gesture.click" @keydown="emit('keydown', $event)">
   <strong>{{ item.label }}</strong>
-  <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ status?.counting ? 'Count-in' : status?.pending ? 'Waiting' : status?.enabled ? 'On' : wantsPlayback ? 'Ready' : 'Off' }}</span>
+  <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ status?.pending ? 'Waiting' : status?.enabled ? 'On' : wantsPlayback ? 'Ready' : 'Off' }}</span>
   <svg class="loop-preview" viewBox="0 0 100 48" preserveAspectRatio="none" aria-hidden="true">
     <path class="loop-preview-grid" d="M25 0v48 M50 0v48 M75 0v48 M0 12h100 M0 24h100 M0 36h100" />
     <path v-for="curve in curves" :key="curve.key" class="loop-preview-curve" :d="curve.path" :style="{ stroke: curve.color }" />

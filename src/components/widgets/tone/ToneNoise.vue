@@ -3,7 +3,8 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import type { HeldNote, ToneElementSettings } from '../../../grid'
 
-const props = defineProps<{ label: string; settings: ToneElementSettings; notes: HeldNote[]; audioOutput?: Tone.InputNode }>()
+const props = defineProps<{ label: string; settings: ToneElementSettings; notes: HeldNote[]; audioOutput?: Tone.InputNode; muted: boolean }>()
+const emit = defineEmits<{ toggleMute: [] }>()
 const continuous = ref(false)
 const error = ref('')
 let noise: Tone.Noise | undefined
@@ -62,11 +63,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="tone-element-control" :style="{ '--tone-color': settings.color }">
+  <component :is="settings.noteMode === 'continuous' ? 'div' : 'button'" class="tone-element-control" :class="{ muted }"
+    :type="settings.noteMode === 'continuous' ? undefined : 'button'" :style="{ '--tone-color': settings.color }"
+    :aria-label="settings.noteMode === 'continuous' ? undefined : `${muted ? 'Unmute' : 'Mute'} ${label}`"
+    :aria-pressed="settings.noteMode === 'continuous' ? undefined : muted"
+    @click="settings.noteMode !== 'continuous' && emit('toggleMute')">
     <strong>{{ label }}</strong>
     <small>Noise</small>
     <button v-if="settings.noteMode === 'continuous'" type="button" :aria-pressed="continuous"
       @click="continuous = !continuous">{{ continuous ? 'Stop' : 'Start' }}</button>
+    <button v-if="muted && settings.noteMode === 'continuous'" type="button" @click.stop="emit('toggleMute')">Unmute</button>
     <small v-if="error" role="alert">{{ error }}</small>
-  </div>
+    <small v-if="muted && settings.noteMode !== 'continuous'">Muted</small>
+  </component>
 </template>

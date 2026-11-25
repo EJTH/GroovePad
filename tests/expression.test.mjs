@@ -1114,6 +1114,122 @@ test('instrument settings knobs update the live control and its sounding instrum
   } finally { await server.close() }
 })
 
+test('knob modulation reaches reverb wetness without changing saved settings', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
+    const knob = gridModule.createControl('knob', 0, 0, 'knob')
+    const reverb = gridModule.createControl('reverb', 1, 0, 'tone-element')
+    reverb.settings.elementType = 'reverb'
+    const wire = { id: 'wet', sourceId: 'knob', sourceParameter: 'value',
+      targetId: 'reverb', targetParameter: 'gain' }
+    const layout = vue.reactive({ columns: 2, rows: 1, items: [knob, reverb], connections: [wire] })
+    assert.equal(parameters.inputs(reverb).find((input) => input.id === 'gain').max, 1)
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120 },
+      { '../grid': gridModule }, { setTimeout, clearTimeout })
+    const { connectionMappingMode } = await server.ssrLoadModule('/src/modulation.ts')
+    assert.equal(connectionMappingMode(layout, wire), 'abs')
+    const dialog = await setupComponent('GridControlSettingsDialog',
+      vue.reactive({ draft: layout.items[1], displayItem: vue.computed(() => grid.api.displayItems.value[1]),
+        selectedId: 'reverb', layout, bpm: 120, message: '' }), {
+        '../grid': gridModule, '../parameters': parameters, '../settingsAutomation': await server.ssrLoadModule('/src/settingsAutomation.ts'),
+      }, {})
+    const updates = []
+    grid.api.audioGraph.value = { update: (_layout, _boundary, options) => {
+      updates.push(options.toneSettings.get('reverb'))
+      return false
+    }, setNotes() {}, dispose() {} }
+    try {
+      grid.api.updateAudioGraph(layout)
+      assert.equal(updates.at(-1).gain, 64 / 127)
+      assert.equal(dialog.api.liveItem.value.settings.gain, 64 / 127)
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 0 })
+      await vue.nextTick()
+      assert.equal(updates.at(-1).gain, 0)
+      assert.equal(dialog.api.liveItem.value.settings.gain, 0)
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 127 })
+      await vue.nextTick()
+      assert.equal(updates.at(-1).gain, 1)
+      assert.equal(dialog.api.liveItem.value.settings.gain, 1)
+      assert.equal(layout.items[1].settings.gain, 0.8)
+      Object.assign(layout.connections[0], { mappingMode: 'mod', modulationMin: -50, modulationMax: 50 })
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 0 })
+      await vue.nextTick()
+      assert.ok(Math.abs(updates.at(-1).gain - 0.3) < 1e-10)
+      assert.ok(Math.abs(dialog.api.liveItem.value.settings.gain - 0.3) < 1e-10)
+      assert.equal(connectionMappingMode(layout, layout.connections[0]), 'mod')
+      layout.connections.splice(0, 1)
+      await vue.nextTick()
+      assert.equal(updates.at(-1).gain, 0.8)
+      assert.equal(dialog.api.liveItem.value.settings.gain, 0.8)
+      layout.connections.push({ id: 'decay', sourceId: 'knob', sourceParameter: 'value',
+        targetId: 'reverb', targetParameter: 'decay' })
+      await vue.nextTick()
+      assert.equal(updates.at(-1).decay, 0.01)
+      assert.equal(dialog.api.liveItem.value.settings.decay, 0.01)
+      assert.equal(connectionMappingMode(layout, layout.connections[0]), 'abs')
+      grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 127 })
+      await vue.nextTick()
+      assert.equal(updates.at(-1).decay, 10)
+      assert.equal(dialog.api.liveItem.value.settings.decay, 10)
+      assert.equal(layout.items[1].settings.decay, 0.5)
+      layout.connections.splice(0, 1)
+      await vue.nextTick()
+      assert.equal(updates.at(-1).decay, 0.5)
+    } finally { dialog.dispose(); grid.dispose() }
+  } finally { await server.close() }
+})
+
+test('knob mappings update every Tone processor setting and its display', async () => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const gridModule = await server.ssrLoadModule('/src/grid.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
+    const modulation = await server.ssrLoadModule('/src/modulation.ts')
+    const knob = gridModule.createControl('knob', 0, 0, 'knob')
+    const effects = ['delay', 'filter', 'gain', 'mixer', 'envelope'].map((type, index) => {
+      const item = gridModule.createControl(type, index + 1, 0, 'tone-element')
+      item.settings.elementType = type
+      return item
+    })
+    const wire = { id: 'wire', sourceId: 'knob', sourceParameter: 'value', targetId: 'delay', targetParameter: 'gain' }
+    const layout = vue.reactive({ columns: 6, rows: 1, items: [knob, ...effects], connections: [wire] })
+    const grid = await setupComponent('GrooveGrid', { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120 },
+      { '../grid': gridModule }, { setTimeout, clearTimeout })
+    let updated
+    grid.api.audioGraph.value = { update: (_layout, _boundary, options) => { updated = options.toneSettings; return false },
+      setNotes() {}, dispose() {} }
+    const settingsAutomation = await server.ssrLoadModule('/src/settingsAutomation.ts')
+    try {
+      for (const effect of effects) {
+        const dialog = await setupComponent('GridControlSettingsDialog',
+          vue.reactive({ draft: effect, displayItem: vue.computed(() => grid.api.displayItems.value.find((item) => item.id === effect.id)),
+            selectedId: effect.id, layout, bpm: 120, message: '' }), {
+            '../grid': gridModule, '../parameters': parameters, '../settingsAutomation': settingsAutomation,
+          }, {})
+        try {
+          for (const input of parameters.inputs(effect).filter((entry) => entry.kind === 'number')) {
+            const original = effect.settings[input.id]
+            layout.connections[0].targetId = effect.id
+            layout.connections[0].targetParameter = input.id
+            await vue.nextTick()
+            assert.equal(modulation.connectionMappingMode(layout, wire), 'abs', `${effect.id}.${input.id}`)
+            grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 0 })
+            await vue.nextTick()
+            assert.equal(updated.get(effect.id)[input.id], input.min, `${effect.id}.${input.id} minimum`)
+            assert.equal(dialog.api.liveItem.value.settings[input.id], input.min, `${effect.id}.${input.id} display`)
+            grid.api.handleOutput(layout.items[0], { parameter: 'value', value: 127 })
+            await vue.nextTick()
+            assert.equal(updated.get(effect.id)[input.id], input.max, `${effect.id}.${input.id} maximum`)
+            assert.equal(effect.settings[input.id], original, `${effect.id}.${input.id} saved value`)
+          }
+        } finally { dialog.dispose() }
+      }
+    } finally { grid.dispose() }
+  } finally { await server.close() }
+})
+
 test('armed loops record and replay control setting changes without mutating their saved values', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
@@ -1723,23 +1839,31 @@ test('exposed numeric ports preserve mappings through nested grids and propagate
     const innerProps = vue.reactive({ ...common, layout: outerProps.layout.items[0].settings.layout,
       ownerSettings: outerProps.layout.items[0].settings, boundaryNumeric: [] })
     const deepest = await setupComponent('GrooveGrid', innerProps, { '../grid': gridModule }, { setTimeout, clearTimeout })
+    let innerGain
+    deepest.api.audioGraph.value = { update: (_layout, _boundary, options) => {
+      innerGain = options.toneSettings.get('gain').gain
+      return false
+    }, setNotes() {}, dispose() {} }
     const stopOuter = vue.watchEffect(() => { outerProps.boundaryNumeric = parent.api.boundaryNumericForSubGrid('outer') }, { flush: 'sync' })
     const stopInner = vue.watchEffect(() => { innerProps.boundaryNumeric = nested.api.boundaryNumericForSubGrid('inner') }, { flush: 'sync' })
     try {
       await vue.nextTick()
       assert.ok(Math.abs(deepest.api.displayItems.value[0].settings.gain - (0.4 + 64 / 127)) < 1e-10)
+      assert.ok(Math.abs(innerGain - (0.4 + 64 / 127)) < 1e-10)
       assert.ok(Math.abs(parent.api.displayItems.value[2].settings.gain - 64 / 127) < 1e-10)
       Object.assign(layout.connections[0], { mappingMode: 'mod', modulationMin: 0, modulationMax: 25 })
       delete layout.connections[0].absoluteMin
       delete layout.connections[0].absoluteMax
       await vue.nextTick()
       assert.ok(Math.abs(deepest.api.displayItems.value[0].settings.gain - (0.8 + 0.5 * 64 / 127)) < 1e-10)
+      assert.ok(Math.abs(innerGain - (0.8 + 0.5 * 64 / 127)) < 1e-10)
       outerProps.layout.items[1].settings.value = 96
       await vue.nextTick()
       assert.ok(Math.abs(parent.api.displayItems.value[2].settings.gain - 192 / 127) < 1e-10)
       parent.api.removeWire(layout.connections[0])
       await vue.nextTick()
       assert.equal(deepest.api.displayItems.value[0].settings.gain, 0.8)
+      assert.equal(innerGain, 0.8)
     } finally { stopOuter(); stopInner(); deepest.dispose(); nested.dispose(); parent.dispose() }
   } finally { await server.close() }
 })
@@ -2659,7 +2783,7 @@ test('global metronome follows playback and can be toggled without an armed loop
   } finally { await server.close() }
 })
 
-test('transport count-in precedes playback while input start bypasses it', async () => {
+test('legacy count-in does not delay transport playback or input start', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const gridModule = await server.ssrLoadModule('/src/grid.ts')
@@ -2706,17 +2830,9 @@ test('transport count-in precedes playback while input start bypasses it', async
       assert.deepEqual(clicks, [])
       await app.api.togglePlayback()
       await app.api.togglePlayback()
-      assert.equal(app.api.playing.value, false)
-      assert.equal(app.api.countingIn.value, true)
-      for (position = 1; position <= 4; position++) [...intervals.values()].forEach((tick) => tick())
       assert.equal(app.api.playing.value, true)
-      assert.equal(app.api.countingIn.value, false)
-      assert.deepEqual(clicks, ['C6', 'G5', 'G5', 'G5'])
+      assert.deepEqual(clicks, [])
       await app.api.togglePlayback()
-      await app.api.togglePlayback()
-      assert.equal(app.api.countingIn.value, true)
-      await app.api.togglePlayback()
-      assert.equal(app.api.countingIn.value, false)
       assert.equal(intervals.size, 0)
       const nested = gridModule.createControl('nested', 0, 0, 'sub-grid')
       const nestedLoop = gridModule.createControl('inner-loop', 0, 0, 'sequenced-loop')
@@ -2728,7 +2844,7 @@ test('transport count-in precedes playback while input start bypasses it', async
       assert.equal(await app.api.startFromInput('A/nested'), true)
       await app.api.togglePlayback()
       await app.api.togglePlayback()
-      assert.equal(app.api.countingIn.value, true)
+      assert.equal(app.api.playing.value, true)
       await app.api.togglePlayback()
       nestedLoop.settings.armed = false
       loop.settings.armed = true
@@ -2778,7 +2894,6 @@ test('transport start aligns armed and playback loops across banks', async () =>
         gridB.api.toggleLoopPlayback('playing')
         propsA.playing = true
         propsB.playing = true
-        assert.equal(gridA.api.loopEngine.isCounting('armed'), false)
         assert.equal(gridB.api.loopEngine.isPending('playing'), false)
         assert.equal(gridB.api.loopEngine.isEnabled('stopped'), false)
         assert.equal(gridA.api.recordedNotes('pad-a')[0].note, 60)
@@ -2840,7 +2955,6 @@ test('armed loops start on a piano hit and capture the first routed note', async
       finishStart(true)
       await new Promise((resolve) => setImmediate(resolve))
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
-      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
       beat = 0.5
       grid.api.handleOutput(piano, { parameter: 'note', value: 64, on: false, velocity: 90 }, true)
       assert.equal(loop.settings.clips[0].length, 1)
@@ -2851,7 +2965,6 @@ test('armed loops start on a piano hit and capture the first routed note', async
       beat = 1
       grid.api.handleOutput(piano, { parameter: 'note', value: 65, on: true, velocity: 90 }, true)
       assert.equal(grid.api.loopEngine.isEnabled('loop'), true)
-      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
       grid.api.handleOutput(piano, { parameter: 'note', value: 65, on: false, velocity: 90 }, true)
     } finally { grid.dispose() }
   } finally { await server.close() }
@@ -2946,7 +3059,6 @@ test('a drum hit released during transport startup is still recorded', async () 
       finishStart(true)
       await new Promise((resolve) => setImmediate(resolve))
       assert.equal(loop.settings.clips[0].length, 1)
-      assert.equal(grid.api.loopEngine.isCounting('loop'), false)
     } finally { grid.dispose() }
   } finally { await server.close() }
 })

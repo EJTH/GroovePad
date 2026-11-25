@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { GridItem } from '../../../grid'
+import type { GridItem, ToneElementSettings } from '../../../grid'
 import NumericSetting from '../../UI/NumericSetting.vue'
 import ToneOscillatorSettingsPanel from './ToneOscillatorSettingsPanel.vue'
 import ToneNoiseSettingsPanel from './ToneNoiseSettingsPanel.vue'
@@ -15,6 +15,19 @@ const emit = defineEmits<{
   changeType: [event: Event]
   changeAudioRoute: [field: 'audioFrom' | 'audioTo' | 'routeMode', event: Event]
 }>()
+function changeTapMode(settings: ToneElementSettings, event: Event) {
+  const mode = (event.target as HTMLSelectElement).value
+  if (mode !== 'mute' && mode !== 'bypass') return
+  if (mode === (settings.tapMode ?? 'mute')) return
+  const toggled = !!settings.muted || !!settings.bypassed
+  settings.muted = mode === 'mute' && toggled
+  settings.bypassed = mode === 'bypass' && toggled
+  settings.tapMode = mode
+}
+function changeShowBypass(settings: ToneElementSettings, event: Event) {
+  settings.showBypass = (event.target as HTMLInputElement).checked
+  if (!settings.showBypass) settings.bypassed = false
+}
 </script>
 
 <template>
@@ -53,6 +66,16 @@ const emit = defineEmits<{
 <template v-else-if="liveItem.settings.elementType === 'mixer'">
   <NumericSetting v-model="liveItem.settings.gain" label="Master level" :min="0" :max="2" :step="0.01" />
 </template>
+<label v-if="['filter', 'gain', 'delay', 'reverb'].includes(liveItem.settings.elementType)">Tap action
+  <select :value="liveItem.settings.tapMode ?? 'mute'" @change="changeTapMode(liveItem.settings, $event)">
+    <option value="mute">Mute output</option>
+    <option value="bypass">Bypass effect</option>
+  </select>
+</label>
+<label v-if="liveItem.settings.elementType === 'envelope' || liveItem.settings.elementType === 'mixer'" class="inline-checkbox">
+  <input type="checkbox" :checked="!!liveItem.settings.showBypass" @change="changeShowBypass(liveItem.settings, $event)" />
+  Show bypass button
+</label>
 <label v-if="liveItem.settings.elementType !== 'oscillator' && liveItem.settings.elementType !== 'noise'">Audio source
   <select :value="liveItem.settings.audioFrom" @change="emit('changeAudioRoute', 'audioFrom', $event)">
     <option value="auto">Automatic (wire or bank)</option>

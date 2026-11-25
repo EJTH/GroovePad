@@ -323,6 +323,7 @@ test('Tone.js dropdown renders element-specific settings', async () => {
       ['delay', 'Delay time \\(s\\)'],
       ['reverb', 'Decay \\(s\\)'],
       ['envelope', 'Attack \\(s\\)'],
+      ['mixer', 'Master level'],
     ]) {
       const tone = createControl(`tone-${type}`, 0, 0, 'tone-element')
       tone.settings.elementType = type
@@ -338,6 +339,10 @@ test('Tone.js dropdown renders element-specific settings', async () => {
         }),
       }))
       assert.match(html, new RegExp(label))
+      if (['filter', 'delay', 'reverb'].includes(type)) {
+        assert.match(html, /Tap action/)
+        assert.match(html, /Bypass effect/)
+      }
       if (type === 'oscillator') {
         assert.match(html, /Always on/)
         assert.match(html, /Polyphony/)
@@ -351,6 +356,7 @@ test('Tone.js dropdown renders element-specific settings', async () => {
         assert.doesNotMatch(alwaysHtml, /Release \(s\)/)
       }
       if (type === 'envelope') {
+        assert.match(html, /Show bypass button/)
         assert.match(html, /adsr-visualizer/)
         assert.match(html, /Sustain/)
         assert.match(html, /max="5"/)
@@ -364,6 +370,7 @@ test('Tone.js dropdown renders element-specific settings', async () => {
         assert.match(effectiveHtml, /aria-label="Sustain adjustment"[^>]*aria-valuenow="0\.3"/)
         assert.equal(tone.settings.sustain, 1)
       }
+      if (type === 'mixer') assert.match(html, /Show bypass button/)
     }
   } finally {
     globalThis.HTMLElement = previousHTMLElement
@@ -505,11 +512,194 @@ test('selector signal constraints include wires on both sides of a SubGrid', asy
   } finally { await server.close() }
 })
 
+test('control-free Tone element toggles its accessible mute button', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const vue = await import('vue')
+    const { createRenderer, h, nextTick, reactive } = vue
+    const { parse, compileScript } = await import('@vue/compiler-sfc')
+    async function component(name) {
+      const source = await readFile(new URL(`../src/components/widgets/tone/${name}.vue`, import.meta.url), 'utf8')
+      const { descriptor } = parse(source)
+      const compiled = compileScript(descriptor, { id: `${name}-test`, inlineTemplate: true })
+      const code = ts.transpileModule(compiled.content, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+      const module = { exports: {} }
+      vm.runInNewContext(code, { module, exports: module.exports, require: (id) => id === 'vue' ? vue : {} })
+      return module.exports.default
+    }
+    const ToneElement = await component('ToneElement')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    const settings = reactive(createControl('effect', 0, 0, 'tone-element').settings)
+    settings.elementType = 'filter'
+    const renderer = createRenderer({
+      createElement: (type) => ({ type, props: {}, children: [] }),
+      createText: (text) => ({ text }),
+      createComment: (text) => ({ text }),
+      setText: (node, text) => { node.text = text },
+      setElementText: (node, text) => { node.text = text },
+      patchProp: (node, key, _old, value) => { node.props[key] = value },
+      insert: (node, parent, anchor) => {
+        node.parent = parent
+        const index = anchor ? parent.children.indexOf(anchor) : -1
+        parent.children.splice(index < 0 ? parent.children.length : index, 0, node)
+      },
+      remove: (node) => {
+        const index = node.parent.children.indexOf(node)
+        if (index >= 0) node.parent.children.splice(index, 1)
+      },
+      parentNode: (node) => node.parent,
+      nextSibling: (node) => node.parent?.children[node.parent.children.indexOf(node) + 1] ?? null,
+    })
+    const root = { children: [] }
+    const app = renderer.createApp({ render: () => h(ToneElement, {
+      label: 'Filter', settings, available: true, onToggleMute: () => { settings.muted = !settings.muted },
+    }) })
+    app.mount(root)
+    const button = root.children[0]
+    assert.equal(button.type, 'button')
+    assert.equal(button.props['aria-pressed'], false)
+    button.props.onClick()
+    await nextTick()
+    assert.equal(settings.muted, true)
+    assert.equal(button.props['aria-pressed'], true)
+    assert.equal(button.props['aria-label'], 'Unmute Filter')
+    button.props.onClick()
+    await nextTick()
+    assert.equal(settings.muted, false)
+    assert.equal(button.props['aria-pressed'], false)
+    settings.tapMode = 'bypass'
+    await nextTick()
+    assert.equal(button.props['aria-label'], 'Bypass Filter')
+    app.unmount()
+    const bypassRoot = { children: [] }
+    renderer.createApp({ render: () => h(ToneElement, {
+      label: 'Filter', settings, available: true, onToggleMute: () => { settings.bypassed = !settings.bypassed },
+    }) }).mount(bypassRoot)
+    const bypassButton = bypassRoot.children[0]
+    bypassButton.props.onClick()
+    await nextTick()
+    assert.equal(settings.bypassed, true)
+    assert.equal(bypassButton.props['aria-pressed'], true)
+    assert.equal(bypassButton.props['aria-label'], 'Enable Filter')
+    bypassButton.props.onClick()
+    await nextTick()
+    assert.equal(settings.bypassed, false)
+
+    const panelSource = await readFile(new URL('../src/components/widgets/tone/ToneElementSettingsPanel.vue', import.meta.url), 'utf8')
+    const panelScript = compileScript(parse(panelSource).descriptor, { id: 'tone-settings-test' })
+    const panelCode = ts.transpileModule(panelScript.content, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const panelModule = { exports: {} }
+    vm.runInNewContext(panelCode, { module: panelModule, exports: panelModule.exports, require: (id) => id === 'vue' ? vue : {} })
+    const panel = panelModule.exports.default.setup({}, { emit() {}, expose() {} })
+    settings.tapMode = 'mute'
+    settings.muted = true
+    panel.changeTapMode(settings, { target: { value: 'bypass' } })
+    assert.equal(settings.muted, false)
+    assert.equal(settings.bypassed, true)
+    panel.changeTapMode(settings, { target: { value: 'mute' } })
+    assert.equal(settings.bypassed, false)
+    assert.equal(settings.muted, true)
+    settings.bypassed = true
+    panel.changeShowBypass(settings, { target: { checked: false } })
+    assert.equal(settings.showBypass, false)
+    assert.equal(settings.bypassed, false)
+
+    for (const [name, type] of [['ToneOscillator', 'oscillator'], ['ToneNoise', 'noise']]) {
+      const sourceSettings = reactive(createControl(type, 0, 0, 'tone-element').settings)
+      sourceSettings.elementType = type
+      const sourceRoot = { children: [] }
+      const Source = await component(name)
+      const sourceApp = renderer.createApp({ render: () => h(Source, {
+        label: type, settings: sourceSettings, baseFrequency: 440, notes: [], muted: !!sourceSettings.muted,
+        onToggleMute: () => { sourceSettings.muted = !sourceSettings.muted },
+      }) })
+      sourceApp.mount(sourceRoot)
+      assert.equal(sourceRoot.children[0].type, 'button')
+      sourceRoot.children[0].props.onClick()
+      await nextTick()
+      assert.equal(sourceSettings.muted, true)
+      sourceSettings.noteMode = 'continuous'
+      await nextTick()
+      assert.equal(sourceRoot.children[0].type, 'div')
+      sourceRoot.children[0].props.onClick()
+      assert.equal(sourceSettings.muted, true)
+      const unmute = sourceRoot.children[0].children.find((child) => child.text === 'Unmute')
+      assert.ok(unmute)
+      unmute.props.onClick({ stopPropagation() {} })
+      await nextTick()
+      assert.equal(sourceSettings.muted, false)
+      sourceApp.unmount()
+    }
+
+    const { isSavedProject } = await server.ssrLoadModule('/src/project.ts')
+    const item = createControl('saved', 0, 0, 'tone-element')
+    item.settings.elementType = 'filter'
+    item.settings.muted = true
+    item.settings.tapMode = 'bypass'
+    item.settings.bypassed = true
+    item.settings.showBypass = true
+    const project = { version: 1, bpm: 120, selectedBankId: 'A', banks: [
+      { id: 'A', title: 'A', icon: 'A', color: '#ffffff', layout: { columns: 1, rows: 1, items: [item], connections: [] } },
+    ] }
+    assert.equal(isSavedProject(project), true)
+    const { saveProjectToFile, loadProjectFromFile } = await server.ssrLoadModule('/src/saveManager.ts')
+    const restored = await loadProjectFromFile(await saveProjectToFile(project))
+    assert.equal(restored.banks[0].layout.items[0].settings.muted, true)
+    assert.equal(restored.banks[0].layout.items[0].settings.tapMode, 'bypass')
+    assert.equal(restored.banks[0].layout.items[0].settings.bypassed, true)
+    assert.equal(restored.banks[0].layout.items[0].settings.showBypass, true)
+    item.settings.tapMode = 'invalid'
+    assert.equal(isSavedProject(project), false)
+    item.settings.tapMode = 'bypass'
+    item.settings.showBypass = 'invalid'
+    assert.equal(isSavedProject(project), false)
+    item.settings.showBypass = true
+    item.settings.bypassed = 'invalid'
+    assert.equal(isSavedProject(project), false)
+    item.settings.bypassed = true
+    item.settings.muted = 'invalid'
+    assert.equal(isSavedProject(project), false)
+  } finally { await server.close() }
+})
+
+test('envelope and mixer bypass buttons are optional', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { createSSRApp, h } = await import('vue')
+    const { renderToString } = await import('@vue/server-renderer')
+    const { default: GrooveGrid } = await server.ssrLoadModule('/src/components/GrooveGrid.vue')
+    const { createControl } = await server.ssrLoadModule('/src/grid.ts')
+    for (const type of ['envelope', 'mixer']) {
+      const item = createControl(type, 0, 0, 'tone-element')
+      item.settings.elementType = type
+      item.label = type
+      if (type === 'envelope') {
+        item.settings.showVisualizer = false
+        item.settings.showKnobs = false
+      }
+      const layout = { columns: 1, rows: 1, items: [item], connections: [] }
+      const render = () => renderToString(createSSRApp({ render: () => h(GrooveGrid,
+        { layout, editing: false, wiring: false, settingsOpen: false, bpm: 120 }) }))
+      assert.doesNotMatch(await render(), /tone-bypass-button/)
+      item.settings.showBypass = true
+      let html = await render()
+      assert.match(html, new RegExp(`aria-label="Bypass ${type}"`))
+      if (type === 'envelope') assert.match(html, /Open envelope control settings/)
+      item.settings.bypassed = true
+      html = await render()
+      assert.match(html, new RegExp(`aria-label="Enable ${type}"`))
+      assert.match(html, /aria-pressed="true"/)
+    }
+  } finally { await server.close() }
+})
+
 test('bank audio updates processors and gates an envelope without restarting the graph', async () => {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
     const routes = await server.ssrLoadModule('/src/audio/audioRoutes.ts')
+    const modulation = await server.ssrLoadModule('/src/modulation.ts')
+    const parameters = await server.ssrLoadModule('/src/parameters.ts')
     const source = await readFile(new URL('../src/audio/bankAudio.ts', import.meta.url), 'utf8')
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
     const calls = []
@@ -536,17 +726,27 @@ test('bank audio updates processors and gates an envelope without restarting the
     }
     class Filter extends Node { constructor() { super(); this.frequency = signal(); this.Q = signal() } }
     class FeedbackDelay extends Node { constructor() { super(); this.delayTime = signal(); this.feedback = signal(); this.wet = signal() } }
-    class Reverb extends Node { constructor(options) { super(); this.decay = options.decay; this.wet = signal(); this.ready = Promise.resolve() } }
+    class Reverb extends Node {
+      constructor(options) { super(); this._decay = options.decay; this.wet = signal(); this.ready = Promise.resolve(); this.generations = [] }
+      get decay() { return this._decay }
+      set decay(value) {
+        this._decay = value
+        this.generations.push(value)
+        if (this.deferred) this.ready = new Promise((resolve, reject) => { this.finish = resolve; this.fail = reject })
+        else this.ready = Promise.resolve()
+      }
+    }
+    class Scale extends Node {}
     class Envelope extends Node {
       constructor(options) { super(); Object.assign(this, options); this.context = { immediate: () => 3 }; this.value = 0 }
       getValueAtTime(time) { calls.push(['sample', time]); return this.value }
       triggerAttack(_, velocity) { calls.push(['attack', velocity]) }
       triggerRelease() { calls.push(['release']) }
     }
-    const tone = { ToneAudioNode: Node, Gain, Channel, Filter, FeedbackDelay, Reverb, Envelope }
+    const tone = { ToneAudioNode: Node, Gain, Channel, Filter, FeedbackDelay, Reverb, Envelope, Scale }
     const module = { exports: {} }
     vm.runInNewContext(code, { module, exports: module.exports,
-      require: (name) => name === 'tone' ? tone : routes })
+      require: (name) => name === 'tone' ? tone : name === '../modulation' ? modulation : name === '../parameters' ? parameters : routes })
     const errors = []
     const graph = new module.exports.BankAudio((error) => errors.push(error))
     const effect = createControl('effect', 0, 0, 'tone-element')
@@ -566,6 +766,22 @@ test('bank audio updates processors and gates an envelope without restarting the
     assert.equal(graph.getEnvelopeValue('envelope'), 0.25)
     assert.deepEqual(calls.filter(([action]) => action === 'sample'), [['sample', 3]])
     const gainNode = graph.getInput('effect')
+    const effectOutput = graph.getOutput('effect')
+    assert.notEqual(effectOutput, gainNode)
+    const effectWet = calls.find(([action, from, to]) => action === 'connect' && from === gainNode && to instanceof Gain)?.[2]
+    assert.ok(effectWet)
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === effectWet && to === effectOutput))
+    assert.equal(effectOutput.gain.value, 1)
+    effect.settings.muted = true
+    graph.update(layout)
+    assert.equal(effectOutput.gain.value, 0)
+    assert.equal(gainNode.gain.value, effect.settings.gain)
+    const extra = createControl('extra', 2, 0, 'instrument-pad')
+    graph.update({ columns: 3, rows: 1, items: [...layout.items, extra], connections: [] })
+    assert.equal(effectOutput.gain.value, 0)
+    effect.settings.muted = false
+    graph.update(layout)
+    assert.equal(effectOutput.gain.value, 1)
     const connectionCount = calls.filter(([action]) => action === 'connect').length
     effect.settings.gain = 0.3
     graph.update(layout)
@@ -577,6 +793,109 @@ test('bank audio updates processors and gates an envelope without restarting the
     assert.deepEqual(calls.filter(([action]) => action === 'attack' || action === 'release'),
       [['attack', 64 / 127], ['release']])
 
+    const filter = createControl('filter', 2, 0, 'tone-element')
+    filter.settings.elementType = 'filter'
+    const delay = createControl('delay', 3, 0, 'tone-element')
+    delay.settings.elementType = 'delay'
+    const mixerControl = createControl('master', 4, 0, 'tone-element')
+    mixerControl.settings.elementType = 'mixer'
+    const envelopeTarget = createControl('envelope-target', 5, 0, 'tone-element')
+    envelopeTarget.settings.elementType = 'envelope'
+    const processorLayout = { columns: 6, rows: 1, items: [effect, envelope, filter, delay, mixerControl, envelopeTarget],
+      connections: [{ id: 'adsr', sourceId: 'envelope', sourceParameter: 'value',
+        targetId: 'envelope-target', targetParameter: 'attack', mappingMode: 'abs' }] }
+    const toneSettings = new Map([
+      ['effect', { ...effect.settings, gain: 1.2 }],
+      ['filter', { ...filter.settings, cutoff: 2500, gain: 1.5 }],
+      ['delay', { ...delay.settings, delayTime: 1.5, feedback: 1, gain: 0.3 }],
+      ['master', { ...mixerControl.settings, gain: 1.4 }],
+      ['envelope-target', { ...envelopeTarget.settings, attack: 0.4, decay: 2, sustain: 0.6, release: 3 }],
+    ])
+    graph.update(processorLayout, [], { toneSettings })
+    for (const id of ['filter', 'delay']) {
+      const input = graph.getInput(id)
+      const output = graph.getOutput(id)
+      assert.notEqual(output, input)
+      const wet = calls.find(([action, from, to]) => action === 'connect' && from === input && to instanceof Gain)?.[2]
+      assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === wet && to === output))
+    }
+    assert.equal(gainNode.gain.value, 1.2)
+    assert.equal(graph.getInput('filter').frequency.value, 2500)
+    assert.equal(graph.getInput('filter').Q.value, 1.5)
+    assert.equal(graph.getInput('delay').delayTime.value, 1.5)
+    assert.equal(graph.getInput('delay').feedback.value, 0.99)
+    assert.equal(graph.getInput('delay').wet.value, 0.3)
+    assert.equal(graph.getInput('master').gain.value, 1.4)
+    const targetEnvelope = graph.getEnvelopeSignal('envelope-target')
+    assert.deepEqual([targetEnvelope.attack, targetEnvelope.decay, targetEnvelope.sustain, targetEnvelope.release], [0.4, 2, 0.6, 3])
+    assert.equal(envelopeTarget.settings.attack, 0.01)
+    processorLayout.connections.push({ id: 'delay-wet', sourceId: 'envelope', sourceParameter: 'value',
+      targetId: 'delay', targetParameter: 'gain', mappingMode: 'abs' })
+    toneSettings.get('delay').gain = 0.9
+    graph.update(processorLayout, [], { toneSettings })
+    assert.equal(graph.getInput('delay').wet.value, 0.3)
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof Scale && to === graph.getInput('delay').wet))
+
+    const reverb = createControl('reverb', 2, 0, 'tone-element')
+    reverb.settings.elementType = 'reverb'
+    const reverbLayout = { columns: 3, rows: 1, items: [effect, envelope, reverb], connections: [] }
+    const reverbValues = (wet, decay) => ({ toneSettings: new Map([['reverb', { ...reverb.settings, gain: wet, decay }]]) })
+    graph.update(reverbLayout, [], reverbValues(0.25, 0.5))
+    const reverbNode = graph.getInput('reverb')
+    const reverbOutput = graph.getOutput('reverb')
+    const reverbWet = calls.find(([action, from, to]) => action === 'connect' && from === reverbNode && to instanceof Gain)?.[2]
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === reverbWet && to === reverbOutput))
+    reverb.settings.muted = true
+    graph.update(reverbLayout, [], reverbValues(0.25, 0.5))
+    assert.equal(reverbOutput.gain.value, 0)
+    assert.equal(reverbNode.wet.value, 0.25)
+    assert.equal(reverbNode.wet.value, 0.25)
+    graph.update(reverbLayout, [], reverbValues(0.75, 0.5))
+    assert.equal(reverbNode.wet.value, 0.75)
+    assert.equal(reverb.settings.gain, 0.8)
+    reverbNode.deferred = true
+    graph.update(reverbLayout, [], reverbValues(0.75, 2))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(reverbNode.generations, [2])
+    graph.update(reverbLayout, [], reverbValues(0.75, 3))
+    graph.update(reverbLayout, [], reverbValues(0.75, 4))
+    assert.deepEqual(reverbNode.generations, [2])
+    reverbNode.finish()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(reverbNode.generations, [2, 4])
+    reverbNode.finish()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(reverb.settings.decay, 0.5)
+    graph.update(reverbLayout, [], reverbValues(0.75, 5))
+    await new Promise((resolve) => setImmediate(resolve))
+    reverbNode.fail(new Error('offline render failed'))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.match(errors.pop(), /offline render failed/)
+    reverbNode.deferred = false
+    reverbLayout.connections.push({ id: 'envelope-wet', sourceId: 'envelope', sourceParameter: 'value',
+      targetId: 'reverb', targetParameter: 'gain', mappingMode: 'abs' })
+    graph.update(reverbLayout, [], reverbValues(0.25, 5))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(reverbNode.generations, [2, 4, 5, 5])
+    assert.equal(reverbNode.wet.value, 0.75)
+    assert.ok(calls.some(([action, from, to]) => action === 'connect' && from instanceof Scale && to === reverbNode.wet))
+
+    for (const type of ['oscillator', 'noise']) {
+      const source = createControl(type, 0, 0, 'tone-element')
+      source.settings.elementType = type
+      source.settings.muted = true
+      graph.update({ columns: 1, rows: 1, items: [source], connections: [] })
+      const input = graph.getInput(type)
+      const output = graph.getOutput(type)
+      assert.notEqual(input, output)
+      assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === input && to === output))
+      assert.equal(output.gain.value, 0)
+      source.settings.muted = false
+      graph.update({ columns: 1, rows: 1, items: [source], connections: [] })
+      assert.equal(output.gain.value, 1)
+    }
+
+    channels.length = 0
     const sourceA = createControl('source-a', 0, 0, 'instrument-pad')
     const sourceB = createControl('source-b', 1, 0, 'instrument-pad')
     const mixer = createControl('mixer', 2, 0, 'tone-element')
@@ -639,11 +958,51 @@ test('bank audio updates processors and gates an envelope without restarting the
     assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === inputNode && to === boundaryChannel))
     assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === boundaryChannel && to === routedChild.getInput('inner')))
     assert.ok(calls.some(([action, from, to]) => action === 'connect' && from === routedChild.getOutput('inner') && to === outputNode))
+    const boundaryDry = calls.find(([action, from, to]) => action === 'connect' && from === inputNode && to instanceof Gain &&
+      calls.some(([a, f, t]) => a === 'connect' && f === to && t === routedChild.getOutput('inner')))?.[2]
+    assert.ok(boundaryDry)
+    innerEffect.settings.bypassed = true
+    routedChild.update(sub.settings.layout, [
+      { port: sub.settings.exposedPorts[0], node: inputNode },
+      { port: sub.settings.exposedPorts[1], node: outputNode },
+    ])
+    assert.equal(boundaryDry.gain.value, 1)
     routedChild.update(sub.settings.layout, [{ port: sub.settings.exposedPorts[1], node: outputNode }])
     assert.ok(calls.some(([action, from, to]) => action === 'disconnect' && from === inputNode && to === boundaryChannel))
+    assert.ok(calls.some(([action, from, to]) => action === 'disconnect' && from === inputNode && to === boundaryDry))
     routedChild.dispose()
     graph.dispose()
     assert.equal(gainNode.disposed, true)
+    assert.equal(effectOutput.disposed, true)
+
+    for (const type of ['filter', 'gain', 'delay', 'reverb', 'envelope', 'mixer']) {
+      const bypassGraph = new module.exports.BankAudio((error) => errors.push(error))
+      const source = createControl(`input-${type}`, 0, 0, 'instrument-pad')
+      const target = createControl(`target-${type}`, 1, 0, 'tone-element')
+      target.settings.elementType = type
+      target.settings.bypassed = true
+      const wire = { id: `wire-${type}`, sourceId: source.id, sourceParameter: 'audio', targetId: target.id, targetParameter: 'audio' }
+      const bypassLayout = { columns: 2, rows: 1, items: [source, target], connections: [wire] }
+      bypassGraph.update(bypassLayout)
+      const input = bypassGraph.getInput(target.id)
+      const output = bypassGraph.getOutput(target.id)
+      const wet = calls.find(([action, from, to]) => action === 'connect' && from === input && to instanceof Gain &&
+        calls.some(([a, f, t]) => a === 'connect' && f === to && t === output))?.[2]
+      const dry = calls.find(([action, from, to]) => action === 'connect' && from === bypassGraph.getOutput(source.id) &&
+        to instanceof Gain && calls.some(([a, f, t]) => a === 'connect' && f === to && t === output))?.[2]
+      assert.ok(wet, `${type} processed path`)
+      assert.ok(dry, `${type} direct path`)
+      assert.equal(wet.gain.value, 0)
+      assert.equal(dry.gain.value, 1)
+      assert.equal(output.gain.value, 1)
+      target.settings.bypassed = false
+      bypassGraph.update(bypassLayout)
+      assert.equal(wet.gain.value, 1)
+      assert.equal(dry.gain.value, 0)
+      bypassGraph.dispose()
+      assert.equal(wet.disposed, true)
+      assert.equal(dry.disposed, true)
+    }
     assert.deepEqual(errors, [])
   } finally {
     await server.close()

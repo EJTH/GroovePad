@@ -33,6 +33,8 @@ Choose **Wire**, then select a source and destination control. GroovePad filters
 
 Connections are validated before they are saved. Existing wires can be edited or removed from control settings. Cycles and duplicate source/target mappings are rejected.
 
+An unconfigured local knob-to-Tone-processor connection defaults to absolute mapping across the parameter's range. Choose **MOD** to apply an offset to its saved value instead. Reverb decay changes regenerate the impulse asynchronously and may take time to become audible. A direct audio-rate LFO or envelope connection to a processor parameter currently takes precedence over sampled controls on that parameter.
+
 ## Automation
 
 Knobs, mod wheels, LFOs, piano rolls, arpeggiators, instrument pads, and loop sequencers expose parameters that can be used by modulation and loop automation. When a loop records automation, the source and parameter are stored alongside note events and replayed with the selected clip.

@@ -167,7 +167,10 @@ function isItem(value: unknown): value is GridItem {
         s.surfaceItemIds.every((id: unknown) => typeof id === 'string')
     case 'tone-element':
       return oneOf(s.elementType, ['oscillator', 'noise', 'filter', 'gain', 'delay', 'reverb', 'envelope', 'mixer']) &&
-        color(s.color) && finite(s.frequency) && finite(s.detune) &&
+        color(s.color) && (s.muted === undefined || typeof s.muted === 'boolean') && finite(s.frequency) && finite(s.detune) &&
+        (s.bypassed === undefined || typeof s.bypassed === 'boolean') &&
+        (s.tapMode === undefined || oneOf(s.tapMode, ['mute', 'bypass'])) &&
+        (s.showBypass === undefined || typeof s.showBypass === 'boolean') &&
         within(s.cutoff, 20, 20000) && within(s.gain, 0, 2) &&
         within(s.delayTime, 0, 5) && within(s.feedback, 0, 1) &&
         within(s.decay, 0.01, 10) && within(s.attack, 0.001, 5) &&

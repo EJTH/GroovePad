@@ -374,6 +374,7 @@ test('loop data is copied independently and validates through project save/load'
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     loop.settings.volume = 0.5
     loop.settings.muted = true
+    loop.settings.countIn = true
     loop.settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 3.5, duration: 1 })
     const copy = copyControl(loop, 'copy')
     copy.settings.clips[0][0].note = 61
@@ -387,6 +388,7 @@ test('loop data is copied independently and validates through project save/load'
     assert.deepEqual(loaded.banks[0].layout.items[0].settings.clips, loop.settings.clips)
     assert.equal(loaded.banks[0].layout.items[0].settings.volume, 0.5)
     assert.equal(loaded.banks[0].layout.items[0].settings.muted, true)
+    assert.equal(loaded.banks[0].layout.items[0].settings.countIn, true)
     loop.settings.clips[0][0].position = 4
     assert.equal(isSavedProject(project), false)
   } finally { await server.close() }
@@ -494,7 +496,7 @@ test('stopped repeat timing shares a continuous tempo-aware clock', async () => 
   } finally { await server.close() }
 })
 
-test('one-bar count-in clicks before armed playback and recording, including clip changes', async () => {
+test('legacy count-in settings do not delay playback or recording', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
@@ -502,39 +504,25 @@ test('one-bar count-in clicks before armed playback and recording, including cli
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     Object.assign(loop.settings, { armed: true, countIn: true, syncMode: 'immediate' })
     loop.settings.clips[0].push({ instrumentId: 'pad', note: 60, velocity: 100, position: 0, duration: 1 })
-    loop.settings.clips[1] = [{ instrumentId: 'pad', note: 62, velocity: 100, position: 0, duration: 1 }]
     let beat = 0
-    const clicks = []
     const played = []
-    const engine = new SequencedLoopEngine(() => [loop], () => beat, (_id, note, on) => played.push([note.note, on]),
-      () => {}, '', (item) => item.settings.clipIndex, (value) => clicks.push(value))
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, (_id, note, on) => played.push([note.note, on]))
     engine.toggle(loop)
     engine.tick()
-    assert.equal(engine.isCounting('loop'), true)
+    assert.deepEqual(played, [[60, true]])
     beat = 0.5
     engine.record('pad', 65, 100, undefined, true)
     engine.recordAutomation('knob', 'value', 80)
-    loop.settings.clipIndex = 1
-    for (beat of [1, 2, 3]) { engine.tick(); engine.tick() }
-    assert.deepEqual(clicks, [0, 1, 2, 3])
-    assert.deepEqual(played, [])
-    assert.equal(loop.settings.automation[1]?.length ?? 0, 0)
-    beat = 4
-    engine.tick()
-    assert.equal(engine.isCounting('loop'), false)
-    assert.deepEqual(played, [[62, true]])
+    assert.equal(loop.settings.automation[0].length, 1)
+    beat = 0.75
     engine.record('pad', 65, 100, undefined, false)
-    assert.equal(loop.settings.clips[1].length, 1)
-    engine.record('pad', 67, 100, undefined, true)
-    beat = 4.5
-    engine.record('pad', 67, 100, undefined, false)
-    assert.equal(loop.settings.clips[1][1].position, 0)
-    assert.equal(loop.settings.clips[1][1].duration, 0.5)
+    assert.equal(loop.settings.clips[0][1].position, 0.5)
+    assert.equal(loop.settings.clips[0][1].duration, 0.25)
     engine.stop()
   } finally { await server.close() }
 })
 
-test('count-in respects sync boundaries and cancels on stop or disarm', async () => {
+test('legacy count-in settings preserve normal sync boundaries', async () => {
   const server = await createServer({ server: { middlewareMode: true }, logLevel: 'silent' })
   try {
     const { createControl } = await server.ssrLoadModule('/src/grid.ts')
@@ -542,28 +530,22 @@ test('count-in respects sync boundaries and cancels on stop or disarm', async ()
     const loop = createControl('loop', 0, 0, 'sequenced-loop')
     Object.assign(loop.settings, { armed: true, countIn: true, barLength: 2 })
     let beat = 1.5
-    const clicks = []
-    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {}, () => {}, '',
-      (item) => item.settings.clipIndex, (value) => clicks.push(value))
+    const engine = new SequencedLoopEngine(() => [loop], () => beat, () => {})
     engine.toggle(loop)
-    for (beat of [2, 3, 4, 5, 6, 7]) engine.tick()
-    assert.deepEqual(clicks, [4, 5, 6, 7])
-    assert.equal(engine.isCounting('loop'), true)
+    assert.equal(engine.isPending('loop'), true)
+    beat = 7
+    engine.tick()
+    assert.equal(engine.isPending('loop'), true)
     beat = 8
     engine.tick()
-    assert.equal(engine.isCounting('loop'), false)
+    assert.equal(engine.isPending('loop'), false)
+    assert.equal(engine.playhead('loop', 0), 0)
     engine.stop()
-    beat = 9
     engine.toggle(loop)
+    engine.tick()
+    assert.equal(engine.isPending('loop'), false)
+    assert.equal(engine.playhead('loop', 0), 0)
     engine.stop()
-    beat = 16
-    engine.tick()
-    assert.deepEqual(clicks, [4, 5, 6, 7])
-    beat = 17
-    engine.toggle(loop)
-    loop.settings.armed = false
-    engine.tick()
-    assert.equal(engine.isCounting('loop'), false)
   } finally { await server.close() }
 })
 

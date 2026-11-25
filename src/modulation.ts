@@ -36,6 +36,11 @@ function hasMapping(wire: Connection): boolean {
     wire.modulationMax !== undefined || wire.modulationAmount !== undefined
 }
 
+function absoluteToneKnob(target: GridItem | undefined, source: GridItem): boolean {
+  return source.type === 'knob' && target?.type === 'tone-element' &&
+    target.settings.elementType !== 'oscillator' && target.settings.elementType !== 'noise'
+}
+
 export function connectionMappingMode(layout: GridLayout, wire: Connection): 'mod' | 'abs' {
   if (wire.mappingMode) return wire.mappingMode
   if (hasMapping(wire)) return 'mod'
@@ -46,6 +51,7 @@ export function connectionMappingMode(layout: GridLayout, wire: Connection): 'mo
     const source = layout.items.find((item) => item.id === sourceWire!.sourceId)
     if (!source) return 'abs'
     if (source.type !== 'output-selector') {
+      if (absoluteToneKnob(target, source)) return 'abs'
       return source.type === 'knob' || (source.type === 'mod-wheel' && source.settings.autoCenter) ? 'mod' : 'abs'
     }
     const incoming: Connection | undefined = layout.connections.find((entry) => entry.targetId === source.id && entry.targetParameter === 'value')
@@ -323,7 +329,9 @@ export function effectiveControls(layout: GridLayout, signals: ReadonlyMap<strin
         if (!signal) continue
         driven = true
         const offset = modulationOffset(wire, signal)
-        if (wire.mappingMode === 'abs') absolute = absoluteMappingValue(wire, signal, input.min, input.max)
+        if (wire.mappingMode === 'abs' || (!entry.signal && !hasMapping(wire) && absoluteToneKnob(item, signal.source))) {
+          absolute = absoluteMappingValue(wire, signal, input.min, input.max)
+        }
         else if (offset !== undefined) adjustment += offset * (input.max - input.min)
         else if (signal.source.type === 'knob') adjustment += signal.value
         else if (signal.source.type === 'mod-wheel' && signal.source.settings.autoCenter) adjustment += signal.value * (input.max - input.min)

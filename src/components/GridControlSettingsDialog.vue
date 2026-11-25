@@ -114,7 +114,9 @@ const liveItem = computed(() => {
         const nextPath = [...path, key]
         if (nextPath[0] !== 'settings') return value
         if (value !== null && typeof value === 'object' && !Array.isArray(value)) return wrap(value, nextPath)
-        if (!settingPaths.value.has(nextPath.join('.'))) return value
+        const toneParameter = item.type === 'tone-element' && nextPath.length === 2 &&
+          inputs(item).some((input) => input.kind === 'number' && input.id === nextPath[1])
+        if (!toneParameter && !settingPaths.value.has(nextPath.join('.'))) return value
         const display = props.displayItem
         if (!display || display.id !== item.id || display.type !== item.type ||
           (item.type === 'instrument-pad' && display.type === 'instrument-pad' &&
@@ -272,6 +274,7 @@ function changeToneElementType(event: Event) {
   }
   if (item.label === toneElementLabels[item.settings.elementType]) item.label = toneElementLabels[type]
   item.settings.elementType = type
+  item.settings.bypassed = false
   if (type === 'noise' && item.settings.noteMode === 'always-on') item.settings.noteMode = 'gated'
   lastLabel = item.label
   message.value = ''

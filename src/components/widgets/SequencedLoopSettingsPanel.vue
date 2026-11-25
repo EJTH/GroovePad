@@ -101,7 +101,6 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
       </label>
     </fieldset>
     <label v-if="!editorOnly" class="inline-checkbox"><input :checked="draft.settings.armed" type="checkbox" @change="emit('arm-change', ($event.target as HTMLInputElement).checked)"> Armed for record</label>
-    <label v-if="!editorOnly" class="inline-checkbox"><input v-model="draft.settings.countIn" type="checkbox"> One-bar count-in before recording</label>
     <label v-if="!editorOnly">Record from <select v-model="draft.settings.recordScope">
       <option value="bank">Current bank</option><option value="all">All banks</option>
     </select></label>

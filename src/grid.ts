@@ -129,7 +129,7 @@ export interface SequencedLoopSettings {
   clipIndex: number
   armed: boolean
   playing?: boolean
-  countIn: boolean
+  countIn: boolean // Retained for compatibility with saved projects; ignored during playback.
   metronome: boolean
   syncMode: 'immediate' | 'sync'
   quantize: LoopQuantize
@@ -164,6 +164,10 @@ export type ToneNotePriority = 'last' | 'highest' | 'lowest'
 export interface ToneElementSettings {
   elementType: ToneElementKind
   color: string
+  muted?: boolean
+  bypassed?: boolean
+  tapMode?: 'mute' | 'bypass'
+  showBypass?: boolean
   frequency: number
   detune: number
   cutoff: number

@@ -25,14 +25,16 @@ describe what has actually been delivered.
 - Typed audio, note and numeric connections, selector routing, nested ports,
   automatic inserts and feedback validation are implemented. Instruments
   route through the bank audio graph.
-- The envelope processor now uses a shared envelope signal to drive its audio
-  gain. This is preparation for audio-rate modulation, **not** the completed
-  modulation refactor: envelope values and LFO output still reach control
-  routing through animation-frame updates.
+- The envelope processor uses a shared envelope signal to drive its audio gain.
+  An initial modulation graph creates Tone.js LFOs and attempts to route direct
+  LFO and envelope wires to some Tone.js parameters. This is **not a completed
+  or verified modulation refactor**: the sampled control path still exists,
+  and the graph has correctness and coverage gaps listed below.
 
-The latest full test run passed 166 tests and the build passed. An isolated
-offline browser check also verified the refactored envelope's audible gate.
-These checks do not replace the end-to-end testing listed below.
+The latest full test run passed 172 tests and the build passed. An earlier
+isolated offline browser check verified the envelope's audible gate, not the
+new modulation graph. No rendered-audio or background-tab tests were added for
+the new routing; the passing suite does not establish that it works correctly.
 
 ## Adding elements
 
@@ -142,18 +144,26 @@ including inside a SubGrid.
 
 ### Decouple modulation from rendering
 
-1. Move continuous LFO and envelope modulation for suitable audio parameters
-   into the audio graph. The shared envelope signal is already available; LFO
-   generation and audio-rate routing are still to be implemented. Widgets
-   should observe modulation for display, not drive audio from animation frames.
-2. Keep selectors and settings that are not audio parameters on a separate
-   control-rate path. Explicitly handle the boundary between audio and control
-   signals; do not imply that browser timers are reliable in background tabs.
-3. Preserve existing mappings and behavior: source ranges, absolute and
-   additive modulation, clamping, multiple inputs, selectors, nested SubGrid
-   ports, LFO hold, waveforms, depth, offset and smoothing. A signal reaching
-   an audio parameter must not also be applied through the old sampled path.
-4. Test rendered audio as well as control values, including simultaneous
+1. Correct the initial graph before treating it as working modulation. It
+   currently casts envelope ADSR settings, which are scalar values, to audio
+   parameters; random is not a supported Tone.js oscillator type; and the
+   manual LFO hold is not passed to the audio graph. Ensure hold preserves
+   the current value and phase, sync works with the app transport, and graph
+   updates do not restart LFOs unnecessarily.
+2. Complete audio-rate routing for suitable parameters, including oscillator
+   and instrument targets where supported, selectors and nested SubGrid ports.
+   The initial graph only examines direct local wires. Keep selectors and
+   settings that are not audio parameters on a separate control-rate path;
+   explicitly handle the boundary without implying browser timers are reliable
+   in background tabs. Widgets should observe the audio source rather than
+   generate an independent LFO for audio.
+3. Restore and preserve existing behavior for control-driven processor
+   settings: the graph is currently updated from saved layout items rather
+   than effective controls. Reconcile audio-rate and sampled inputs without
+   applying a signal twice. Implement and verify source ranges, absolute and
+   additive mapping, clamping, multiple inputs, waveforms, depth, offset and
+   smoothing, including changes while playing.
+4. Add tests for rendered audio as well as control values, including simultaneous
    sources, selectors, nested ports, hold/release, changes while playing and
    save/reload. Check background-tab behavior when the audio context remains
    running, and surface audio initialization or processing failures.

@@ -115,6 +115,7 @@ onBeforeMount(() => {
     audioGraph.value.update(props.layout, props.parentAudioPorts, {
       hold: new Map(props.layout.items.filter((item) => item.type === 'lfo').map((item) => [item.id, false])),
       bpm: props.bpm,
+      toneSettings: effectiveToneSettings(),
     })
   } catch (error) {
     audioError.value = `Audio routing error: ${error instanceof Error ? error.message : String(error)}`
@@ -258,6 +259,10 @@ void loopAutomation
 void toggleLoop
 void changeLoopIndex
 const renderedItems = computed(() => displayItems.value.map((item, index) => ({ item, original: props.layout.items[index]! })))
+function effectiveToneSettings() {
+  return new Map(displayItems.value.flatMap((item) =>
+    item.type === 'tone-element' ? [[item.id, item.settings] as const] : []))
+}
 const latchedOscillatorNotes = new Map<string, HeldNote>()
 watch(() => renderedItems.value.flatMap(({ item, original }) => {
   if (item.type !== 'tone-element' || item.settings.elementType !== 'oscillator' || original.type !== 'tone-element') return []
@@ -337,7 +342,7 @@ function updateAudioGraph(layout: GridLayout) {
       const value = effectiveSignals.value.get(`${item.id}:hold`)
       hold.set(item.id, value !== undefined ? value >= 0.5 : false)
     }
-    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts, { hold, bpm: props.bpm })
+    const rerouted = audioGraph.value.update(layout, props.parentAudioPorts, { hold, bpm: props.bpm, toneSettings: effectiveToneSettings() })
     for (const item of layout.items) if (item.type === 'tone-element' && item.settings.elementType === 'envelope') {
       audioGraph.value.setNotes(item.id, receivedToneNotes(item.id))
     }
@@ -351,6 +356,7 @@ function updateAudioGraph(layout: GridLayout) {
 watch(() => ({ ...props.layout, items: props.layout.items }), updateAudioGraph, { deep: true })
 watch([() => props.bpm, () => effectiveSignals.value], () => updateAudioGraph({ ...props.layout, items: props.layout.items }),
   { flush: 'post' })
+watch(effectiveToneSettings, () => updateAudioGraph({ ...props.layout, items: props.layout.items }), { flush: 'post' })
 watch(() => props.parentAudioPorts?.map(({ port, node }) => [node, port.id, port.direction, port.itemId, port.parameterId] as const),
   (current, previous) => {
     if (current?.length === previous?.length && current?.every((entry, index) =>
@@ -1184,20 +1190,31 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
             </SubGrid>
             <ToneOscillator v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'oscillator' && audioGraph?.getOutput(item.id)"
               :label="item.label" :settings="item.settings" :base-frequency="original.settings.frequency"
-              :notes="receivedToneNotes(item.id)" :audio-output="audioGraph?.getOutput(item.id)" />
-            <ToneNoise v-else-if="item.type === 'tone-element' && item.settings.elementType === 'noise' && audioGraph?.getOutput(item.id)"
+              :notes="receivedToneNotes(item.id)" :audio-output="audioGraph?.getInput(item.id)" :muted="!!original.settings.muted"
+              @toggle-mute="original.settings.muted = !original.settings.muted" />
+            <ToneNoise v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'noise' && audioGraph?.getOutput(item.id)"
               :label="item.label" :settings="item.settings" :notes="receivedToneNotes(item.id)"
-              :audio-output="audioGraph?.getOutput(item.id)" />
-            <ADSREnvelopeEditor v-else-if="item.type === 'tone-element' && item.settings.elementType === 'envelope'"
-              compact :title="item.label" :envelope="item.settings" :color="item.settings.color"
-              :show-visualizer="item.settings.showVisualizer ?? true" :show-knobs="item.settings.showKnobs ?? true"
-              :attack-max="5" :decay-min="0.01" :decay-max="10"
-              @change="(parameter, output) => changeEnvelope(item, parameter, output)" @activity="setSettingGesture"
-              @open-settings="openSettings(original)" />
-            <ChannelMixer v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && item.settings.elementType === 'mixer'"
-              :label="item.label" :color="item.settings.color" :channels="mixerChannelControls(original)"
-              @change="(id, parameter, value) => changeMixerChannel(original, id, parameter, value)" />
-            <ToneElement v-else-if="item.type === 'tone-element'" :label="item.label" :settings="item.settings" />
+              :audio-output="audioGraph?.getInput(item.id)" :muted="!!original.settings.muted"
+              @toggle-mute="original.settings.muted = !original.settings.muted" />
+            <div v-else-if="item.type === 'tone-element' && original.type === 'tone-element' && (item.settings.elementType === 'envelope' || item.settings.elementType === 'mixer')" class="tone-with-bypass">
+              <div class="tone-bypass-content">
+                <ADSREnvelopeEditor v-if="item.settings.elementType === 'envelope'"
+                  compact :title="item.label" :envelope="item.settings" :color="item.settings.color"
+                  :show-visualizer="item.settings.showVisualizer ?? true" :show-knobs="item.settings.showKnobs ?? true"
+                  :attack-max="5" :decay-min="0.01" :decay-max="10"
+                  @change="(parameter, output) => changeEnvelope(item, parameter, output)" @activity="setSettingGesture"
+                  @open-settings="openSettings(original)" />
+                <ChannelMixer v-else :label="item.label" :color="item.settings.color" :channels="mixerChannelControls(original)"
+                  @change="(id, parameter, value) => changeMixerChannel(original, id, parameter, value)" />
+              </div>
+              <button v-if="original.settings.showBypass || original.settings.bypassed" type="button" class="tone-bypass-button"
+                :aria-label="`${original.settings.bypassed ? 'Enable' : 'Bypass'} ${item.label}`"
+                :aria-pressed="!!original.settings.bypassed" :disabled="!audioGraph?.getOutput(item.id)"
+                @click="original.settings.bypassed = !original.settings.bypassed">{{ original.settings.bypassed ? 'Bypassed' : 'Bypass' }}</button>
+            </div>
+            <ToneElement v-else-if="item.type === 'tone-element' && original.type === 'tone-element'" :label="item.label" :settings="original.settings"
+              :available="!!audioGraph?.getOutput(item.id) && ['filter', 'gain', 'delay', 'reverb'].includes(item.settings.elementType)"
+              @toggle-mute="original.settings.tapMode === 'bypass' ? original.settings.bypassed = !original.settings.bypassed : original.settings.muted = !original.settings.muted" />
             <SequencedLoop v-else-if="item.type === 'sequenced-loop' && original.type === 'sequenced-loop'"
               :item="item" :original="original" :playing="playing" :status="loopStatus.get(item.id)"
               :playhead="loopPlayheads.get(item.id)" :wants-playback="loopWantsPlayback(item)" :gesture="loopGesture(item.id)"

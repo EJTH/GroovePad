@@ -4,7 +4,7 @@
 import { nextTick, onUnmounted, ref, watch, type Ref } from 'vue'
 import * as Tone from 'tone'
 import type { Bank } from '../project'
-import { BankEventBus, Metronome, TransportClock } from '../sequencedLoop'
+import { Metronome, TransportClock } from '../sequencedLoop'
 import { gridScopes } from '../grid'
 
 export function useTransport(options: {
@@ -12,17 +12,14 @@ export function useTransport(options: {
   bpm: Ref<number>
   editing: Ref<boolean>
   projectError: Ref<string>
-  bankEvents: BankEventBus
 }) {
   const playing = ref(false)
-  const countingIn = ref(false)
   const triggeredByInput = ref(false)
   const metronomeEnabled = ref(false)
   const transportClock = new TransportClock()
   const beat = ref(0)
   let beatTimer: number | undefined
   let metronomeTimer: number | undefined
-  let countInTimer: number | undefined
   let clickSynth: Tone.Synth | undefined
   let startingTransport = false
 
@@ -38,10 +35,6 @@ export function useTransport(options: {
       options.projectError.value = `Metronome audio failed: ${error instanceof Error ? error.message : String(error)}`
       console.error(options.projectError.value, error)
     }
-  })
-
-  const unsubscribeClicks = options.bankEvents.subscribe((event) => {
-    if (event.kind === 'count-in-click' && playing.value) metronome.click(event.beat)
   })
 
   function updateBeatTimer() {
@@ -73,7 +66,7 @@ export function useTransport(options: {
 
   async function startFromInput(bankId: string): Promise<boolean> {
     if (playing.value) return true
-    if (startingTransport || countingIn.value || options.editing.value || !gridScopes(options.banks.value).some((bank) =>
+    if (startingTransport || options.editing.value || !gridScopes(options.banks.value).some((bank) =>
       bank.layout.items.some((item) => item.type === 'sequenced-loop' && item.settings.armed &&
         (bank.id === bankId || item.settings.recordScope === 'all')))) return false
     startingTransport = true
@@ -91,14 +84,11 @@ export function useTransport(options: {
 
   async function togglePlayback() {
     if (startingTransport) return
-    if (playing.value || countingIn.value) {
+    if (playing.value) {
       playing.value = false
-      countingIn.value = false
       transportClock.stop()
       if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
-      if (countInTimer !== undefined) window.clearInterval(countInTimer)
       metronomeTimer = undefined
-      countInTimer = undefined
       beat.value = 0
       updateBeatTimer()
       return
@@ -111,25 +101,7 @@ export function useTransport(options: {
       console.error(options.projectError.value, error)
       return
     } finally { startingTransport = false }
-    const countIn = gridScopes(options.banks.value).some((bank) => bank.layout.items.some((item) =>
-      item.type === 'sequenced-loop' && item.settings.armed && item.settings.countIn))
-    if (!countIn) { beginPlayback(false); return }
-    countingIn.value = true
-    metronome.reset()
-    transportClock.start(options.bpm.value)
-    metronome.click(0)
-    countInTimer = window.setInterval(() => {
-      const position = transportClock.position()
-      if (position >= 4) {
-        window.clearInterval(countInTimer)
-        countInTimer = undefined
-        countingIn.value = false
-        beginPlayback(false)
-      } else {
-        beat.value = Math.floor(position)
-        metronome.click(beat.value)
-      }
-    }, 20)
+    beginPlayback(false)
   }
 
   watch(options.bpm, () => {
@@ -140,10 +112,8 @@ export function useTransport(options: {
   onUnmounted(() => {
     if (beatTimer !== undefined) window.clearInterval(beatTimer)
     if (metronomeTimer !== undefined) window.clearInterval(metronomeTimer)
-    if (countInTimer !== undefined) window.clearInterval(countInTimer)
-    unsubscribeClicks()
     clickSynth?.dispose()
   })
 
-  return { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput }
+  return { playing, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput }
 }

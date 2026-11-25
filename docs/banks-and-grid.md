@@ -44,6 +44,10 @@ The rest of the settings depend on the control type. Changes are applied through
 
 For an envelope Tone.js element, the visualizer and knobs can be shown or hidden independently in control settings. If both are hidden, select the envelope widget in play mode to reopen its settings.
 
+Tap a Tone.js widget with no visible controls in play mode to mute or unmute its audio output. This applies to filters, gain, delay and reverb, and to oscillator and noise modes without a Start/Stop button. Effect settings and note playback remain unchanged.
+
+For filter, gain, delay and reverb, choose **Bypass effect** under **Tap action** to switch between the processed and unprocessed input instead of muting. Envelope and mixer settings can optionally show a bypass button; mixer bypass passes inputs through without channel or master processing.
+
 ## Importing banks
 
 Banks can be imported from JSON, ZIP, or GPZ files. A project archive may contain multiple banks, in which case GroovePad asks which bank to import. A bank with loop or automation references to other banks must be imported as part of the complete project so those references are preserved.

@@ -253,12 +253,11 @@ async function toggleSessionRecording() {
   }
 }
 
-const { playing, countingIn, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput } = useTransport({
+const { playing, triggeredByInput, metronomeEnabled, transportClock, beat, togglePlayback, startFromInput } = useTransport({
   banks,
   bpm,
   editing,
   projectError,
-  bankEvents,
 })
 const busy = ref(false)
 const projectInput = ref<HTMLInputElement | null>(null)
@@ -550,11 +549,11 @@ onUnmounted(() => {
         <button
           class="transport-button"
           type="button"
-          :aria-label="playing || countingIn ? 'Pause' : 'Play'"
-          :aria-pressed="playing || countingIn"
+          :aria-label="playing ? 'Pause' : 'Play'"
+          :aria-pressed="playing"
           @click="togglePlayback"
         >
-          <svg v-if="playing || countingIn" viewBox="0 0 24 24" aria-hidden="true">
+          <svg v-if="playing" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M8 5h3v14H8zM14 5h3v14h-3z" />
           </svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true">
@@ -584,7 +583,7 @@ onUnmounted(() => {
             <span
               v-for="index in 4"
               :key="index"
-              :class="{ active: (playing || countingIn) && beat === index - 1 }"
+              :class="{ active: playing && beat === index - 1 }"
             ></span>
           </div>
         </div>
