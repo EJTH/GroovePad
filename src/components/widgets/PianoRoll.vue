@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, watch } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { noteName, scaleNote, scales } from '../../music'
 import { ExpressionTracker } from '../../expression'
 import type { ParameterOutput, PianoRollSettings, RepeatDivision } from '../../grid'
@@ -8,8 +8,9 @@ import { useNoteRepeat } from '../useNoteRepeat'
 
 const props = defineProps<{ label: string; settings: PianoRollSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock }>()
 const emit = defineEmits<{ output: [output: ParameterOutput] }>()
-const pointers = reactive(new Map<number, number>())
-const keys = reactive(new Set<number>())
+const pointers = new Map<number, number>()
+const keys = new Set<number>()
+const keyElements = new Map<number, HTMLButtonElement>()
 const expression = new ExpressionTracker()
 
 const notes = computed(() => {
@@ -51,6 +52,20 @@ function octaveTranspose() {
 
 function layoutNote(note: number) {
   return props.settings.style === 'whites-blacks' ? note - octaveTranspose() : note
+}
+
+function updateKeyDisplay(note: number) {
+  const active = [...pointers.values()].includes(note) || keys.has(note)
+  const element = keyElements.get(note)
+  element?.classList.toggle('active', active)
+  element?.setAttribute('aria-pressed', String(active))
+}
+
+function setKeyElement(note: number, element: unknown) {
+  if (element instanceof HTMLButtonElement) {
+    keyElements.set(note, element)
+    updateKeyDisplay(note)
+  } else keyElements.delete(note)
 }
 
 function whiteIndex(note: number) {
@@ -127,6 +142,7 @@ function down(event: PointerEvent, note: number) {
   event.preventDefault()
   target.setPointerCapture(event.pointerId)
   pointers.set(event.pointerId, note)
+  updateKeyDisplay(note)
   const velocity = pointerExpression(event, target)
   sendPressure()
   send(note, true, velocity, props.settings.style === 'glide-strip' ? bendAt(event, target) : undefined)
@@ -135,6 +151,7 @@ function up(event: PointerEvent) {
   const note = pointers.get(event.pointerId)
   if (note === undefined) return
   pointers.delete(event.pointerId)
+  updateKeyDisplay(note)
   send(note, false)
   expression.remove(event.pointerId)
   sendPressure()
@@ -162,7 +179,9 @@ function move(event: PointerEvent) {
   }
 
   send(currentNote, false)
+  updateKeyDisplay(currentNote)
   pointers.set(event.pointerId, newNote)
+  updateKeyDisplay(newNote)
   send(newNote, true, velocity, bend)
 }
 function keyDown(event: KeyboardEvent, note: number) {
@@ -170,6 +189,7 @@ function keyDown(event: KeyboardEvent, note: number) {
   if ((event.key !== 'Enter' && event.key !== ' ') || event.repeat || keys.has(note)) return
   event.preventDefault()
   keys.add(note)
+  updateKeyDisplay(note)
   expression.set(`key:${note}`, 100)
   sendPressure()
   send(note, true)
@@ -181,16 +201,19 @@ function keyUp(event: KeyboardEvent, note: number) {
 }
 function releaseKey(note: number) {
   if (!keys.delete(note)) return
+  updateKeyDisplay(note)
   send(note, false)
   expression.remove(`key:${note}`)
   sendPressure()
 }
 function releaseAll() {
   const hadContacts = pointers.size > 0 || keys.size > 0
+  const activeNotes = new Set([...pointers.values(), ...keys])
   for (const note of pointers.values()) send(note, false)
   for (const note of keys) send(note, false)
   pointers.clear()
   keys.clear()
+  for (const note of activeNotes) updateKeyDisplay(note)
   expression.clear()
   if (hadContacts) sendPressure()
 }
@@ -205,8 +228,8 @@ onBeforeUnmount(releaseAll)
     <div v-for="(row, rowIndex) in rows" :key="rowIndex" class="key-row"
       :style="settings.style === 'whites-blacks' ? pianoRowStyle(row) : undefined">
       <button v-for="item in row" :key="item.index" type="button" class="key"
+        :ref="(element) => setKeyElement(item.note, element)"
         :class="[
-          { active: [...pointers.values()].includes(item.note) || keys.has(item.note) },
           (settings.style || 'pads') === 'pads' && 'mpc-surface',
           settings.style === 'whites-blacks' && (isWhiteKey(item.note) ? 'white' : 'black'),
           settings.style === 'pads' && !isWhiteKey(item.note) && 'black',

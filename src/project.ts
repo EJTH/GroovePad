@@ -65,6 +65,7 @@ function validSample(params: Record<string, unknown>, start: unknown, end: unkno
 function validInstrument(settings: Record<string, unknown>): boolean {
   const params = settings.instrumentParams
   if (!color(settings.color) || !oneOf(settings.mode, ['trigger', 'toggle']) ||
+    (settings.chokeGroup !== undefined && !integer(settings.chokeGroup, 1, 16)) ||
     (settings.muted !== undefined && typeof settings.muted !== 'boolean') ||
     !object(params) || !within(params.volume, -48, 0) || !validEnvelope(params.envelope)) return false
   switch (settings.instrumentType) {

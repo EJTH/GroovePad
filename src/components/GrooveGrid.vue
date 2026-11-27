@@ -89,6 +89,10 @@ const displayedAudioError = computed(() => [audioError.value, processorError.val
 watch(displayedAudioError, (error) => emit('audioError', error))
 watch(() => props.layout.items.map((item) => item.id), (ids) => {
   for (const id of nestedAudioErrors.keys()) if (!ids.includes(id)) nestedAudioErrors.delete(id)
+  for (const map of [padDisplays, instrumentPadDisplays, padDisplayRefs, instrumentPadDisplayRefs,
+    controlOutputHandlers, controlOutputListenerSets, instrumentLiveNoteHandlers, instrumentPadListenerSets]) {
+    for (const id of map.keys()) if (!ids.includes(id)) map.delete(id)
+  }
 })
 function setNestedAudioError(id: string, error: string) {
   if (error) nestedAudioErrors.set(id, error)
@@ -348,6 +352,7 @@ watch(() => (props.ownerSettings?.exposedPorts ?? []).filter((port) => port.kind
 }, { immediate: true })
 function updateAudioGraph(layout: GridLayout) {
   if (!audioGraph.value) return
+  audioOnlyLfoCache.clear()
   try {
     const rerouted = audioGraph.value.update(layout, props.parentAudioPorts, {
       bpm: props.bpm, toneSettings: effectiveToneSettings(), baseItems: automationItems.value,
@@ -404,6 +409,84 @@ watch([activeNotes, boundaryActiveNotes], () => {
     audioGraph.value?.setNotes(item.id, receivedToneNotes(item.id))
   }
 }, { deep: true, flush: 'sync' })
+function playbackWidgetStates(): Array<
+  | { type: 'pad'; id: string; active: boolean }
+  | { type: 'instrument-pad'; id: string; notes: HeldNote[]; loopNotes: HeldNote[] }
+> {
+  const states: Array<
+    | { type: 'pad'; id: string; active: boolean }
+    | { type: 'instrument-pad'; id: string; notes: HeldNote[]; loopNotes: HeldNote[] }
+  > = []
+  for (const item of props.layout.items) {
+    if (item.type === 'pad') states.push({ type: 'pad', id: item.id, active: padActive(item.id) })
+    else if (item.type === 'instrument-pad') states.push({
+      type: 'instrument-pad', id: item.id, notes: receivedNotes(item.id), loopNotes: recordedNotes(item.id),
+    })
+  }
+  return states
+}
+interface PadDisplay {
+  setWiredActive(active: boolean): void
+}
+interface InstrumentPadDisplay {
+  setPlaybackNotes(notes: HeldNote[], loopNotes: HeldNote[]): void
+  setDisplaySettings(settings: Extract<GridItem, { type: 'instrument-pad' }>['settings']): void
+  choke(): void
+}
+const padDisplays = new Map<string, PadDisplay>()
+const instrumentPadDisplays = new Map<string, InstrumentPadDisplay>()
+function isPadDisplay(instance: unknown): instance is PadDisplay {
+  return typeof instance === 'object' && instance !== null && 'setWiredActive' in instance &&
+    typeof instance.setWiredActive === 'function'
+}
+function isInstrumentPadDisplay(instance: unknown): instance is InstrumentPadDisplay {
+  return typeof instance === 'object' && instance !== null && 'setPlaybackNotes' in instance &&
+    typeof instance.setPlaybackNotes === 'function' && 'setDisplaySettings' in instance &&
+    typeof instance.setDisplaySettings === 'function' && 'choke' in instance &&
+    typeof instance.choke === 'function'
+}
+function setPadDisplay(id: string, instance: unknown) {
+  if (!isPadDisplay(instance)) { padDisplays.delete(id); return }
+  padDisplays.set(id, instance)
+  instance.setWiredActive(padActive(id))
+}
+const padDisplayRefs = new Map<string, (instance: unknown) => void>()
+function padDisplayRef(id: string) {
+  let handler = padDisplayRefs.get(id)
+  if (!handler) {
+    handler = (instance) => setPadDisplay(id, instance)
+    padDisplayRefs.set(id, handler)
+  }
+  return handler
+}
+function setInstrumentPadDisplay(id: string, instance: unknown) {
+  if (!isInstrumentPadDisplay(instance)) { instrumentPadDisplays.delete(id); return }
+  instrumentPadDisplays.set(id, instance)
+  const item = displayItems.value.find((entry) => entry.id === id)
+  if (item?.type !== 'instrument-pad') return
+  instance.setDisplaySettings(item.settings)
+  instance.setPlaybackNotes(receivedNotes(id), recordedNotes(id))
+}
+const instrumentPadDisplayRefs = new Map<string, (instance: unknown) => void>()
+function instrumentPadDisplayRef(id: string) {
+  let handler = instrumentPadDisplayRefs.get(id)
+  if (!handler) {
+    handler = (instance) => setInstrumentPadDisplay(id, instance)
+    instrumentPadDisplayRefs.set(id, handler)
+  }
+  return handler
+}
+watch(playbackWidgetStates, (states) => {
+  for (const state of states) {
+    if (state.type === 'pad') padDisplays.get(state.id)?.setWiredActive(state.active)
+    else instrumentPadDisplays.get(state.id)?.setPlaybackNotes(state.notes, state.loopNotes)
+  }
+}, { deep: true, immediate: true, flush: 'sync' })
+watch(() => renderedItems.value.flatMap(({ item }) =>
+  item.type === 'instrument-pad' ? [{ id: item.id, settings: item.settings }] : []),
+  (items) => {
+    for (const item of items) instrumentPadDisplays.get(item.id)?.setDisplaySettings(item.settings)
+  }, { immediate: true, flush: 'sync' })
 const selectedDisplay = computed(() => displayItems.value.find((item) => item.id === selectedId.value))
 const selectedLoopPlayhead = computed(() => {
   const item = selectedControl.value
@@ -685,7 +768,10 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   const recordGate = output.parameter !== 'gate' ||
     props.layout.connections.some((connection) => connection.sourceId === item.id && connection.sourceParameter === 'gate') ||
     exposedOutputInUse('gate')
-  if (output.on === undefined && output.parameter !== 'note' && trackPressure) {
+  const trackSignal = output.parameter === 'pressure' ? trackPressure
+    : output.parameter === 'velocity' ? recordVelocity
+      : output.parameter === 'gate' ? recordGate : true
+  if (output.on === undefined && output.parameter !== 'note' && trackSignal) {
     if (output.active === false) signals.delete(`${item.id}:${output.parameter}`)
     else signals.set(`${item.id}:${output.parameter}`,
       original.type === 'knob' && output.parameter === 'value' ? original.settings.value : output.value)
@@ -713,6 +799,87 @@ function handleOutput(item: GridItem, output: ParameterOutput, user = false) {
   }
   routeNote(item.id, output)
 }
+
+const controlOutputHandlers = new Map<string, (output: ParameterOutput) => void>()
+const controlOutputListenerSets = new Map<string, { output: (output: ParameterOutput) => void }>()
+function controlOutputHandler(id: string) {
+  let handler = controlOutputHandlers.get(id)
+  if (!handler) {
+    handler = (output) => {
+      const item = displayItems.value.find((entry) => entry.id === id) ??
+        props.layout.items.find((entry) => entry.id === id)
+      if (item) handleOutput(item, output, true)
+    }
+    controlOutputHandlers.set(id, handler)
+  }
+  return handler
+}
+function controlOutputListeners(id: string) {
+  let listeners = controlOutputListenerSets.get(id)
+  if (!listeners) {
+    listeners = { output: controlOutputHandler(id) }
+    controlOutputListenerSets.set(id, listeners)
+  }
+  return listeners
+}
+const instrumentLiveNoteHandlers = new Map<string, (note: number, on: boolean, velocity: number, bend?: number) => void>()
+const instrumentPadListenerSets = new Map<string, {
+  output: (output: ParameterOutput) => void
+  liveNote: (note: number, on: boolean, velocity: number, bend?: number) => void
+  choke: (group: number) => void
+}>()
+function instrumentLiveNoteHandler(id: string) {
+  let handler = instrumentLiveNoteHandlers.get(id)
+  if (!handler) {
+    handler = (note, on, velocity, bend) => captureNote(id, note, on, velocity, bend)
+    instrumentLiveNoteHandlers.set(id, handler)
+  }
+  return handler
+}
+function instrumentPadListeners(id: string) {
+  let listeners = instrumentPadListenerSets.get(id)
+  if (!listeners) {
+    listeners = {
+      output: controlOutputHandler(id),
+      liveNote: instrumentLiveNoteHandler(id),
+      choke: (group) => {
+        for (const item of props.layout.items) {
+          if (item.type === 'instrument-pad' && item.id !== id && item.settings.chokeGroup === group) {
+            instrumentPadDisplays.get(item.id)?.choke()
+          }
+        }
+      },
+    }
+    instrumentPadListenerSets.set(id, listeners)
+  }
+  return listeners
+}
+const padSignalParameters = ['velocity', 'pressure', 'gate'] as const
+function routedPadSignalKeys() {
+  const keys: string[] = []
+  for (const item of props.layout.items) {
+    if (item.type !== 'pad' && item.type !== 'instrument-pad') continue
+    for (const parameter of padSignalParameters) {
+      const wired = props.layout.connections.some((connection) =>
+        connection.sourceId === item.id && connection.sourceParameter === parameter)
+      const exposed = props.ownerSettings?.exposedPorts.some((port) =>
+        port.direction === 'output' && port.itemId === item.id && port.parameterId === parameter &&
+        (parameter === 'pressure' || props.connectedPorts?.includes(port.id)))
+      if (wired || exposed) keys.push(`${item.id}:${parameter}`)
+    }
+  }
+  return keys
+}
+watch(routedPadSignalKeys, (keys) => {
+  const routed = new Set(keys)
+  for (const item of props.layout.items) {
+    if (item.type !== 'pad' && item.type !== 'instrument-pad') continue
+    for (const parameter of padSignalParameters) {
+      const key = `${item.id}:${parameter}`
+      if (!routed.has(key)) signals.delete(key)
+    }
+  }
+}, { immediate: true, flush: 'sync' })
 
 function routeNote(sourceId: string, output: ParameterOutput, selectedOverride?: Connection | null) {
   const source = props.layout.items.find((entry) => entry.id === sourceId)
@@ -998,6 +1165,9 @@ function sampleLfo(id: string, settings: Extract<GridItem, { type: 'lfo' }>['set
 }
 const knobDisplays = new Map<string, { setDisplayValue: (value?: number) => void }>()
 const bypassedKnobs = new Map<string, Set<string>>()
+const audioOnlyLfoCache = new Map<string, Set<string> | null>()
+const lfoKnobDisplayTimes = new Map<string, number>()
+const lfoKnobDisplayIntervalMs = 1000 / 12
 function setKnobDisplay(id: string, instance: unknown) {
   if (typeof instance === 'object' && instance !== null && 'setDisplayValue' in instance &&
     typeof instance.setDisplayValue === 'function') {
@@ -1008,6 +1178,7 @@ function setKnobDisplay(id: string, instance: unknown) {
 function audioOnlyLfo(id: string): Set<string> | undefined {
   const graph = audioGraph.value
   if (!graph || props.editing || props.wiring || props.settingsOpen || props.volumeMode) return undefined
+  if (audioOnlyLfoCache.has(id)) return audioOnlyLfoCache.get(id) ?? undefined
   const knobs = new Set<string>()
   const visiting = new Set<string>()
   function visit(sourceId: string): boolean {
@@ -1027,11 +1198,14 @@ function audioOnlyLfo(id: string): Set<string> | undefined {
     visiting.delete(sourceId)
     return safe
   }
-  return visit(id) ? knobs : undefined
+  const result = visit(id) ? knobs : undefined
+  audioOnlyLfoCache.set(id, result ?? null)
+  return result
 }
 function resetBypassedKnobs(id: string) {
   for (const knob of bypassedKnobs.get(id) ?? []) knobDisplays.get(knob)?.setDisplayValue()
   bypassedKnobs.delete(id)
+  lfoKnobDisplayTimes.delete(id)
 }
 function publishLfo(item: Extract<GridItem, { type: 'lfo' }>, value: number, audioAvailable: boolean) {
   const knobs = audioAvailable ? audioOnlyLfo(item.id) : undefined
@@ -1043,6 +1217,9 @@ function publishLfo(item: Extract<GridItem, { type: 'lfo' }>, value: number, aud
   const key = `${item.id}:value`
   if (signals.has(key)) signals.delete(key)
   bypassedKnobs.set(item.id, knobs)
+  const now = performance.now()
+  if (now - (lfoKnobDisplayTimes.get(item.id) ?? -Infinity) < lfoKnobDisplayIntervalMs) return
+  lfoKnobDisplayTimes.set(item.id, now)
   for (const id of knobs) {
     const target = props.layout.items.find((candidate) => candidate.id === id)
     const sample = audioGraph.value?.getModulationSample(id)
@@ -1053,6 +1230,7 @@ function publishLfo(item: Extract<GridItem, { type: 'lfo' }>, value: number, aud
   }
 }
 watch(() => JSON.stringify(props.layout.connections), () => {
+  audioOnlyLfoCache.clear()
   for (const id of [...bypassedKnobs.keys()]) resetBypassedKnobs(id)
 })
 function connectWire() {
@@ -1272,12 +1450,12 @@ function audioPortsForSubGrid(item: Extract<GridItem, { type: 'sub-grid' }>): Bo
         <Teleport :to="surfaceTarget || 'body'" :disabled="!surfaceTarget || !ownerSettings?.surfaceItemIds.includes(item.id)">
         <div class="grid-item" :style="surfaceTarget && ownerSettings?.surfaceItemIds.includes(item.id) ? surfaceStyle(original) : itemStyle(original)">
           <div v-show="!editing && !wiring && !volumeMode" class="grid-item-component" :class="{ rotated: item.orientation === 'vertical' }">
-            <MPCPad v-if="item.type === 'pad'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :wired-active="padActive(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
+            <MPCPad v-if="item.type === 'pad' && original.type === 'pad'" :ref="padDisplayRef(item.id)" :label="original.label" :settings="original.settings" :rotated="original.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" v-on="controlOutputListeners(item.id)" />
             <Knob v-else-if="item.type === 'knob'" :ref="(instance) => setKnobDisplay(item.id, instance)" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" emit-initial @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
             <LFO v-else-if="item.type === 'lfo'" :label="item.label" :settings="item.settings" :bpm="bpm" :source-id="item.id" :sample-lfo="sampleLfo" :publish-value="(value, available) => publishLfo(item, value, available)" />
             <ModWheel v-else-if="item.type === 'mod-wheel'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :automation-value="displayedAutomation(item.id, 'value')" @output="handleOutput(item, $event)" @activity="controlActivity(item.id, $event)" />
-            <PianoRoll v-else-if="item.type === 'piano-roll'" :label="item.label" :settings="item.settings" :rotated="item.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" />
-            <InstrumentPad v-else-if="item.type === 'instrument-pad'" :key="item.settings.instrumentType" :label="item.label" :settings="item.settings" :audio-output="audioGraph?.getOutput(item.id)" :audio-unavailable="!audioGraph?.getOutput(item.id)" :disabled="!audioGraph?.getOutput(item.id)" :rotated="item.orientation === 'vertical'" :notes="receivedNotes(item.id)" :loop-notes="recordedNotes(item.id)" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" @output="handleOutput(item, $event, true)" @live-note="(note, on, velocity, bend) => captureNote(item.id, note, on, velocity, bend)" />
+            <PianoRoll v-else-if="item.type === 'piano-roll' && original.type === 'piano-roll'" :label="original.label" :settings="original.settings" :rotated="original.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" v-on="controlOutputListeners(item.id)" />
+            <InstrumentPad v-else-if="item.type === 'instrument-pad' && original.type === 'instrument-pad'" :ref="instrumentPadDisplayRef(item.id)" :key="original.settings.instrumentType" :label="original.label" :settings="original.settings" :audio-output="audioGraph?.getOutput(item.id)" :audio-unavailable="!audioGraph?.getOutput(item.id)" :disabled="!audioGraph?.getOutput(item.id)" :rotated="original.orientation === 'vertical'" :repeat-division="repeatDivision" :bpm="bpm" :playing="playing" :transport-clock="clock" v-on="instrumentPadListeners(item.id)" />
             <OutputSelector v-else-if="item.type === 'output-selector'" :label="item.label"
               :destination="selectorDestination(item)" :value="selectorValue(item)"
               :flash-sequence="selectorFlash?.sourceId === item.id ? selectorFlash.sequence : 0"

@@ -26,6 +26,7 @@ export abstract class SamplePlayer implements InstrumentInstance {
   private readonly voices = new Set<Voice>()
   private readonly retiredPlayers = new Set<Tone.Player>()
   private generation = 0
+  private chokeGeneration = 0
   private nextCut = 0
   private disposed = false
   private pitchBend = 0
@@ -41,6 +42,7 @@ export abstract class SamplePlayer implements InstrumentInstance {
       throw new Error('Choose a sample file in the pad settings.')
     }
     const generation = this.generation
+    const chokeGeneration = this.chokeGeneration
     const noteGeneration = id === undefined ? undefined : (this.noteGenerations.get(id) ?? 0)
     if (id !== undefined) this.noteBends.set(id, bend)
     const hit = 'start' in this.params ? this.params : undefined
@@ -54,7 +56,7 @@ export abstract class SamplePlayer implements InstrumentInstance {
         throw error
       }
     }
-    if (this.disposed || (looping && generation !== this.generation) ||
+    if (this.disposed || chokeGeneration !== this.chokeGeneration || (looping && generation !== this.generation) ||
       (id !== undefined && noteGeneration !== (this.noteGenerations.get(id) ?? 0))) return
 
     const loop = this.type === 'sample-loop' && 'loopStart' in this.params ? this.params : undefined
@@ -255,6 +257,16 @@ export abstract class SamplePlayer implements InstrumentInstance {
         voice.envelope.triggerRelease(now)
         voice.player.stop(now + this.params.envelope.release)
       }
+    }
+  }
+
+  choke(): void {
+    this.generation++
+    this.chokeGeneration++
+    const now = Tone.now()
+    for (const voice of this.voices) {
+      voice.player.stop(now)
+      for (const player of voice.retired ?? []) player.stop(now)
     }
   }
 

@@ -33,6 +33,13 @@ function changeInstrumentType(type: InstrumentType) {
         <option value="toggle">Toggle input mute</option>
       </select>
     </label>
+    <label class="pad-mode-setting">
+      Choke group
+      <select v-model="draft.settings.chokeGroup">
+        <option :value="undefined">None</option>
+        <option v-for="group in 16" :key="group" :value="group">{{ group }}</option>
+      </select>
+    </label>
     <div class="instrument-types" role="group" aria-label="Instrument type">
       <button v-for="instrument in instrumentTypes" :key="instrument.type" type="button"
         :class="{ selected: draft.settings.instrumentType === instrument.type }"

@@ -364,7 +364,7 @@ function canSetModulationAmount(connection: Connection) {
   <SettingsDialog title="Control settings" @close="saveItem">
     <template #header-actions>
       <InstrumentPad v-if="liveItem.type === 'instrument-pad'" :key="liveItem.settings.instrumentType" class="preview-pad" label="Play"
-        :settings="{ ...liveItem.settings, mode: 'trigger' }" :notes="[]" :disabled="sampleLoading" />
+        :settings="{ ...liveItem.settings, mode: 'trigger' }" :disabled="sampleLoading" />
     </template>
     <form class="settings-form control-settings" @submit.prevent="saveItem">
       <ControlIdentitySettingsComponent ref="controlIdentity" :draft="draft" :layout="layout" :columns="layout.columns" :rows="layout.rows"

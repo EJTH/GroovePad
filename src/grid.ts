@@ -36,6 +36,7 @@ export interface InstrumentPadSettings {
   color: string
   instrumentType: InstrumentType
   mode: 'trigger' | 'toggle'
+  chokeGroup?: number
   muted?: boolean
   instrumentParams: Record<string, any>
 }

@@ -7,10 +7,19 @@ import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../../../instruments/types'
 import MPCPad from '../MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; notes: HeldNote[]; loopNotes?: HeldNote[]; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean; audioOutput?: Tone.InputNode; audioUnavailable?: boolean }>()
-const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number] }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean; audioOutput?: Tone.InputNode; audioUnavailable?: boolean }>()
+const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number]; choke: [group: number] }>()
 const error = ref('')
-const inputsMuted = ref(false)
+interface PadWidget {
+  setRepeatDivision(division?: RepeatDivision): void
+  setWiredActive(active: boolean): void
+  setInputMuted(muted?: boolean): void
+}
+let inputsMuted = false
+let currentSettings = props.settings
+let incomingWiredNotes: HeldNote[] = []
+let incomingLoopNotes: HeldNote[] = []
+let padWidget: PadWidget | null = null
 let instrument: InstrumentInstance | undefined
 let localPressed = false
 let localVelocity = 100
@@ -22,7 +31,7 @@ const hitNotes = new Map<string, { note: number; velocity: number; bend: number 
 
 function incomingNotes() {
   const merged = new Map<number, HeldNote>()
-  for (const note of inputsMuted.value ? [] : [...props.notes, ...(props.loopNotes ?? [])]) {
+  for (const note of inputsMuted ? [] : [...incomingWiredNotes, ...incomingLoopNotes]) {
     const previous = merged.get(note.note)
     merged.set(note.note, { ...note, count: note.count + (previous?.count ?? 0) })
   }
@@ -34,10 +43,14 @@ function incomingBend() {
   return notes[notes.length - 1]?.bend ?? 0
 }
 
+function effectiveInstrumentParams() {
+  return currentSettings.muted ? { ...currentSettings.instrumentParams, volume: -Infinity } : currentSettings.instrumentParams
+}
+
 function syncParameters() {
-  const params = props.settings.muted ? { ...props.settings.instrumentParams, volume: -Infinity } : props.settings.instrumentParams
+  const params = effectiveInstrumentParams()
   if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
-    if (instrument.params.sample !== props.settings.instrumentParams.sample) {
+    if (instrument.params.sample !== currentSettings.instrumentParams.sample) {
       generation++
       instrument.dispose()
       instrument = undefined
@@ -73,14 +86,20 @@ function syncNote() {
     currentKey = ''
     return
   }
-  if (props.settings.instrumentType === 'sample-hit' && props.settings.instrumentParams.polyphony > 1) {
+  if (currentSettings.instrumentType === 'sample-hit' && currentSettings.instrumentParams.polyphony > 1) {
     syncHitNotes()
     return
   }
   const notes = incomingNotes()
   const wired = notes[notes.length - 1]
   const key = localPressed ? 'local' : wired ? `note:${wired.note}` : ''
-  if (key === currentKey) return
+  if (key === currentKey) {
+    if (!localPressed && (!(instrument instanceof SampleHit) || currentSettings.instrumentParams.polyphony === 1)) {
+      instrument?.setPitchBend?.(incomingBend())
+    }
+    return
+  }
+  if (key && currentSettings.chokeGroup !== undefined) emit('choke', currentSettings.chokeGroup)
   currentKey = key
   const request = ++generation
   instrument?.release()
@@ -92,7 +111,7 @@ function syncNote() {
     try {
       await Tone.start()
       if (unmounted || request !== generation) return
-      instrument ??= InstrumentFactory.create(props.settings.instrumentType, props.settings.instrumentParams, props.audioOutput)
+      instrument ??= InstrumentFactory.create(currentSettings.instrumentType, effectiveInstrumentParams(), props.audioOutput)
       syncParameters()
       instrument.setPitchBend?.(localPressed ? 0 : incomingBend())
       await instrument.trigger(velocity, note)
@@ -110,6 +129,7 @@ function syncHitNotes() {
   const next = new Map<string, { note: number; velocity: number; bend: number }>(incomingNotes().map((note) =>
     [`note:${note.note}`, { note: note.note, velocity: note.velocity, bend: note.bend ?? 0 }] as const))
   if (localPressed) next.set('local', { note: 60, velocity: localVelocity, bend: 0 })
+  let emittedChoke = false
   for (const id of hitNotes.keys()) {
     if (next.has(id)) continue
     hitNotes.delete(id)
@@ -122,13 +142,17 @@ function syncHitNotes() {
       previous.bend = note.bend
       continue
     }
+    if (!emittedChoke && currentSettings.chokeGroup !== undefined) {
+      emit('choke', currentSettings.chokeGroup)
+      emittedChoke = true
+    }
     hitNotes.set(id, note)
     const request = generation
     void (async () => {
       try {
         await Tone.start()
         if (unmounted || request !== generation || hitNotes.get(id) !== note) return
-        instrument ??= InstrumentFactory.create('sample-hit', props.settings.instrumentParams, props.audioOutput)
+        instrument ??= InstrumentFactory.create('sample-hit', effectiveInstrumentParams(), props.audioOutput)
         if (!(instrument instanceof SampleHit)) return
         syncParameters()
         if (!(instrument instanceof SampleHit) || hitNotes.get(id) !== note) return
@@ -144,13 +168,27 @@ function syncHitNotes() {
   }
 }
 
+function choke() {
+  generation++
+  if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
+    instrument.choke()
+  } else if (instrument instanceof DrumKit) {
+    instrument.dispose()
+    instrument = undefined
+    appliedParameters.clear()
+  } else {
+    instrument?.release()
+  }
+}
+
 function handlePadOutput(output: ParameterOutput) {
   emit('output', output)
   if (output.parameter === 'velocity') localVelocity = output.value
   if (output.parameter === 'gate') {
-    if (props.settings.mode === 'toggle') {
+    if (currentSettings.mode === 'toggle') {
       if (output.value > 0) {
-        inputsMuted.value = !inputsMuted.value
+        inputsMuted = !inputsMuted
+        syncPadDisplay()
         syncNote()
       }
       return
@@ -162,39 +200,81 @@ function handlePadOutput(output: ParameterOutput) {
   }
 }
 
-watch(() => props.settings.mode, (mode, previous) => {
-  if (previous === undefined || mode === previous) return
+function updateMode(mode: InstrumentPadSettings['mode'], previous: InstrumentPadSettings['mode']) {
+  if (mode === previous) return
   if (previous === 'trigger' && localPressed) {
     localPressed = false
     emit('liveNote', 60, false, localVelocity)
   }
-  inputsMuted.value = false
+  inputsMuted = false
+  padWidget?.setRepeatDivision(mode === 'trigger' ? props.repeatDivision : undefined)
+  syncPadDisplay()
   syncNote()
+}
+
+function syncPadDisplay() {
+  padWidget?.setWiredActive(!inputsMuted && (incomingWiredNotes.length > 0 || incomingLoopNotes.length > 0))
+  padWidget?.setInputMuted(currentSettings.mode === 'toggle' ? inputsMuted : undefined)
+}
+function isPadWidget(instance: unknown): instance is PadWidget {
+  return typeof instance === 'object' && instance !== null && 'setRepeatDivision' in instance &&
+    typeof instance.setRepeatDivision === 'function' && 'setWiredActive' in instance &&
+    typeof instance.setWiredActive === 'function' && 'setInputMuted' in instance &&
+    typeof instance.setInputMuted === 'function'
+}
+function setPadWidget(instance: unknown) {
+  padWidget = isPadWidget(instance) ? instance : null
+  padWidget?.setRepeatDivision(currentSettings.mode === 'trigger' ? props.repeatDivision : undefined)
+  syncPadDisplay()
+}
+function setPlaybackNotes(notes: HeldNote[], loopNotes: HeldNote[]) {
+  const sameNotes = (current: HeldNote[], next: HeldNote[]) =>
+    current.length === next.length && current.every((note, index) => {
+      const candidate = next[index]
+      return candidate && candidate.note === note.note && candidate.count === note.count &&
+        candidate.velocity === note.velocity && candidate.bend === note.bend
+    })
+  if (sameNotes(incomingWiredNotes, notes) && sameNotes(incomingLoopNotes, loopNotes)) return
+  incomingWiredNotes = notes
+  incomingLoopNotes = loopNotes
+  syncPadDisplay()
+  syncNote()
+}
+function setDisplaySettings(settings: InstrumentPadSettings) {
+  const previous = currentSettings
+  if (settings === previous) return
+  currentSettings = settings
+  updateMode(settings.mode, previous.mode)
+  syncParameters()
+  syncNote()
+}
+watch(() => props.settings.mode, (mode, previous) => {
+  if (currentSettings === props.settings) updateMode(mode, previous)
 })
-watch(() => props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
-  syncNote, { immediate: true, flush: 'sync' })
-watch(() => (props.loopNotes ?? []).map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(','),
-  syncNote, { flush: 'sync' })
-watch(() => localPressed ? 0 : incomingBend(),
-  (bend) => {
-    if (!(instrument instanceof SampleHit) || props.settings.instrumentParams.polyphony === 1) instrument?.setPitchBend?.(bend)
-  })
-watch(() => props.settings.instrumentParams, syncParameters, { deep: true, immediate: true })
-watch(() => props.settings.muted, syncParameters, { flush: 'sync' })
+watch(() => props.settings.instrumentParams, () => {
+  if (currentSettings === props.settings) syncParameters()
+}, { deep: true, immediate: true })
+watch(() => props.settings.muted, () => {
+  if (currentSettings === props.settings) syncParameters()
+}, { flush: 'sync' })
+watch(() => props.repeatDivision, (division) => {
+  padWidget?.setRepeatDivision(currentSettings.mode === 'trigger' ? division : undefined)
+})
 watch(() => props.audioUnavailable, syncNote, { flush: 'sync' })
 onBeforeUnmount(() => {
-  if (localPressed && props.settings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
+  if (localPressed && currentSettings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
   unmounted = true
   generation++
   instrument?.dispose()
 })
+defineExpose({ setPlaybackNotes, setDisplaySettings, choke })
 </script>
 
 <template>
   <div class="instrument-pad">
-    <MPCPad :label="label" :settings="settings" :rotated="rotated" :disabled="disabled" :wired-active="!inputsMuted && (notes.length > 0 || (loopNotes?.length ?? 0) > 0)"
-      :repeat-division="settings.mode === 'trigger' ? repeatDivision : undefined" :bpm="bpm" :playing="playing" :transport-clock="transportClock"
-      :input-muted="settings.mode === 'toggle' ? inputsMuted : undefined" @output="handlePadOutput" />
+    <MPCPad :ref="setPadWidget" :label="label" :settings="settings" :rotated="rotated" :disabled="disabled"
+      :bpm="bpm" :playing="playing" :transport-clock="transportClock"
+      @output="handlePadOutput" />
     <span v-if="error" class="instrument-error" role="alert">{{ error }}</span>
   </div>
 </template>
