@@ -68,7 +68,7 @@ export class ToneOscillator {
     }
   }
 
-  update(settings: ToneElementSettings, baseFrequency: number, notes: HeldNote[], continuous: boolean) {
+  update(settings: ToneElementSettings, baseFrequency: number, notes: HeldNote[], continuous: boolean, time = Tone.immediate()) {
     const mode = settings.noteMode === 'always-on' ? 'always-on' : 'gated'
     if (mode !== this.mode) {
       for (const voice of this.voices.splice(0)) { voice.source.dispose(); voice.gain.dispose() }
@@ -117,23 +117,23 @@ export class ToneOscillator {
       } else {
         voice.source.type = settings.oscillatorType
       }
-      voice.source.detune.rampTo(settings.detune, 0.01)
+      voice.source.detune.rampTo(settings.detune, 0.01, time)
       const active = voice.held || voice.kind === 'always-on' || voice === fallback
       if (!active) {
-        if (voice.kind === 'gated' && voice.sounding) voice.source.triggerRelease()
+        if (voice.kind === 'gated' && voice.sounding) voice.source.triggerRelease(time)
         voice.sounding = false
         voice.note = undefined
         voice.frequency = undefined
         continue
       }
       const { frequency } = oscillatorPitch(settings, baseFrequency, voice.note ? [voice.note] : [])
-      voice.gain.gain.rampTo(voice.note ? Math.max(0, Math.min(1, voice.note.velocity / 127)) : 0.7, 0.01)
+      voice.gain.gain.rampTo(voice.note ? Math.max(0, Math.min(1, voice.note.velocity / 127)) : 0.7, 0.01, time)
       if (voice.kind === 'always-on') {
-        if (voice.frequency !== frequency) voice.source.frequency.rampTo(frequency, 0.01)
+        if (voice.frequency !== frequency) voice.source.frequency.rampTo(frequency, 0.01, time)
       } else if (!voice.sounding) {
-        voice.source.triggerAttack(frequency)
+        voice.source.triggerAttack(frequency, time)
       } else if (voice.frequency !== frequency) {
-        voice.source.setNote(frequency)
+        voice.source.setNote(frequency, time)
       }
       voice.sounding = true
       voice.frequency = frequency

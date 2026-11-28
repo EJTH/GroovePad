@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
+import * as Tone from 'tone'
 import { noteName, scales } from '../../music'
 import { pointerTap } from '../../pointerTap'
 import type { ArpeggiatorSettings, HeldNote, ParameterOutput } from '../../grid'
@@ -11,36 +12,28 @@ const tap = pointerTap(() => emit('toggle'))
 const activeNote = ref<number | null>(null)
 let activeSource: number | null = null
 const forwarded = new Map<number, HeldNote>()
+const sounding = new Map<number, { note: number; velocity: number }>()
 let step = 0
-let interval: number | undefined
-let syncTimer: number | undefined
-let releaseTimer: number | undefined
-let generation = 0
+let transportEvent: number | undefined
+const releaseEvents = new Set<number>()
+let freeClock: Tone.Clock | undefined
+const freeReleaseClocks = new Set<Tone.Clock>()
+let voiceSequence = 0
+let activeVoice = 0
 
 function stepBeats() {
   const [numerator, denominator] = props.settings.rate.split('/').map(Number)
   return 4 * numerator! / denominator!
 }
 
-function stepDuration() { return 60000 / props.bpm * stepBeats() }
-
-function release() {
-  if (releaseTimer !== undefined) window.clearTimeout(releaseTimer)
-  releaseTimer = undefined
-  if (activeNote.value !== null) emit('output', { parameter: 'note', value: activeNote.value, on: false, velocity: 100 })
-  activeNote.value = null
-  activeSource = null
+function sendNote(note: number, on: boolean, velocity: number, bend?: number, time = Tone.immediate()) {
+  if (on) emit('output', { parameter: 'velocity', value: velocity, time })
+  emit('output', { parameter: 'note', value: note, on, velocity, time, ...(bend === undefined ? {} : { bend }) })
 }
 
-function sendNote(note: number, on: boolean, velocity: number, bend?: number) {
-  if (on) emit('output', { parameter: 'velocity', value: velocity })
-  emit('output', { parameter: 'note', value: note, on, velocity, ...(bend === undefined ? {} : { bend }) })
-}
-
-function tick() {
-  release()
+function playStep(time: number) {
   const notes = [...props.notes].sort((a, b) => a.note - b.note)
-  if (!notes.length) return
+  if (!notes.length || !props.settings.enabled) return
   const { style, steps, distance, scale, gate } = props.settings
   const count = (steps + 1) * notes.length
   const period = Math.max(1, count * 2 - 2)
@@ -53,36 +46,74 @@ function tick() {
   let note = root + Math.floor(index / notes.length) * distance
   while (note < 127 && !scales[scale].includes(((note - root) % 12 + 12) % 12)) note++
   note = Math.max(0, Math.min(127, note))
-  activeNote.value = note
+  const voice = ++voiceSequence
+  activeVoice = voice
   activeSource = held.note
-  sendNote(note, true, held.velocity, held.bend)
-  releaseTimer = window.setTimeout(release, stepDuration() * gate)
+  sounding.set(voice, { note, velocity: held.velocity })
+  sendNote(note, true, held.velocity, held.bend, time)
+  Tone.getDraw().schedule(() => { if (activeVoice === voice) activeNote.value = note }, time)
+  const release = (releaseTime: number) => {
+    const active = sounding.get(voice)
+    if (!active) return
+    sounding.delete(voice)
+    sendNote(active.note, false, active.velocity, undefined, releaseTime)
+    Tone.getDraw().schedule(() => { if (activeVoice === voice) activeNote.value = null }, releaseTime)
+  }
+  const delayBeats = stepBeats() * gate
+  if (props.playing && props.transportClock) {
+    const transport = Tone.getTransport()
+    const beat = transport.getTicksAtTime(time) / transport.PPQ
+    const ticks = Math.round((beat + delayBeats) * transport.PPQ)
+    let event = -1
+    event = transport.scheduleOnce((releaseTime) => {
+      releaseEvents.delete(event)
+      release(releaseTime)
+    }, `${ticks}i`)
+    releaseEvents.add(event)
+  } else {
+    let clock: Tone.Clock
+    clock = new Tone.Clock((releaseTime) => {
+      freeReleaseClocks.delete(clock)
+      clock.dispose()
+      release(releaseTime)
+    }, 1)
+    freeReleaseClocks.add(clock)
+    clock.start(time + delayBeats * 60 / props.bpm)
+  }
   step++
 }
 
-function stop() {
-  generation++
-  if (interval !== undefined) window.clearInterval(interval)
-  if (syncTimer !== undefined) window.clearTimeout(syncTimer)
-  interval = undefined
-  syncTimer = undefined
-  release()
+function scheduleTransportStep(beat: number) {
+  const transport = Tone.getTransport()
+  const ticks = Math.max(0, Math.round(beat * transport.PPQ))
+  transportEvent = transport.scheduleOnce((time) => {
+    transportEvent = undefined
+    playStep(time)
+    if (props.settings.enabled && props.notes.length && props.playing && props.transportClock) {
+      scheduleTransportStep(beat + stepBeats())
+    }
+  }, `${ticks}i`)
 }
 
-function scheduleStep(beat: number) {
-  const clock = props.transportClock
-  if (!clock || !props.playing) return
-  const scheduledGeneration = generation
-  const delay = Math.max(0, (beat - clock.position()) * 60000 / props.bpm)
-  syncTimer = window.setTimeout(() => {
-    syncTimer = undefined
-    const now = clock.position()
-    if (now < beat) { scheduleStep(beat); return }
-    tick()
-    if (generation !== scheduledGeneration) return
-    const duration = stepBeats()
-    scheduleStep(beat + (Math.floor((now - beat) / duration) + 1) * duration)
-  }, delay)
+function releaseAll(time = Tone.immediate()) {
+  for (const note of sounding.values()) sendNote(note.note, false, note.velocity, undefined, time)
+  sounding.clear()
+  activeVoice = ++voiceSequence
+  activeSource = null
+  activeNote.value = null
+}
+
+function stop() {
+  const transport = Tone.getTransport()
+  if (transportEvent !== undefined) transport.clear(transportEvent)
+  transportEvent = undefined
+  for (const event of releaseEvents) transport.clear(event)
+  releaseEvents.clear()
+  freeClock?.dispose()
+  freeClock = undefined
+  for (const clock of freeReleaseClocks) clock.dispose()
+  freeReleaseClocks.clear()
+  releaseAll()
 }
 
 function restart() {
@@ -90,11 +121,12 @@ function restart() {
   if (!props.settings.enabled || !props.notes.length) return
   step = 0
   if (props.playing && props.transportClock) {
-    const duration = stepBeats()
-    scheduleStep(Math.ceil(props.transportClock.position() / duration) * duration)
+    const transport = Tone.getTransport()
+    const position = transport.getTicksAtTime(Tone.immediate()) / transport.PPQ
+    scheduleTransportStep(Math.ceil(position / stepBeats()) * stepBeats())
   } else {
-    tick()
-    interval = window.setInterval(tick, stepDuration())
+    freeClock = new Tone.Clock((time) => playStep(time), 1 / (stepBeats() * 60 / props.bpm))
+    freeClock.start(Tone.immediate())
   }
 }
 

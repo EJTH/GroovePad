@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createApp } from 'vue'
-import { getContext } from 'tone'
+import { Context, setContext } from 'tone'
 import './audio/toneLeakFix'
 import './style.css'
 import App from './App.vue'
@@ -14,5 +14,5 @@ if (typeof window.requestIdleCallback === 'function') {
   window.requestIdleCallback = (callback, options) => requestIdle(callback, { timeout: 100, ...options })
 }
 
-getContext().lookAhead = 0.02
+setContext(new Context({ latencyHint: 'balanced', lookAhead: 0.02 }))
 createApp(App).mount('#app')

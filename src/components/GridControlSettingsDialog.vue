@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed, provide } from 'vue'
+import { ref, watch, computed, provide, type Ref } from 'vue'
 import { createControl, isValidPlacement, MAX_LOOP_CLIP_INDEX, validPianoRollSettings, type Connection, type GridItem, type GridItemType, type GridLayout, type SubGridSettings, type ToneElementKind, type ToneElementSettings } from '../grid'
 import { isCompatible, inputs, outputs, selectorConnectionsCompatible, selectorRoutingCompatible } from '../parameters'
 import { InstrumentFactory } from '../instruments'
@@ -37,6 +37,7 @@ const props = defineProps<{
   banks?: Bank[]
   bankId?: string
   loopPlayhead?: number
+  loopPlayheadSource?: { position: Readonly<Ref<number | undefined>> }
   nested?: boolean
   ownerSettings?: SubGridSettings
   boundaryAudio?: BoundaryAudio[]
@@ -385,7 +386,7 @@ function canSetModulationAmount(connection: Connection) {
         <PianoRollSettingsPanel v-else-if="liveItem.type === 'piano-roll' && draft.type === 'piano-roll'" :draft="liveItem" :base-draft="draft" />
         <ArpeggiatorSettingsPanel v-else-if="liveItem.type === 'arpeggiator'" :draft="liveItem" />
         <SequencedLoopSettingsPanel v-else-if="draft.type === 'sequenced-loop'" :draft="draft" :layout="layout" :banks="banks" :bank-id="bankId"
-          :playhead="loopPlayhead" @arm-change="emit('armChange', $event)" />
+          :playhead="loopPlayhead" :playhead-source="loopPlayheadSource" @arm-change="emit('armChange', $event)" />
         <SubGridSettingsPanel v-else-if="liveItem.type === 'sub-grid'" :draft="liveItem" @open="openSubGrid" />
         <ToneElementSettingsPanel v-else-if="liveItem.type === 'tone-element'" :live-item="liveItem" :draft="draft"
           :nested="nested" :effective-audio-route="effectiveAudioRoute" @change-type="changeToneElementType" @change-audio-route="changeAudioRoute" />

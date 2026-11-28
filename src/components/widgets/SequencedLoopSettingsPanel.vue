@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, toRef, watch, type Ref } from 'vue'
 import { defaultLoopWidgetButtons, gridScopes, LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type LoopAutomation, type LoopNote, type LoopRow, type LoopWidgetButton } from '../../grid'
 import { cloneClip, copyRow, nextUnusedClipIndex, pasteRow, removeRow, rowKey, type RowClipboard } from '../../loopRows'
 import NumericSetting from '../UI/NumericSetting.vue'
 import SequenceEditor from './SequenceEditor.vue'
 import type { Bank } from '../../project'
 
-const props = defineProps<{ draft: Extract<GridItem, { type: 'sequenced-loop' }>; layout: GridLayout; banks?: Bank[]; bankId?: string; playhead?: number; editorOnly?: boolean; editorClipIndex?: number }>()
+const props = defineProps<{ draft: Extract<GridItem, { type: 'sequenced-loop' }>; layout: GridLayout; banks?: Bank[]; bankId?: string; playhead?: number; playheadSource?: { position: Readonly<Ref<number | undefined>> }; editorOnly?: boolean; editorClipIndex?: number }>()
 const emit = defineEmits<{ 'arm-change': [armed: boolean]; 'update:editor-clip-index': [index: number]; 'close-editor': [] }>()
+const fallbackPlayheadSource = { position: toRef(props, 'playhead') }
 const clipIndex = computed(() => props.editorOnly ? props.editorClipIndex ?? props.draft.settings.clipIndex : props.draft.settings.clipIndex)
 const clipboard = ref<RowClipboard | null>(null)
 const message = ref('')
@@ -89,7 +90,7 @@ const instruments = computed(() => sources.value.filter((source) => source.instr
     <SequenceEditor v-if="validIndex" v-model="notes" v-model:automation="automation"
       :bar-length="draft.settings.barLength" :instruments="instruments" :sources="sources" :bank-id="bankId"
       :clip-index="clipIndex" :start-fullscreen="editorOnly"
-      :playhead="playhead"
+      :playhead-source="playheadSource ?? fallbackPlayheadSource"
       :muted-rows="mutedRows" :clipboard-row="clipboard?.row" :can-paste="!!clipboard" :can-clone="canClone"
       @toggle-mute="toggleMute" @remove-row="remove" @copy-row="copy" @paste-row="paste" @clone-sequence="clone" @exit-fullscreen="editorOnly && emit('close-editor')" />
     <p v-if="message && !editorOnly" role="status">{{ message }}</p>

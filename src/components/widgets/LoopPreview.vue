@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, shallowRef, watch } from 'vue'
+import { ref, shallowRef, watch, type Ref } from 'vue'
 import type { GridItem, LoopAutomation, LoopNote } from '../../grid'
 import { useVisualRefresh } from '../../composables/useVisualRefresh'
 
@@ -11,6 +11,7 @@ const props = defineProps<{
   getCurves: (item: Extract<GridItem, { type: 'sequenced-loop' }>) => { key: string; path: string; color: string }[]
   length: number
   playhead?: number
+  playheadSource?: { positions: Readonly<Ref<ReadonlyMap<string, number>>> }
   previewX: (position: number, length: number) => number
   previewY: (value: number, min: number, max: number) => number
   previewColor: (sourceId: string, bankId?: string) => string
@@ -54,8 +55,11 @@ watch(() => visible.value ? [
     ...props.notes.map((note) => props.previewColor(note.instrumentId, note.bankId)),
   ],
 ] : undefined, request, { deep: true })
-const displayPlayhead = ref(props.playhead)
-watch([() => props.playhead, visible], ([playhead, isVisible]) => {
+function currentPlayhead() {
+  return props.playheadSource ? props.playheadSource.positions.value.get(props.item.id) : props.playhead
+}
+const displayPlayhead = ref(currentPlayhead())
+watch([() => visible.value ? currentPlayhead() : undefined, visible], ([playhead, isVisible]) => {
   if (isVisible) displayPlayhead.value = playhead
 })
 </script>

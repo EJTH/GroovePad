@@ -18,7 +18,8 @@ const positionFullAt = 0.6
 const minVelocity = 0.1;
 const repeat = useNoteRepeat({
   division: () => repeatDivision, bpm: () => props.bpm ?? 120, playing: () => props.playing,
-  clock: () => props.transportClock, send: (_value: number, on) => emit('output', { parameter: 'gate', value: on ? 1 : 0 }),
+  clock: () => props.transportClock, send: (_value: number, on, time) =>
+    emit('output', { parameter: 'gate', value: on ? 1 : 0, time }),
 })
 function gate(on: boolean) { repeat.change('gate', 1, on) }
 

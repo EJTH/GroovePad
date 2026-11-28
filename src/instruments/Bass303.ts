@@ -9,6 +9,8 @@ export class Bass303 implements InstrumentInstance {
   readonly type = '303' as const
   readonly params: Bass303Params
   private readonly synth: Tone.MonoSynth
+  private readonly filterScale: Tone.Multiply
+  private filterFrequencySignal?: Tone.Signal
   private activeNote: number | undefined
   private pitchBend = 0
 
@@ -30,30 +32,41 @@ export class Bass303 implements InstrumentInstance {
       filter: { type: 'lowpass', rolloff: -24, Q: this.params.resonance },
       filterEnvelope: {
         ...this.params.filterEnvelope,
-        baseFrequency: this.params.filterFrequency,
+        baseFrequency: 1,
         octaves: this.params.filterAmount * 4,
       },
       portamento: this.params.slideTime,
     })
+    this.filterScale = new Tone.Multiply(this.params.filterFrequency)
+    this.synth.filterEnvelope.disconnect(this.synth.filter.frequency)
+    this.synth.filterEnvelope.connect(this.filterScale)
+    this.filterScale.connect(this.synth.filter.frequency)
     if (output) this.synth.connect(output)
     else this.synth.toDestination()
   }
 
-  trigger(velocity: number, note = 60): void {
+  setFilterFrequencySignal(signal: Tone.Signal): void {
+    if (this.filterFrequencySignal === signal) return
+    this.filterFrequencySignal?.disconnect(this.filterScale.factor)
+    this.filterFrequencySignal = signal
+    signal.connect(this.filterScale.factor)
+  }
+
+  trigger(velocity: number, note = 60, time = Tone.immediate()): void {
     this.activeNote = note
     const pitch = Math.max(0, Math.min(127, note + this.params.transpose + this.pitchBend))
-    this.synth.triggerAttack(Tone.Frequency(pitch, 'midi').toFrequency(), Tone.now(), velocity / 127)
+    this.synth.triggerAttack(Tone.Frequency(pitch, 'midi').toFrequency(), time, velocity / 127)
   }
 
-  release(): void {
+  release(_id?: string, time = Tone.immediate()): void {
     this.activeNote = undefined
-    this.synth.triggerRelease()
+    this.synth.triggerRelease(time)
   }
 
-  setPitchBend(semitones: number): void {
+  setPitchBend(semitones: number, time = Tone.immediate()): void {
     this.pitchBend = semitones
     if (this.activeNote !== undefined) {
-      this.synth.setNote(Tone.Frequency(Math.max(0, Math.min(127, this.activeNote + this.params.transpose + semitones)), 'midi').toFrequency())
+      this.synth.setNote(Tone.Frequency(Math.max(0, Math.min(127, this.activeNote + this.params.transpose + semitones)), 'midi').toFrequency(), time)
     }
   }
 
@@ -68,7 +81,10 @@ export class Bass303 implements InstrumentInstance {
       case 'volume': this.params.volume = value; this.synth.volume.rampTo(value, 0.02); break
       case 'resonance': this.params.resonance = value; this.synth.filter.Q.rampTo(value, 0.02); break
       case 'slideTime': this.params.slideTime = value; this.synth.portamento = value; break
-      case 'filterFrequency': this.params.filterFrequency = value; this.synth.filterEnvelope.baseFrequency = value; break
+      case 'filterFrequency':
+        this.params.filterFrequency = value
+        if (!this.filterFrequencySignal) this.filterScale.factor.value = value
+        break
       case 'filterAmount': this.params.filterAmount = value; this.synth.filterEnvelope.octaves = value * 4; break
       case 'envelope.attack': this.params.envelope.attack = value; this.synth.envelope.attack = value; break
       case 'envelope.decay': this.params.envelope.decay = value; this.synth.envelope.decay = value; break
@@ -82,6 +98,8 @@ export class Bass303 implements InstrumentInstance {
   }
 
   dispose(): void {
+    this.filterFrequencySignal?.disconnect(this.filterScale.factor)
+    this.filterScale.dispose()
     this.synth.dispose()
   }
 }

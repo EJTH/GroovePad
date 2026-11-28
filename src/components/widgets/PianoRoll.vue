@@ -117,9 +117,10 @@ function bendAt(event: PointerEvent, key: HTMLElement) {
 const repeat = useNoteRepeat({
   division: () => props.repeatDivision, bpm: () => props.bpm ?? 120, playing: () => props.playing,
   clock: () => props.transportClock,
-  send: (value: { note: number; velocity: number; bend?: number }, on) => {
-    if (on) emit('output', { parameter: 'velocity', value: value.velocity })
-    emit('output', { parameter: 'note', value: value.note, on, velocity: value.velocity, ...(value.bend === undefined ? {} : { bend: value.bend }) })
+  send: (value: { note: number; velocity: number; bend?: number }, on, time) => {
+    if (on) emit('output', { parameter: 'velocity', value: value.velocity, time })
+    emit('output', { parameter: 'note', value: value.note, on, velocity: value.velocity, time,
+      ...(value.bend === undefined ? {} : { bend: value.bend }) })
   },
 })
 function send(note: number, on: boolean, velocity = 100, bend?: number) {
@@ -179,8 +180,8 @@ function move(event: PointerEvent) {
   }
 
   send(currentNote, false)
-  updateKeyDisplay(currentNote)
   pointers.set(event.pointerId, newNote)
+  updateKeyDisplay(currentNote)
   updateKeyDisplay(newNote)
   send(newNote, true, velocity, bend)
 }

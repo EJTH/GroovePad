@@ -44,8 +44,7 @@ export class DrumKit<T extends DrumKitType> implements InstrumentInstance {
     this.updateTone()
   }
 
-  trigger(velocity: number): void {
-    const now = Tone.now()
+  trigger(velocity: number, _note?: number, now = Tone.immediate()): void {
     const level = Math.max(0, Math.min(1, velocity / 127))
     const pitchScale = 2 ** (this.pitchBend / 12) * this.params.pitch / 150
     const hit = (duration: number): number => Math.max(0.02, Math.min(duration, this.params.envelope.decay * 2))
@@ -74,11 +73,9 @@ export class DrumKit<T extends DrumKitType> implements InstrumentInstance {
     }
   }
 
-  release(): void {
-    // Drum hits finish their own envelope after the pad is released.
-  }
+  release(_id?: string, _time = Tone.immediate()): void {}
 
-  setPitchBend(semitones: number): void {
+  setPitchBend(semitones: number, _time = Tone.immediate()): void {
     this.pitchBend = semitones
   }
 
@@ -230,7 +227,7 @@ export class DrumKit<T extends DrumKitType> implements InstrumentInstance {
   }
 
   private updateTone(): void {
-    const now = Tone.now()
+    const now = Tone.immediate()
     if (this.voice.kind === 'snare') {
       this.voice.noise.filter.frequency.setValueAtTime(2500 + this.params.tone * 6500, now)
     } else if (this.voice.kind === 'rim') {

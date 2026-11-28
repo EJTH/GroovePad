@@ -7,7 +7,8 @@ import { Bass303, DrumKit, InstrumentFactory, SampleHit, SampleLoop, type Instru
 import type { SampleHitParams, SampleLoopParams } from '../../../instruments/types'
 import MPCPad from '../MPCPad.vue'
 
-const props = defineProps<{ label: string; settings: InstrumentPadSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean; audioOutput?: Tone.InputNode; audioUnavailable?: boolean }>()
+const props = defineProps<{ label: string; settings: InstrumentPadSettings; rotated?: boolean; repeatDivision?: RepeatDivision; bpm?: number; playing?: boolean; transportClock?: TransportClock; disabled?: boolean; audioOutput?: Tone.InputNode; audioUnavailable?: boolean;
+  filterFrequencySignal?: Tone.Signal; setFilterFrequency?: (value: number) => void }>()
 const emit = defineEmits<{ output: [output: ParameterOutput]; liveNote: [note: number, on: boolean, velocity: number, bend?: number]; choke: [group: number] }>()
 const error = ref('')
 interface PadWidget {
@@ -26,6 +27,10 @@ let localVelocity = 100
 let currentKey = ''
 let generation = 0
 let unmounted = false
+let preparedInstrument: InstrumentInstance | undefined
+let preparingInstrument: InstrumentInstance | undefined
+let failedPreparation: InstrumentInstance | undefined
+let preparationError = ''
 const appliedParameters = new Map<string, number | string>()
 const hitNotes = new Map<string, { note: number; velocity: number; bend: number }>()
 
@@ -54,6 +59,8 @@ function syncParameters() {
       generation++
       instrument.dispose()
       instrument = undefined
+      preparedInstrument = undefined
+      failedPreparation = undefined
       currentKey = ''
       hitNotes.clear()
       syncNote()
@@ -71,7 +78,10 @@ function syncParameters() {
       : [[key, value] as const]
     for (const [name, entry] of values) {
       if (appliedParameters.get(name) === entry) continue
-      if (typeof entry === 'number' && (Number.isFinite(entry) || (name === 'volume' && entry === -Infinity))) instrument.updateParameter(name, entry)
+      if (typeof entry === 'number' && (Number.isFinite(entry) || (name === 'volume' && entry === -Infinity))) {
+        instrument.updateParameter(name, entry)
+        if (instrument instanceof Bass303 && name === 'filterFrequency') props.setFilterFrequency?.(entry)
+      }
       else if (instrument instanceof DrumKit && name === 'drum' && typeof entry === 'string') instrument.updateParameter(name, entry)
       else continue
       appliedParameters.set(name, entry)
@@ -79,15 +89,48 @@ function syncParameters() {
   }
 }
 
-function syncNote() {
+function prepareSample() {
+  if (!props.playing || props.audioUnavailable ||
+    (currentSettings.instrumentType !== 'sample-hit' && currentSettings.instrumentType !== 'sample-loop')) return
+  const sample = currentSettings.instrumentParams.sample
+  if (typeof sample !== 'string' || !sample) return
+  try {
+    instrument ??= InstrumentFactory.create(currentSettings.instrumentType, effectiveInstrumentParams(), props.audioOutput)
+    const candidate = instrument
+    if (!(candidate instanceof SampleHit || candidate instanceof SampleLoop) ||
+      candidate === preparedInstrument || candidate === preparingInstrument || candidate === failedPreparation) return
+    preparingInstrument = candidate
+    void candidate.prepare().then(() => {
+      if (unmounted || instrument !== candidate) return
+      preparedInstrument = candidate
+      if (error.value === preparationError) error.value = ''
+      preparationError = ''
+    }).catch((cause: unknown) => {
+      if (unmounted || instrument !== candidate) return
+      failedPreparation = candidate
+      preparationError = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+      error.value = preparationError
+      console.error(preparationError, cause)
+    }).finally(() => {
+      if (preparingInstrument === candidate) preparingInstrument = undefined
+    })
+  } catch (cause) {
+    preparationError = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+    error.value = preparationError
+    console.error(preparationError, cause)
+  }
+}
+
+function syncNote(time = Tone.immediate()) {
   if (props.audioUnavailable) {
     generation++
-    instrument?.release()
+    instrument?.release(undefined, time)
     currentKey = ''
+    hitNotes.clear()
     return
   }
   if (currentSettings.instrumentType === 'sample-hit' && currentSettings.instrumentParams.polyphony > 1) {
-    syncHitNotes()
+    syncHitNotes(time)
     return
   }
   const notes = incomingNotes()
@@ -95,50 +138,59 @@ function syncNote() {
   const key = localPressed ? 'local' : wired ? `note:${wired.note}` : ''
   if (key === currentKey) {
     if (!localPressed && (!(instrument instanceof SampleHit) || currentSettings.instrumentParams.polyphony === 1)) {
-      instrument?.setPitchBend?.(incomingBend())
+      instrument?.setPitchBend?.(incomingBend(), time)
     }
     return
   }
   if (key && currentSettings.chokeGroup !== undefined) emit('choke', currentSettings.chokeGroup)
   currentKey = key
   const request = ++generation
-  instrument?.release()
+  instrument?.release(undefined, time)
   if (!key) return
   const note = localPressed ? 60 : wired!.note
   const velocity = localPressed ? localVelocity : wired!.velocity
-
-  void (async () => {
-    try {
-      await Tone.start()
-      if (unmounted || request !== generation) return
-      instrument ??= InstrumentFactory.create(currentSettings.instrumentType, effectiveInstrumentParams(), props.audioOutput)
-      syncParameters()
-      instrument.setPitchBend?.(localPressed ? 0 : incomingBend())
-      await instrument.trigger(velocity, note)
-      if (!unmounted && request === generation) error.value = ''
-    } catch (cause) {
-      if (!unmounted && request === generation) {
-        error.value = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
-        console.error(error.value, cause)
-      }
+  const bend = localPressed ? 0 : incomingBend()
+  const reportError = (cause: unknown) => {
+    if (!unmounted && request === generation) {
+      error.value = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+      console.error(error.value, cause)
     }
-  })()
+  }
+  const trigger = () => {
+    if (unmounted || request !== generation) return
+    try {
+      instrument ??= InstrumentFactory.create(currentSettings.instrumentType, effectiveInstrumentParams(), props.audioOutput)
+      if (instrument instanceof Bass303 && props.filterFrequencySignal) instrument.setFilterFrequencySignal(props.filterFrequencySignal)
+      syncParameters()
+      instrument.setPitchBend?.(bend, time)
+      const result = instrument.trigger(velocity, note, time)
+      void Promise.resolve(result).then(() => {
+        if (!unmounted && request === generation) error.value = ''
+      }).catch(reportError)
+    } catch (cause) {
+      reportError(cause)
+    }
+  }
+  if (Tone.getContext().state === 'running') trigger()
+  else void Tone.start().then(trigger).catch(reportError)
 }
 
-function syncHitNotes() {
-  const next = new Map<string, { note: number; velocity: number; bend: number }>(incomingNotes().map((note) =>
-    [`note:${note.note}`, { note: note.note, velocity: note.velocity, bend: note.bend ?? 0 }] as const))
+function syncHitNotes(time = Tone.immediate()) {
+  const next = new Map<string, { note: number; velocity: number; bend: number }>()
+  for (const note of incomingNotes()) for (let index = 0; index < note.count; index++) {
+    next.set(`note:${note.note}:${index}`, { note: note.note, velocity: note.velocity, bend: note.bend ?? 0 })
+  }
   if (localPressed) next.set('local', { note: 60, velocity: localVelocity, bend: 0 })
   let emittedChoke = false
   for (const id of hitNotes.keys()) {
     if (next.has(id)) continue
     hitNotes.delete(id)
-    if (instrument instanceof SampleHit) instrument.release(id)
+    if (instrument instanceof SampleHit) instrument.release(id, time)
   }
   for (const [id, note] of next) {
     const previous = hitNotes.get(id)
     if (previous) {
-      if (previous.bend !== note.bend && instrument instanceof SampleHit) instrument.setVoicePitchBend(id, note.bend)
+      if (previous.bend !== note.bend && instrument instanceof SampleHit) instrument.setVoicePitchBend(id, note.bend, time)
       previous.bend = note.bend
       continue
     }
@@ -148,36 +200,41 @@ function syncHitNotes() {
     }
     hitNotes.set(id, note)
     const request = generation
-    void (async () => {
+    const trigger = () => {
       try {
-        await Tone.start()
         if (unmounted || request !== generation || hitNotes.get(id) !== note) return
         instrument ??= InstrumentFactory.create('sample-hit', effectiveInstrumentParams(), props.audioOutput)
         if (!(instrument instanceof SampleHit)) return
         syncParameters()
         if (!(instrument instanceof SampleHit) || hitNotes.get(id) !== note) return
-        await instrument.trigger(note.velocity, note.note, id, note.bend)
-        if (!unmounted && request === generation) error.value = ''
+        void instrument.trigger(note.velocity, note.note, time, id, note.bend).then(() => {
+          if (!unmounted && request === generation) error.value = ''
+        }).catch(reportError)
       } catch (cause) {
-        if (!unmounted && request === generation) {
-          error.value = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
-          console.error(error.value, cause)
-        }
+        reportError(cause)
       }
-    })()
+    }
+    const reportError = (cause: unknown) => {
+      if (!unmounted && request === generation) {
+        error.value = `Audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+        console.error(error.value, cause)
+      }
+    }
+    if (Tone.getContext().state === 'running') trigger()
+    else void Tone.start().then(trigger).catch(reportError)
   }
 }
 
-function choke() {
+function choke(time = Tone.immediate()) {
   generation++
   if (instrument instanceof SampleHit || instrument instanceof SampleLoop) {
-    instrument.choke()
+    instrument.choke(time)
   } else if (instrument instanceof DrumKit) {
     instrument.dispose()
     instrument = undefined
     appliedParameters.clear()
   } else {
-    instrument?.release()
+    instrument?.release(undefined, time)
   }
 }
 
@@ -227,7 +284,7 @@ function setPadWidget(instance: unknown) {
   padWidget?.setRepeatDivision(currentSettings.mode === 'trigger' ? props.repeatDivision : undefined)
   syncPadDisplay()
 }
-function setPlaybackNotes(notes: HeldNote[], loopNotes: HeldNote[]) {
+function setPlaybackNotes(notes: HeldNote[], loopNotes: HeldNote[], time = Tone.immediate()) {
   const sameNotes = (current: HeldNote[], next: HeldNote[]) =>
     current.length === next.length && current.every((note, index) => {
       const candidate = next[index]
@@ -238,7 +295,7 @@ function setPlaybackNotes(notes: HeldNote[], loopNotes: HeldNote[]) {
   incomingWiredNotes = notes
   incomingLoopNotes = loopNotes
   syncPadDisplay()
-  syncNote()
+  syncNote(time)
 }
 function setDisplaySettings(settings: InstrumentPadSettings) {
   const previous = currentSettings
@@ -247,12 +304,13 @@ function setDisplaySettings(settings: InstrumentPadSettings) {
   updateMode(settings.mode, previous.mode)
   syncParameters()
   syncNote()
+  prepareSample()
 }
 watch(() => props.settings.mode, (mode, previous) => {
   if (currentSettings === props.settings) updateMode(mode, previous)
 })
 watch(() => props.settings.instrumentParams, () => {
-  if (currentSettings === props.settings) syncParameters()
+  if (currentSettings === props.settings) { syncParameters(); prepareSample() }
 }, { deep: true, immediate: true })
 watch(() => props.settings.muted, () => {
   if (currentSettings === props.settings) syncParameters()
@@ -260,7 +318,11 @@ watch(() => props.settings.muted, () => {
 watch(() => props.repeatDivision, (division) => {
   padWidget?.setRepeatDivision(currentSettings.mode === 'trigger' ? division : undefined)
 })
-watch(() => props.audioUnavailable, syncNote, { flush: 'sync' })
+watch(() => props.audioUnavailable, () => syncNote(), { flush: 'sync' })
+watch([() => props.playing, () => props.audioUnavailable], ([playing]) => {
+  if (!playing) failedPreparation = undefined
+  else prepareSample()
+}, { immediate: true })
 onBeforeUnmount(() => {
   if (localPressed && currentSettings.mode === 'trigger') emit('liveNote', 60, false, localVelocity)
   unmounted = true

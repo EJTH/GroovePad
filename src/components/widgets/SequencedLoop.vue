@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, type Ref } from 'vue'
 import { LOOP_WIDGET_BUTTONS, loopWidgetButtonVisible, MAX_LOOP_CLIP_INDEX, type GridItem, type LoopNote, type SequencedLoopSettings } from '../../grid'
 import { nextUnusedClipIndex } from '../../loopRows'
 import type { useGridPlayback } from '../useGridPlayback'
@@ -12,6 +12,7 @@ const props = defineProps<{
   playing?: boolean
   status?: { enabled: boolean; pending: boolean }
   playhead?: number
+  playheadSource?: { positions: Readonly<Ref<ReadonlyMap<string, number>>> }
   wantsPlayback: boolean
   gesture: ReturnType<Playback['loopGesture']>
   getCurves: Playback['loopPreviewCurves']
@@ -51,7 +52,7 @@ function widgetButtonCount(settings: SequencedLoopSettings) {
     <span class="loop-status">Clip {{ item.settings.clipIndex }} · {{ status?.pending ? 'Waiting' : status?.enabled ? 'On' : wantsPlayback ? 'Ready' : 'Off' }}</span>
   </div>
   <LoopPreview :item="item" :clip-index="item.settings.clipIndex" :automation="automation" :notes="notes"
-    :get-curves="getCurves" :length="item.settings.barLength * 4" :playhead="playhead"
+    :get-curves="getCurves" :length="item.settings.barLength * 4" :playhead="playhead" :playhead-source="playheadSource"
     :preview-x="previewX" :preview-y="previewY" :preview-color="previewColor" />
   <div v-if="widgetButtonCount(item.settings)" class="loop-actions"
     :style="{ '--button-columns': Math.min(4, widgetButtonCount(item.settings)), '--button-height': `${40 / Math.ceil(widgetButtonCount(item.settings) / 4)}cqh` }"

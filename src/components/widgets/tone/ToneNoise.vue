@@ -3,7 +3,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import * as Tone from 'tone'
 import type { HeldNote, ToneElementSettings } from '../../../grid'
 
-const props = defineProps<{ label: string; settings: ToneElementSettings; notes: HeldNote[]; audioOutput?: Tone.InputNode; muted: boolean }>()
+const props = defineProps<{ label: string; settings: ToneElementSettings; notes: HeldNote[]; audioTime?: number; audioOutput?: Tone.InputNode; muted: boolean }>()
 const emit = defineEmits<{ toggleMute: [] }>()
 const continuous = ref(false)
 const error = ref('')
@@ -11,49 +11,63 @@ let noise: Tone.Noise | undefined
 let gain: Tone.Gain | undefined
 let generation = 0
 let disposed = false
+let playbackNotes = props.notes
 
-function sync() {
-  const active = props.notes.length > 0 || (props.settings.noteMode === 'continuous' && continuous.value)
+function sync(notes = playbackNotes, time = Tone.immediate()) {
+  const active = notes.length > 0 || (props.settings.noteMode === 'continuous' && continuous.value)
   if (!active) {
     generation++
-    gain?.gain.rampTo(0, 0.02)
+    gain?.gain.rampTo(0, 0.02, time)
     return
   }
   if (noise && gain) {
     noise.type = props.settings.noiseType
-    const velocity = props.notes.length ? props.notes[props.notes.length - 1]!.velocity / 127 : 0.7
-    gain.gain.rampTo(props.settings.gain * velocity, 0.02)
+    const velocity = notes.length ? notes[notes.length - 1]!.velocity / 127 : 0.7
+    gain.gain.rampTo(props.settings.gain * velocity, 0.02, time)
     return
   }
   const request = ++generation
-  void (async () => {
+  const reportError = (cause: unknown) => {
+    if (disposed || request !== generation) return
+    noise?.dispose()
+    gain?.dispose()
+    noise = undefined
+    gain = undefined
+    error.value = `Noise audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+    console.error(error.value, cause)
+  }
+  const start = () => {
+    if (disposed || request !== generation) return
     try {
-      await Tone.start()
-      if (disposed || request !== generation) return
       gain = new Tone.Gain(0)
       if (props.audioOutput) gain.connect(props.audioOutput)
       else gain.toDestination()
       noise = new Tone.Noise({ type: props.settings.noiseType, volume: -12 }).connect(gain).start()
-      sync()
+      sync(notes, time)
       error.value = ''
     } catch (cause) {
-      if (disposed || request !== generation) return
-      noise?.dispose()
-      gain?.dispose()
-      noise = undefined
-      gain = undefined
-      error.value = `Noise audio error: ${cause instanceof Error ? cause.message : String(cause)}`
-      console.error(error.value, cause)
+      reportError(cause)
     }
-  })()
+  }
+  if (Tone.getContext().state === 'running') start()
+  else void Tone.start().then(start).catch(reportError)
 }
 
 watch(() => props.settings.noteMode, (mode) => {
   if (mode !== 'continuous') continuous.value = false
 }, { flush: 'sync' })
-watch(() => [props.settings.noiseType, props.settings.gain, props.settings.noteMode, continuous.value,
-  props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}`).join(',')], sync,
+watch(() => [props.settings.noiseType, props.settings.gain, props.settings.noteMode, continuous.value], () => sync(),
 { immediate: true, flush: 'sync' })
+function setPlaybackNotes(notes: HeldNote[], time?: number) {
+  if (notes.length === playbackNotes.length && notes.every((note, index) => {
+    const previous = playbackNotes[index]
+    return previous && previous.note === note.note && previous.count === note.count &&
+      previous.velocity === note.velocity
+  })) return
+  playbackNotes = notes
+  sync(notes, time)
+}
+defineExpose({ setPlaybackNotes })
 onBeforeUnmount(() => {
   disposed = true
   generation++

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch, type Ref } from 'vue'
 import type { LoopAutomation, LoopNote, LoopRow } from '../../grid'
 import { rowKey as loopRowKey } from '../../loopRows'
 import { noteName } from '../../music'
 import SettingsDialog from '../UI/SettingsDialog.vue'
+import SequencePlayhead from './SequencePlayhead.vue'
 
 interface Source { id: string; bankId?: string; label: string; color?: string }
 type Row = LoopRow
@@ -17,6 +18,7 @@ const props = defineProps<{
   bankId?: string
   clipIndex: number
   playhead?: number
+  playheadSource?: { position: Readonly<Ref<number | undefined>> }
   startFullscreen?: boolean
   mutedRows: LoopRow[]
   clipboardRow?: LoopRow
@@ -25,6 +27,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:modelValue': [notes: LoopNote[]]; 'update:automation': [events: LoopAutomation[]];
   'toggle-mute': [row: Row]; 'remove-row': [row: Row, all: boolean]; 'copy-row': [row: Row]; 'paste-row': []; 'clone-sequence': []; 'exit-fullscreen': [] }>()
+const fallbackPlayheadSource = { position: toRef(props, 'playhead') }
 const stepLength = 0.25
 const stepWidth = ref(28)
 const instrumentId = ref('')
@@ -292,7 +295,7 @@ function chooseCell(row: Row, step: number) {
     </SettingsDialog>
     <div v-if="steps" class="sequence-scroll" tabindex="0" aria-label="Sequence timeline">
       <div class="sequence-track" :style="{ '--step-width': `${stepWidth}px`, '--step-count': steps }">
-        <div v-if="playhead !== undefined" class="sequence-playhead" :style="{ left: `calc(130px + ${playhead * steps * stepWidth}px)` }" aria-hidden="true"></div>
+        <SequencePlayhead :source="playheadSource ?? fallbackPlayheadSource" :steps="steps" :step-width="stepWidth" />
         <div class="sequence-label header">Bar</div>
         <div class="sequence-steps">
           <div v-for="step in steps" :key="step" class="time-step" :class="{ bar: (step - 1) % 16 === 0 }">{{ (step - 1) % 16 === 0 ? (step - 1) / 16 + 1 : '' }}</div>
@@ -358,7 +361,6 @@ function chooseCell(row: Row, step: number) {
 .is-fullscreen .sequence-scroll { flex: 1 1 auto; min-height: 120px; max-height: none; }
 .sequence-scroll { max-width: 100%; max-height: 280px; overflow: auto; border: 1px solid #565850; background: #171816; }
 .sequence-track { position: relative; display: grid; grid-template-columns: 130px max-content; width: max-content; }
-.sequence-playhead { position: absolute; z-index: 1; top: 0; bottom: 0; width: 2px; background: #f3df8a; pointer-events: none; }
 .sequence-label { position: sticky; left: 0; z-index: 2; width: 130px; padding: 6px; overflow: hidden; border-left: 4px solid #83c9bb; background: #30322e; color: #ecece8; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .sequence-label.header { border-left-color: transparent; }
 .row-label { border-top: 0; border-right: 0; border-bottom: 0; text-align: left; cursor: pointer; touch-action: pan-y; }

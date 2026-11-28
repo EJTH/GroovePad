@@ -69,9 +69,9 @@ export type AnyInstrumentParams = SampleHitParams | SampleLoopParams | Bass303Pa
 export interface InstrumentInstance {
   type: InstrumentType
   params: AnyInstrumentParams
-  trigger(velocity: number, note?: number): void | Promise<void>
-  setPitchBend?(semitones: number): void
-  release(): void
+  trigger(velocity: number, note?: number, time?: number, id?: string, bend?: number): void | Promise<void>
+  setPitchBend?(semitones: number, time?: number): void
+  release(id?: string, time?: number): void
   dispose(): void
 }
 

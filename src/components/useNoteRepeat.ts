@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { onBeforeUnmount, watch } from 'vue'
+import * as Tone from 'tone'
 import type { RepeatDivision } from '../grid'
 import type { TransportClock } from '../sequencedLoop'
 
@@ -10,86 +11,154 @@ export function useNoteRepeat<T>(options: {
   bpm: () => number
   playing: () => boolean | undefined
   clock: () => TransportClock | undefined
-  send: (value: T, on: boolean) => void
+  send: (value: T, on: boolean, time?: number) => void
 }) {
   const held = new Map<string | number, { value: T; count: number; sounding: number }>()
-  let timer: ReturnType<typeof setInterval> | undefined
-  let attackTimer: ReturnType<typeof setTimeout> | undefined
+  const sounding = new Map<number, { key: string | number; value: T }>()
+  const transport = Tone.getTransport()
+  const releaseEvents = new Set<number>()
+  let transportEvent: number | undefined
+  let freeClock: Tone.Clock | undefined
+  let freeGateClock: Tone.Clock | undefined
+  let voiceSequence = 0
   let localBeat = 0
   let localStart = performance.now()
   let localTempo = options.bpm()
-  let lastStep = -1
 
-  function localPosition() { return localBeat + (performance.now() - localStart) * localTempo / 60000 }
+  function localPosition() {
+    return localBeat + (performance.now() - localStart) * localTempo / 60000
+  }
   function position() { return options.clock()?.repeatPosition() ?? localPosition() }
-  function phase() {
+  function stepBeats() {
     const division = options.division()
-    return division ? position() * Number(division.slice(2)) / 4 : -1
+    return division ? 4 / Number(division.slice(2)) : 0
   }
-  function release() {
-    for (const note of held.values()) {
-      for (let i = 0; i < note.sounding; i++) options.send(note.value, false)
-      note.sounding = 0
+  function releaseVoices(time: number) {
+    for (const [id, voice] of sounding) {
+      sounding.delete(id)
+      const note = held.get(voice.key)
+      if (note) note.sounding = Math.max(0, note.sounding - 1)
+      options.send(voice.value, false, time)
     }
   }
-  function attack() {
-    attackTimer = undefined
-    for (const note of held.values()) {
-      while (note.sounding < note.count) { options.send(note.value, true); note.sounding++ }
+  function attack(time: number) {
+    for (const [key, note] of held) {
+      while (note.sounding < note.count) {
+        note.sounding++
+        const id = ++voiceSequence
+        sounding.set(id, { key, value: note.value })
+        options.send(note.value, true, time)
+      }
     }
   }
-  function tick() {
-    const current = phase()
-    if (current < 0) return
-    const currentStep = Math.floor(current)
-    if (currentStep !== lastStep) {
-      lastStep = currentStep
-      const needsGap = [...held.values()].some((note) => note.sounding > 0)
-      if (needsGap) {
-        release()
-        attackTimer = setTimeout(attack, 0)
-      } else attack()
-    } else if (current - currentStep >= 0.8 && attackTimer === undefined) {
-      release()
+  function releaseAfterStep(time: number) {
+    const delay = stepBeats() * 0.8
+    if (options.playing() && options.clock()) {
+      const beat = transport.getTicksAtTime(time) / transport.PPQ
+      const ticks = Math.round((beat + delay) * transport.PPQ)
+      let event = -1
+      event = transport.scheduleOnce((releaseTime) => {
+        releaseEvents.delete(event)
+        releaseVoices(releaseTime)
+      }, `${ticks}i`)
+      releaseEvents.add(event)
+    } else {
+      freeGateClock?.dispose()
+      freeGateClock = new Tone.Clock((releaseTime) => {
+        freeGateClock?.dispose()
+        freeGateClock = undefined
+        releaseVoices(releaseTime)
+      }, 1)
+      freeGateClock.start(time + delay * 60 / options.bpm())
     }
   }
-  function updateTimer() {
-    if (timer !== undefined) clearInterval(timer)
-    if (attackTimer !== undefined) clearTimeout(attackTimer)
-    timer = undefined
-    attackTimer = undefined
-    lastStep = Math.floor(phase())
-    if (!options.division()) attack()
-    if (held.size && options.division()) timer = setInterval(tick, 8)
+  function step(time: number) {
+    releaseVoices(time)
+    attack(time)
+    releaseAfterStep(time)
+  }
+  function scheduleTransportStep(beat: number) {
+    const ticks = Math.max(0, Math.round(beat * transport.PPQ))
+    transportEvent = transport.scheduleOnce((time) => {
+      transportEvent = undefined
+      step(time)
+      if (held.size && options.division() && options.playing() && options.clock()) {
+        scheduleTransportStep(beat + stepBeats())
+      }
+    }, `${ticks}i`)
+  }
+  function stopClocks(release = true) {
+    if (transportEvent !== undefined) transport.clear(transportEvent)
+    transportEvent = undefined
+    for (const event of releaseEvents) transport.clear(event)
+    releaseEvents.clear()
+    freeClock?.dispose()
+    freeClock = undefined
+    freeGateClock?.dispose()
+    freeGateClock = undefined
+    if (release) releaseVoices(Tone.immediate())
+  }
+  function updateScheduler() {
+    const division = options.division()
+    stopClocks(!!division)
+    if (!held.size) return
+    if (!division) {
+      attack(Tone.immediate())
+      return
+    }
+    if (options.playing() && options.clock()) {
+      const beat = transport.getTicksAtTime(Tone.immediate()) / transport.PPQ
+      const duration = stepBeats()
+      scheduleTransportStep(Math.ceil(beat / duration) * duration)
+      return
+    }
+    const beat = position()
+    const duration = stepBeats()
+    const next = Math.ceil(beat / duration) * duration
+    freeClock = new Tone.Clock((time) => step(time), 1 / (duration * 60 / options.bpm()))
+    freeClock.start(Tone.immediate() + Math.max(0, next - beat) * 60 / options.bpm())
   }
   function change(key: string | number, value: T, on: boolean) {
     const previous = held.get(key)
     if (on) {
       const immediate = !options.division()
-      held.set(key, { value, count: (previous?.count ?? 0) + 1, sounding: (previous?.sounding ?? 0) + (immediate ? 1 : 0) })
-      if (immediate) options.send(value, true)
+      const note = { value, count: (previous?.count ?? 0) + 1,
+        sounding: (previous?.sounding ?? 0) + (immediate ? 1 : 0) }
+      held.set(key, note)
+      if (immediate) {
+        const id = ++voiceSequence
+        sounding.set(id, { key, value })
+        options.send(value, true, Tone.immediate())
+      }
     } else if (previous) {
-      if (previous.sounding > 0) { options.send(value, false); previous.sounding-- }
+      if (previous.sounding > 0) {
+        const voice = [...sounding].find(([, entry]) => entry.key === key)
+        if (voice) {
+          sounding.delete(voice[0])
+          options.send(previous.value, false, Tone.immediate())
+          previous.sounding--
+        }
+      }
       if (--previous.count === 0) held.delete(key)
     }
-    if (!previous || !held.size) updateTimer()
+    if (!previous || !held.size) updateScheduler()
   }
   function update(key: string | number, changeValue: (value: T) => T) {
     const note = held.get(key)
-    if (note) note.value = changeValue(note.value)
+    if (!note) return
+    note.value = changeValue(note.value)
+    for (const voice of sounding.values()) if (voice.key === key) voice.value = note.value
   }
   watch(options.bpm, (bpm) => {
     localBeat = localPosition()
     localStart = performance.now()
     localTempo = bpm
+    updateScheduler()
   }, { flush: 'sync' })
   watch([options.division, options.playing], ([division], [previousDivision]) => {
-    if (division && !previousDivision) release()
-    updateTimer()
+    if (division && !previousDivision) releaseVoices(Tone.immediate())
+    updateScheduler()
   }, { flush: 'sync' })
-  onBeforeUnmount(() => {
-    if (timer !== undefined) clearInterval(timer)
-    if (attackTimer !== undefined) clearTimeout(attackTimer)
-  })
+  onBeforeUnmount(stopClocks)
   return { change, update }
 }

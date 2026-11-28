@@ -3,14 +3,15 @@
 
 import type { GridItem, LoopAutomation, LoopNote, LoopQuantize } from './grid'
 import { automationRow, noteRow, rowKey } from './loopRows'
+import * as Tone from 'tone'
 
 export type BankEvent =
-  | { kind: 'live-note'; bankId: string; instrumentId: string; note: number; velocity: number; bend?: number; on: boolean }
-  | { kind: 'live-automation'; bankId: string; sourceId: string; parameter: string; value: number; active?: boolean; motion?: boolean }
+  | { kind: 'live-note'; bankId: string; instrumentId: string; note: number; velocity: number; bend?: number; on: boolean; time?: number }
+  | { kind: 'live-automation'; bankId: string; sourceId: string; parameter: string; value: number; active?: boolean; motion?: boolean; time?: number }
   | { kind: 'live-automation-start'; bankId: string; sourceId: string; parameter: string; value: number }
   | { kind: 'live-automation-end'; bankId: string; sourceId: string; parameter: string }
-  | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean }
-  | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation; remove?: boolean }
+  | { kind: 'loop-note'; bankId: string; voiceId: string; note: LoopNote; on: boolean; time?: number }
+  | { kind: 'loop-automation'; bankId?: string; owner: string; event?: LoopAutomation; remove?: boolean; time?: number }
 
 export class BankEventBus {
   private listeners = new Set<(event: BankEvent) => void>()
@@ -32,11 +33,17 @@ export class TransportClock {
   private stoppedStarted: number
 
   private now: () => number
+  private readonly transportPosition?: () => number
 
-  constructor(now: () => number = () => performance.now()) { this.now = now; this.stoppedStarted = now() }
+  constructor(now: () => number = () => performance.now(), transportPosition?: () => number) {
+    this.now = now
+    this.transportPosition = transportPosition
+    this.stoppedStarted = now()
+  }
 
   position() {
-    return this.beat + (this.running ? (this.now() - this.started) * this.tempo / 60000 : 0)
+    if (!this.running) return this.beat
+    return this.transportPosition?.() ?? this.beat + (this.now() - this.started) * this.tempo / 60000
   }
 
   repeatPosition() {
@@ -87,7 +94,7 @@ export class Metronome {
 
 type Loop = Extract<GridItem, { type: 'sequenced-loop' }>
 type Voice = { id: number; note: LoopNote; end: number }
-type State = { id: string; enabled: boolean; index: number; origin: number; last: number; pending?: { index: number; at: number }; voices: Voice[]; automation: Map<string, LoopAutomation> }
+type State = { id: string; enabled: boolean; index: number; origin: number; displayIndex: number; displayOrigin: number; last: number; pending?: { index: number; at: number }; voices: Voice[]; automation: Map<string, LoopAutomation>; scheduledEvents: Set<number> }
 type Recording = { index: number; start: number; origin: number; quantize: LoopQuantize; note: Omit<LoopNote, 'position' | 'duration'> }
 type MotionRecording = { bucket: number; origin: number; loop: Loop; clip: number; events: LoopAutomation[]; event: LoopAutomation; pending?: LoopAutomation; last: number; recorded: Map<LoopAutomation, number> }
 
@@ -98,17 +105,19 @@ export class SequencedLoopEngine {
   private voiceId = 0
   private loops: () => Loop[]
   private position: () => number
-  private send: (id: number, note: LoopNote, on: boolean, loopId: string) => void
-  private sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void
+  private send: (id: number, note: LoopNote, on: boolean, loopId: string, time?: number) => void
+  private sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean, time?: number) => void
   private bankId: string
   private clipIndex: (loop: Loop) => number
   private sameBank: (first: string, second: string) => boolean
+  private scheduled = false
+  private readonly transport = Tone.getTransport()
 
   constructor(
     loops: () => Loop[],
     position: () => number,
-    send: (id: number, note: LoopNote, on: boolean, loopId: string) => void,
-    sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean) => void = () => {},
+    send: (id: number, note: LoopNote, on: boolean, loopId: string, time?: number) => void,
+    sendAutomation: (loopId: string, event?: LoopAutomation, remove?: boolean, time?: number) => void = () => {},
     bankId = '',
     clipIndex: (loop: Loop) => number = (loop) => loop.settings.clipIndex,
     sameBank: (first: string, second: string) => boolean = (first, second) => first === second,
@@ -116,13 +125,31 @@ export class SequencedLoopEngine {
 
   isEnabled(id: string) { return this.states.get(id)?.enabled ?? false }
   isPending(id: string) { return !!this.states.get(id)?.pending }
+  setScheduled(scheduled: boolean) {
+    if (this.scheduled === scheduled) return
+    this.scheduled = scheduled
+    if (!scheduled) {
+      for (const state of this.states.values()) this.clearScheduled(state)
+      return
+    }
+    for (const state of this.states.values()) this.scheduleState(state)
+  }
+
+  refresh() {
+    if (!this.scheduled) return
+    for (const state of this.states.values()) {
+      this.clearScheduled(state)
+      this.release(state)
+      this.scheduleState(state)
+    }
+  }
   playhead(id: string, index: number) {
     const state = this.states.get(id)
     const loop = this.loops().find((item) => item.id === id)
     const now = this.position()
-    if (!state || !loop || state.index !== index || now < state.origin) return undefined
+    if (!state || !loop || state.displayIndex !== index || now < state.displayOrigin) return undefined
     const length = loop.settings.barLength * 4
-    return ((now - state.origin) % length + length) % length / length
+    return ((now - state.displayOrigin) % length + length) % length / length
   }
 
   private startTime(loop: Loop, now: number) {
@@ -133,27 +160,164 @@ export class SequencedLoopEngine {
   toggle(loop: Loop, now = this.position(), immediate = false) {
     const state = this.states.get(loop.id)
     if (state?.enabled) {
+      this.clearScheduled(state)
       this.release(state)
       this.states.delete(loop.id)
       return
     }
     const at = immediate ? now : this.startTime(loop, now)
     const index = this.clipIndex(loop)
-    this.states.set(loop.id, { id: loop.id, enabled: true, index, origin: at,
-      last: at - 1e-8, pending: at > now ? { index, at } : undefined, voices: [], automation: new Map() })
+    const next: State = { id: loop.id, enabled: true, index, origin: at, displayIndex: index, displayOrigin: at,
+      last: at - 1e-8, pending: at > now ? { index, at } : undefined, voices: [], automation: new Map(), scheduledEvents: new Set() }
+    this.states.set(loop.id, next)
+    if (this.scheduled) this.scheduleState(next)
   }
 
-  private release(state: State) {
-    this.silence(state.id)
-    this.sendAutomation(state.id)
+  private release(state: State, time = Tone.immediate()) {
+    for (const voice of state.voices) this.send(voice.id, voice.note, false, state.id, time)
+    state.voices = []
+    this.sendAutomation(state.id, undefined, false, time)
     state.automation.clear()
   }
 
   silence(id: string) {
     const state = this.states.get(id)
     if (!state) return
-    for (const voice of state.voices) this.send(voice.id, voice.note, false, state.id)
-    state.voices = []
+    this.release(state)
+    if (this.scheduled) {
+      this.clearScheduled(state)
+      this.scheduleState(state)
+    }
+  }
+
+  private clearScheduled(state: State) {
+    for (const event of state.scheduledEvents) this.transport.clear(event)
+    state.scheduledEvents.clear()
+  }
+
+  private scheduleAt(state: State, beat: number, action: (time: number) => void) {
+    const ticks = Math.max(0, Math.round(beat * this.transport.PPQ))
+    let eventId = -1
+    eventId = this.transport.scheduleOnce((time) => {
+      state.scheduledEvents.delete(eventId)
+      if (this.scheduled && state.enabled && this.states.get(state.id) === state) action(time)
+    }, `${ticks}i`)
+    state.scheduledEvents.add(eventId)
+  }
+
+  private scheduleState(state: State, from = this.position()) {
+    if (!this.scheduled || !state.enabled) return
+    const loop = this.loops().find((item) => item.id === state.id)
+    if (!loop) {
+      this.release(state)
+      this.states.delete(state.id)
+      return
+    }
+    const length = loop.settings.barLength * 4
+    const desiredIndex = this.clipIndex(loop)
+    if (state.pending?.index === state.index && state.origin > from) {
+      const start = state.origin
+      this.scheduleCycle(state, loop, start, state.index, start)
+      return
+    }
+    if (state.pending?.index !== state.index && state.pending && from >= state.pending.at) {
+      this.switchClip(state, loop, state.pending.index, state.pending.at)
+      return
+    }
+    if (desiredIndex !== state.index) {
+      if (!state.pending || state.pending.index !== desiredIndex) {
+        const at = loop.settings.syncMode === 'sync' ? Math.ceil(from / length) * length : from
+        state.pending = at > from ? { index: desiredIndex, at } : undefined
+        if (at <= from) {
+          this.switchClip(state, loop, desiredIndex, from)
+          return
+        }
+      }
+    } else if (state.pending?.index !== state.index) state.pending = undefined
+    const origin = state.origin
+    const cycle = Math.max(0, Math.floor((from - origin) / length))
+    const cycleOrigin = origin + cycle * length
+    this.scheduleCycle(state, loop, cycleOrigin, state.index, Math.max(from, cycleOrigin))
+  }
+
+  private switchClip(state: State, loop: Loop, index: number, at: number, time?: number) {
+    this.clearScheduled(state)
+    this.release(state, time)
+    state.index = index
+    state.origin = at
+    state.last = at - 1e-8
+    state.pending = undefined
+    Tone.getDraw().schedule(() => {
+      if (this.states.get(state.id) !== state) return
+      state.displayIndex = index
+      state.displayOrigin = at
+    }, time ?? Tone.immediate())
+    this.scheduleCycle(state, loop, at, index, at, time)
+  }
+
+  private scheduleCycle(state: State, loop: Loop, origin: number, index: number, from: number, boundaryTime?: number) {
+    const length = loop.settings.barLength * 4
+    const end = origin + length
+    const pending = state.pending
+    const switchAt = pending && pending.index !== index ? pending.at : end
+    const muted = new Set((loop.settings.mutedRows?.[index] ?? []).map((row) => rowKey(row, this.bankId)))
+    for (const note of loop.settings.clips[index] ?? []) {
+      if (muted.has(rowKey(noteRow(note), this.bankId))) continue
+      const at = origin + note.position
+      if (at < from - 1e-8 || at >= switchAt - 1e-8) continue
+      const voiceId = ++this.voiceId
+      const attack = (time: number) => {
+        if (!state.enabled) return
+        state.voices.push({ id: voiceId, note, end: at + note.duration })
+        this.send(voiceId, note, true, state.id, time)
+      }
+      if (boundaryTime !== undefined && Math.round(at * this.transport.PPQ) === Math.round(origin * this.transport.PPQ)) {
+        attack(boundaryTime)
+      } else this.scheduleAt(state, at, attack)
+      const offAt = at + note.duration
+      const releaseAt = Math.max(offAt, (Math.round(at * this.transport.PPQ) + 1) / this.transport.PPQ)
+      this.scheduleAt(state, releaseAt, (time) => {
+        const voiceIndex = state.voices.findIndex((voice) => voice.id === voiceId)
+        if (voiceIndex < 0) return
+        const [voice] = state.voices.splice(voiceIndex, 1)
+        this.send(voiceId, voice!.note, false, state.id, time)
+      })
+    }
+    for (const event of loop.settings.automation[index] ?? []) {
+      if (muted.has(rowKey(automationRow(event), this.bankId))) continue
+      const at = origin + event.position
+      if (at < from - 1e-8 || at >= switchAt - 1e-8) continue
+      const automate = (time: number) => {
+        state.automation.set(rowKey(automationRow(event), this.bankId), event)
+        this.sendAutomation(state.id, event, false, time)
+      }
+      if (boundaryTime !== undefined && Math.round(at * this.transport.PPQ) === Math.round(origin * this.transport.PPQ)) {
+        automate(boundaryTime)
+      } else this.scheduleAt(state, at, automate)
+    }
+    this.scheduleAt(state, switchAt, (time) => {
+      const currentLoop = this.loops().find((item) => item.id === state.id)
+      if (!currentLoop) { this.release(state); this.states.delete(state.id); return }
+      if (pending && pending.index !== index && pending.at <= switchAt + 1e-8) {
+        this.switchClip(state, currentLoop, pending.index, switchAt, time)
+      } else {
+        state.origin = switchAt
+        const desired = this.clipIndex(currentLoop)
+        if (desired !== state.index) {
+          const nextAt = currentLoop.settings.syncMode === 'sync'
+            ? Math.ceil(switchAt / (currentLoop.settings.barLength * 4)) * (currentLoop.settings.barLength * 4)
+            : switchAt
+          if (nextAt <= switchAt + 1e-8) this.switchClip(state, currentLoop, desired, switchAt, time)
+          else {
+            state.pending = { index: desired, at: nextAt }
+            this.scheduleCycle(state, currentLoop, switchAt, state.index, switchAt, time)
+          }
+        } else {
+          state.pending = undefined
+          this.scheduleCycle(state, currentLoop, switchAt, state.index, switchAt, time)
+        }
+      }
+    })
   }
 
   tick() {
@@ -205,6 +369,8 @@ export class SequencedLoopEngine {
         this.release(state)
         state.index = state.pending.index
         state.origin = state.pending.at
+        state.displayIndex = state.index
+        state.displayOrigin = state.origin
         state.last = state.origin - 1e-8
         state.pending = undefined
         this.playRange(state, clips[String(state.index)] ?? [], automation[String(state.index)] ?? [], length, now)
@@ -252,9 +418,9 @@ export class SequencedLoopEngine {
     state.last = now
   }
 
-  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId, motion = false, onlyExisting = false) {
-    this.tick()
-    const now = this.position()
+  recordAutomation(sourceId: string, parameter: string, value: number, active?: boolean, bankId = this.bankId, motion = false, onlyExisting = false, audioTime?: number) {
+    if (!this.scheduled) this.tick()
+    const now = audioTime === undefined ? this.position() : this.transport.getTicksAtTime(audioTime) / this.transport.PPQ
     for (const loop of this.loops()) {
       if (!loop.settings.armed || (loop.settings.recordScope !== 'all' && !this.sameBank(bankId, this.bankId))) continue
       const state = this.states.get(loop.id)
@@ -338,7 +504,7 @@ export class SequencedLoopEngine {
   }
 
   endAutomation(sourceId: string, parameter: string, bankId = this.bankId) {
-    this.tick()
+    if (!this.scheduled) this.tick()
     for (const loop of this.loops()) {
       const key = JSON.stringify([loop.id, bankId, sourceId, parameter])
       const motion = this.motions.get(key)
@@ -347,9 +513,9 @@ export class SequencedLoopEngine {
     }
   }
 
-  record(instrumentId: string, note: number, velocity: number, bend: number | undefined, on: boolean, bankId = this.bankId) {
-    this.tick()
-    const now = this.position()
+  record(instrumentId: string, note: number, velocity: number, bend: number | undefined, on: boolean, bankId = this.bankId, audioTime?: number) {
+    if (!this.scheduled) this.tick()
+    const now = audioTime === undefined ? this.position() : this.transport.getTicksAtTime(audioTime) / this.transport.PPQ
     for (const loop of this.loops()) {
       const key = JSON.stringify([loop.id, bankId, instrumentId, note])
       if (on && loop.settings.armed && (loop.settings.recordScope === 'all' || this.sameBank(bankId, this.bankId))) {
@@ -380,6 +546,7 @@ export class SequencedLoopEngine {
   }
 
   suspend() {
+    for (const state of this.states.values()) this.clearScheduled(state)
     const now = this.position()
     for (const [key, pending] of this.recordings) {
       const [loopId] = JSON.parse(key) as [string, string, string, number]
@@ -403,12 +570,17 @@ export class SequencedLoopEngine {
       const at = this.startTime(loop, now)
       state.index = this.clipIndex(loop)
       state.origin = at
+      state.displayIndex = state.index
+      state.displayOrigin = at
       state.last = at - 1e-8
       state.pending = at > now ? { index: state.index, at } : undefined
+      if (this.scheduled) this.scheduleState(state)
     }
   }
 
   stop() {
+    this.scheduled = false
+    for (const state of this.states.values()) this.clearScheduled(state)
     this.suspend()
     this.states.clear()
   }

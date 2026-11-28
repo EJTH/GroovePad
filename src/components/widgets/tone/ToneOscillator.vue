@@ -9,6 +9,7 @@ const props = defineProps<{
   settings: ToneElementSettings
   baseFrequency: number
   notes: HeldNote[]
+  audioTime?: number
   audioOutput?: Tone.InputNode
   muted: boolean
 }>()
@@ -22,11 +23,12 @@ const hasControls = computed(() => props.settings.noteMode === 'continuous' ||
 let oscillator: ToneOscillator | undefined
 let generation = 0
 let disposed = false
+let playbackNotes = props.notes
 
-function updateOscillator(notes: HeldNote[], playContinuous: boolean) {
+function updateOscillator(notes: HeldNote[], playContinuous: boolean, time?: number) {
   if (!oscillator) return
   try {
-    oscillator.update(props.settings, props.baseFrequency, notes, playContinuous)
+    oscillator.update(props.settings, props.baseFrequency, notes, playContinuous, time)
     error.value = ''
   } catch (cause) {
     error.value = `Oscillator audio error: ${cause instanceof Error ? cause.message : String(cause)}`
@@ -34,37 +36,40 @@ function updateOscillator(notes: HeldNote[], playContinuous: boolean) {
   }
 }
 
-function sync() {
+function sync(notes = playbackNotes, time = Tone.immediate()) {
   const playContinuous = props.settings.noteMode === 'always-on' || (props.settings.noteMode === 'continuous' && continuous.value)
-  const active = props.notes.length > 0 || playContinuous
+  const active = notes.length > 0 || playContinuous
   if (!active) {
     generation++
     waitingForAudio.value = false
-    updateOscillator([], false)
+    updateOscillator([], false, time)
     return
   }
   if (oscillator) {
-    updateOscillator(props.notes, playContinuous)
+    updateOscillator(notes, playContinuous, time)
     return
   }
   const request = ++generation
   waitingForAudio.value = true
-  void (async () => {
+  const reportError = (cause: unknown) => {
+    if (disposed || request !== generation) return
+    waitingForAudio.value = false
+    error.value = `Oscillator audio error: ${cause instanceof Error ? cause.message : String(cause)}`
+    console.error(error.value, cause)
+  }
+  const start = () => {
+    if (disposed || request !== generation) return
     try {
-      await Tone.start()
-      if (disposed || request !== generation) return
       oscillator = new ToneOscillator(props.settings, props.audioOutput)
-      oscillator.update(props.settings, props.baseFrequency, props.notes,
-        props.settings.noteMode === 'always-on' || (props.settings.noteMode === 'continuous' && continuous.value))
+      oscillator.update(props.settings, props.baseFrequency, notes, playContinuous, time)
       waitingForAudio.value = false
       error.value = ''
     } catch (cause) {
-      if (disposed || request !== generation) return
-      waitingForAudio.value = false
-      error.value = `Oscillator audio error: ${cause instanceof Error ? cause.message : String(cause)}`
-      console.error(error.value, cause)
+      reportError(cause)
     }
-  })()
+  }
+  if (Tone.getContext().state === 'running') start()
+  else void Tone.start().then(start).catch(reportError)
 }
 
 watch(() => props.settings.noteMode, (mode) => {
@@ -72,9 +77,19 @@ watch(() => props.settings.noteMode, (mode) => {
 }, { flush: 'sync' })
 watch(() => [props.settings.oscillatorType, props.settings.frequency, props.settings.detune,
   props.settings.attack, props.settings.release, props.settings.noteMode, props.settings.notePriority, props.settings.polyphony,
-  props.baseFrequency, continuous.value,
-  props.notes.map((note) => `${note.note}:${note.count}:${note.velocity}:${note.bend ?? 0}`).join(',')],
-sync, { immediate: true, flush: 'sync' })
+  props.baseFrequency, continuous.value],
+() => sync(), { immediate: true, flush: 'sync' })
+
+function setPlaybackNotes(notes: HeldNote[], time?: number) {
+  if (notes.length === playbackNotes.length && notes.every((note, index) => {
+    const previous = playbackNotes[index]
+    return previous && previous.note === note.note && previous.count === note.count &&
+      previous.velocity === note.velocity && previous.bend === note.bend
+  })) return
+  playbackNotes = notes
+  sync(notes, time)
+}
+defineExpose({ setPlaybackNotes })
 
 onBeforeUnmount(() => {
   disposed = true
@@ -90,7 +105,7 @@ onBeforeUnmount(() => {
     :aria-pressed="hasControls ? undefined : muted" @click="!hasControls && emit('toggleMute')">
     <strong>{{ label }}</strong>
     <small>{{ settings.noteMode === 'always-on' ? 'Always on' : 'Oscillator' }}</small>
-    <button v-if="settings.noteMode === 'always-on' && (waitingForAudio || error)" type="button" @click="sync">Enable audio</button>
+    <button v-if="settings.noteMode === 'always-on' && (waitingForAudio || error)" type="button" @click="sync()">Enable audio</button>
     <button v-else-if="settings.noteMode === 'continuous'" type="button" :aria-pressed="continuous"
       @click="continuous = !continuous">
       {{ continuous ? 'Stop' : 'Start' }}

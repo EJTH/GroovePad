@@ -4,7 +4,7 @@
 import { nextTick, onUnmounted, ref, watch, type Ref } from 'vue'
 import * as Tone from 'tone'
 import type { Bank } from '../project'
-import { Metronome, TransportClock } from '../sequencedLoop'
+import { TransportClock } from '../sequencedLoop'
 import { gridScopes, sameBankScope } from '../grid'
 
 export function useTransport(options: {
@@ -16,67 +16,51 @@ export function useTransport(options: {
   const playing = ref(false)
   const triggeredByInput = ref(false)
   const metronomeEnabled = ref(false)
-  const transportClock = new TransportClock()
+  const transport = Tone.getTransport()
+  const transportClock = new TransportClock(() => Tone.immediate() * 1000,
+    () => transport.getTicksAtTime(Tone.immediate()) / transport.PPQ)
   const beat = ref(0)
-  let beatTimer: number | undefined
-  let metronomeTimer: number | undefined
   let clickSynth: Tone.Synth | undefined
   let startingTransport = false
+  let generation = 0
 
-  const metronome = new Metronome((currentBeat) => {
+  function click(currentBeat: number, time: number) {
     try {
       clickSynth ??= new Tone.Synth({
         oscillator: { type: 'sine' },
         envelope: { attack: 0.001, decay: 0.025, sustain: 0, release: 0.01 },
         volume: -14,
       }).connect(Tone.getContext().rawContext.destination)
-      clickSynth.triggerAttackRelease(currentBeat % 4 === 0 ? 'C6' : 'G5', 0.03)
+      clickSynth.triggerAttackRelease(currentBeat % 4 === 0 ? 'C6' : 'G5', 0.03, time)
     } catch (error) {
       options.projectError.value = `Metronome audio failed: ${error instanceof Error ? error.message : String(error)}`
       console.error(options.projectError.value, error)
     }
-  })
-
-  function updateBeatTimer() {
-    if (beatTimer !== undefined) window.clearInterval(beatTimer)
-    if (playing.value) {
-      beatTimer = window.setInterval(() => {
-        beat.value = (beat.value + 1) % 4
-      }, 60000 / options.bpm.value)
-    } else {
-      beatTimer = undefined
-      beat.value = 0
-    }
   }
 
-  function clearMetronomeTimer() {
-    if (metronomeTimer !== undefined) window.clearTimeout(metronomeTimer)
-    metronomeTimer = undefined
+  function cancelClicks() {
+    if (!clickSynth) return
+    const time = Tone.immediate()
+    clickSynth.envelope.cancel(time)
+    clickSynth.triggerRelease(time)
   }
 
-  function scheduleMetronome(lastBeat?: number) {
-    if (!playing.value || !metronomeEnabled.value) return
-    const position = transportClock.position()
-    const remaining = (lastBeat ?? Math.floor(position)) + 1 - position
-    metronomeTimer = window.setTimeout(tickMetronome, Math.max(1, Math.ceil(remaining * 60000 / options.bpm.value)))
-  }
-
-  function tickMetronome() {
-    metronomeTimer = undefined
-    if (!playing.value || !metronomeEnabled.value) return
-    const position = transportClock.position()
-    metronome.tick(position, true)
-    scheduleMetronome(Math.floor(position))
-  }
+  const beatEvent = transport.scheduleRepeat((time) => {
+    const currentBeat = Math.round(transport.getTicksAtTime(time) / transport.PPQ)
+    if (metronomeEnabled.value) click(currentBeat, time)
+    const scheduledGeneration = generation
+    Tone.getDraw().schedule(() => {
+      if (playing.value && generation === scheduledGeneration) beat.value = currentBeat % 4
+    }, time)
+  }, '4n')
 
   function beginPlayback(fromInput: boolean) {
     triggeredByInput.value = fromInput
-    metronome.reset()
+    transport.bpm.setValueAtTime(options.bpm.value, Tone.immediate())
+    transport.start(Tone.immediate(), 0)
     transportClock.start(options.bpm.value)
     playing.value = true
-    if (metronomeEnabled.value) tickMetronome()
     beat.value = 0
-    updateBeatTimer()
   }
 
   async function startFromInput(bankId: string): Promise<boolean> {
@@ -102,9 +86,10 @@ export function useTransport(options: {
     if (playing.value) {
       playing.value = false
       transportClock.stop()
-      clearMetronomeTimer()
+      generation++
+      transport.stop(Tone.immediate())
+      cancelClicks()
       beat.value = 0
-      updateBeatTimer()
       return
     }
     startingTransport = true
@@ -120,22 +105,17 @@ export function useTransport(options: {
 
   watch(options.bpm, () => {
     transportClock.setTempo(options.bpm.value)
-    updateBeatTimer()
-    clearMetronomeTimer()
-    if (playing.value && metronomeEnabled.value) tickMetronome()
+    transport.bpm.setValueAtTime(options.bpm.value, Tone.immediate())
   }, { flush: 'sync' })
 
   watch(metronomeEnabled, (enabled) => {
-    clearMetronomeTimer()
-    if (playing.value && enabled) {
-      metronome.tick(transportClock.position(), false)
-      scheduleMetronome()
-    }
+    if (!enabled) cancelClicks()
   }, { flush: 'sync' })
 
   onUnmounted(() => {
-    if (beatTimer !== undefined) window.clearInterval(beatTimer)
-    clearMetronomeTimer()
+    generation++
+    if (playing.value) transport.stop(Tone.immediate())
+    transport.clear(beatEvent)
     clickSynth?.dispose()
   })
 

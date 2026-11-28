@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import * as Tone from 'tone'
 import { gridScopes, sameBankScope, MAX_LOOP_CLIP_INDEX, type GridItem, type GridLayout, type HeldNote, type LoopAutomation, type LoopNote, type ParameterOutput } from '../grid'
 import { effectiveControls, type BoundaryNumeric, type NumericSignal } from '../modulation'
 import { outputs } from '../parameters'
@@ -25,35 +26,40 @@ export function useGridPlayback(options: {
   startOnInput: () => ((bankId: string) => Promise<boolean>) | undefined
   signals: Map<string, number>
   routeNote: (sourceId: string, output: ParameterOutput) => void
+  loopNotesChanged?: (id: string, time: number) => void
   boundaryNumeric?: () => BoundaryNumeric[]
   modulationLayout?: () => GridLayout
   boundaryOutputs?: ReadonlyMap<string, NumericSignal>
 }) {
-  const loopVoices = reactive(new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>())
+  const loopVoices = new Map<string, { instrumentId: string; note: number; velocity: number; bend?: number }>()
   const loopAutomation = reactive(new Map<string, Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>>())
   const liveControls = reactive(new Set<string>())
   const manualOverrides = reactive(new Map<string, number>())
   const settingTimers = reactive(new Map<string, ReturnType<typeof setTimeout> | undefined>())
   let settingGesture = false
   let automationSequence = 0
+  const automationGenerations = new Map<string, number>()
   const loopStatus = ref(new Map<string, { enabled: boolean; pending: boolean }>())
   const loopPlayheads = ref(new Map<string, number>())
   const loopEditorPlayheads = ref(new Map<string, { index: number; position: number }>())
   const silentVoices = new Set<number>()
+  let playheadFrame: number | undefined
   const loopEngine = new SequencedLoopEngine(
     () => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop'),
     () => options.clock.position(),
-    (id, note, on, loopId) => {
+    (id, note, on, loopId, time) => {
       const loop = options.layout().items.find((item) => item.id === loopId && item.type === 'sequenced-loop')
       if (on && loop?.type === 'sequenced-loop') {
         note = { ...note, velocity: loop.settings.muted ? 0 : note.velocity * (loop.settings.volume ?? 1) }
         if (note.velocity === 0) { silentVoices.add(id); return }
       }
       if (!on && silentVoices.delete(id)) return
-      options.bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? options.bankId, voiceId: JSON.stringify([options.bankId, id]), note, on })
+      options.bankEvents.emit({ kind: 'loop-note', bankId: note.bankId ?? options.bankId,
+        voiceId: JSON.stringify([options.bankId, id]), note, on, time })
     },
-    (id, event, remove) => {
-      options.bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([options.bankId, id]), bankId: event ? (event.bankId ?? options.bankId) : undefined, event, remove })
+    (id, event, remove, time) => {
+      options.bankEvents.emit({ kind: 'loop-automation', owner: JSON.stringify([options.bankId, id]),
+        bankId: event ? (event.bankId ?? options.bankId) : undefined, event, remove, time })
     },
     options.bankId,
     (loop) => {
@@ -66,13 +72,17 @@ export function useGridPlayback(options: {
     .map((item) => [item.id, item.settings.muted] as const), (loops) => {
     for (const [id, muted] of loops) if (muted) loopEngine.silence(id)
   }, { flush: 'sync' })
+  watch(() => options.layout().items.filter((item): item is SequencedLoop => item.type === 'sequenced-loop')
+    .map((item) => [item.id, item.settings]), () => loopEngine.refresh(), { deep: true, flush: 'sync' })
 
   function updateLoopStatus() {
     const next = new Map<string, { enabled: boolean; pending: boolean }>()
     const playheads = new Map<string, number>()
     const editorPlayheads = new Map<string, { index: number; position: number }>()
     for (const item of options.layout().items) if (item.type === 'sequenced-loop') {
-      next.set(item.id, { enabled: loopEngine.isEnabled(item.id), pending: loopEngine.isPending(item.id) })
+      const enabled = loopEngine.isEnabled(item.id)
+      next.set(item.id, { enabled, pending: loopEngine.isPending(item.id) })
+      if (!enabled) continue
       const displayed = displayItems.value.find((entry) => entry.id === item.id)
       const position = loopEngine.playhead(item.id, displayed?.type === 'sequenced-loop' ? displayed.settings.clipIndex : item.settings.clipIndex)
       if (position !== undefined) playheads.set(item.id, position * 100)
@@ -83,13 +93,19 @@ export function useGridPlayback(options: {
     loopEditorPlayheads.value = editorPlayheads
     if (next.size !== loopStatus.value.size || [...next].some(([id, status]) =>
       status.enabled !== loopStatus.value.get(id)?.enabled || status.pending !== loopStatus.value.get(id)?.pending)) loopStatus.value = next
+    if (options.playing() && [...next.values()].some((status) => status.enabled)) {
+      if (playheadFrame === undefined) playheadFrame = requestAnimationFrame(refreshPlayheads)
+    } else if (playheadFrame !== undefined) {
+      cancelAnimationFrame(playheadFrame)
+      playheadFrame = undefined
+    }
   }
 
-  function startArmedLoops() {
+  function startArmedLoops(at = options.clock.position()) {
     for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
       loop.settings.armed && !loopEngine.isEnabled(loop.id)) {
       loop.settings.playing = true
-      loopEngine.toggle(loop, options.clock.position(), true)
+      loopEngine.toggle(loop, at, true)
       updateLoopStatus()
     }
   }
@@ -115,7 +131,6 @@ export function useGridPlayback(options: {
     else if (!item.settings.armed) {
       item.settings.playing = !loopEngine.isEnabled(id)
       loopEngine.toggle(item, options.clock.position())
-      loopEngine.tick()
     }
     updateLoopStatus()
   }
@@ -246,7 +261,6 @@ export function useGridPlayback(options: {
     setLoopArmed(loop, !loop.settings.armed)
     if (loopWantsPlayback(loop) && options.playing() && !options.editing() && !loopEngine.isEnabled(id)) {
       loopEngine.toggle(loop, options.clock.position())
-      loopEngine.tick()
     }
     updateLoopStatus()
   }
@@ -258,7 +272,6 @@ export function useGridPlayback(options: {
     loop.settings.playing = shouldPlay
     if (options.playing() && !options.editing() && loopEngine.isEnabled(id) !== shouldPlay) {
       loopEngine.toggle(loop, options.clock.position())
-      loopEngine.tick()
     }
     updateLoopStatus()
   }
@@ -280,9 +293,9 @@ export function useGridPlayback(options: {
     inputStart ??= startOnInput(options.bankId).finally(() => { inputStart = undefined })
   }
 
-  function captureNote(id: string, note: number, on: boolean, velocity: number, bend?: number) {
+  function captureNote(id: string, note: number, on: boolean, velocity: number, bend?: number, time = Tone.immediate()) {
     if (options.editing() && on) return
-    const event: BankEvent = { kind: 'live-note', bankId: options.bankId, instrumentId: id, note, on, velocity, bend }
+    const event: BankEvent = { kind: 'live-note', bankId: options.bankId, instrumentId: id, note, on, velocity, bend, time }
     if (options.playing()) options.bankEvents.emit(event)
     else {
       if (on) beginInput()
@@ -299,39 +312,52 @@ export function useGridPlayback(options: {
           loopEngine.toggle(loop, options.clock.position(), true)
           updateLoopStatus()
         }
-        loopEngine.record(event.instrumentId, event.note, event.velocity, event.bend, event.on, event.bankId)
+        loopEngine.record(event.instrumentId, event.note, event.velocity, event.bend, event.on, event.bankId, event.time)
       }
     } else if (event.kind === 'live-automation') {
-      if (options.playing()) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, event.active, event.bankId, event.motion)
+      if (options.playing()) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, event.active,
+        event.bankId, event.motion, false, event.time)
     } else if (event.kind === 'live-automation-start') {
       if (options.playing()) loopEngine.recordAutomation(event.sourceId, event.parameter, event.value, undefined, event.bankId, true, true)
     } else if (event.kind === 'live-automation-end') {
       loopEngine.endAutomation(event.sourceId, event.parameter, event.bankId)
     } else if (event.kind === 'loop-note' && event.bankId === options.bankId) {
-      if (!event.on) loopVoices.delete(event.voiceId)
       const source = options.layout().items.find((item) => item.id === event.note.instrumentId)
+      if (!event.on) loopVoices.delete(event.voiceId)
       if (source?.type === 'piano-roll') {
-        options.routeNote(source.id, { parameter: 'note', value: event.note.note, on: event.on, velocity: event.note.velocity, bend: event.note.bend })
-      } else if (source?.type === 'instrument-pad' && event.on) {
-        loopVoices.set(event.voiceId, { instrumentId: source.id, note: event.note.note, velocity: event.note.velocity, bend: event.note.bend })
+        options.routeNote(source.id, { parameter: 'note', value: event.note.note, on: event.on,
+          velocity: event.note.velocity, bend: event.note.bend, time: event.time })
+      } else if (source?.type === 'instrument-pad') {
+        if (event.on) loopVoices.set(event.voiceId, { instrumentId: source.id, note: event.note.note, velocity: event.note.velocity, bend: event.note.bend })
+        options.loopNotesChanged?.(source.id, event.time ?? Tone.immediate())
       }
     } else if (event.kind === 'loop-automation') {
-      if (!event.event) { loopAutomation.delete(event.owner); return }
-      if (event.bankId !== options.bankId) return
-      if (event.remove) {
-        loopAutomation.get(event.owner)?.delete(`${event.event.sourceId}:${event.event.parameter}`)
+      if (!event.event) {
+        automationGenerations.set(event.owner, (automationGenerations.get(event.owner) ?? 0) + 1)
+        loopAutomation.delete(event.owner)
         return
       }
-      let values = loopAutomation.get(event.owner)
-      if (!values) { loopAutomation.set(event.owner, new Map()); values = loopAutomation.get(event.owner)! }
-      values.set(`${event.event.sourceId}:${event.event.parameter}`, {
-        sourceId: event.event.sourceId, value: event.event.value, active: event.event.active, sequence: ++automationSequence,
-      })
+      if (event.bankId !== options.bankId) return
+      const generation = automationGenerations.get(event.owner) ?? 0
+      const apply = () => {
+        if (automationGenerations.get(event.owner) !== generation) return
+        if (event.remove) {
+          loopAutomation.get(event.owner)?.delete(`${event.event!.sourceId}:${event.event!.parameter}`)
+          return
+        }
+        let values = loopAutomation.get(event.owner)
+        if (!values) { loopAutomation.set(event.owner, new Map()); values = loopAutomation.get(event.owner)! }
+        values.set(`${event.event!.sourceId}:${event.event!.parameter}`, {
+          sourceId: event.event!.sourceId, value: event.event!.value,
+          active: event.event!.active, sequence: ++automationSequence,
+        })
+      }
+      if (event.time !== undefined && event.time > Tone.immediate()) Tone.getDraw().schedule(apply, event.time)
+      else apply()
     }
   }
   const unsubscribeBankEvents = options.bankEvents.subscribe(receiveBankEvent)
 
-  let loopTimer: ReturnType<typeof setInterval> | undefined
   const playbackAutomation = computed(() => {
     const selected = new Map<string, { sourceId: string; value: number; active?: boolean; sequence: number }>()
     for (const values of loopAutomation.values()) for (const [key, event] of values) {
@@ -468,13 +494,19 @@ export function useGridPlayback(options: {
       loop.settings.automation[String(selection.index)] ??= []
     }
   }, { immediate: true, flush: 'sync' })
+  watch(() => JSON.stringify(displayItems.value.filter((item): item is SequencedLoop => item.type === 'sequenced-loop')
+    .map((item) => [item.id, item.settings.clipIndex])), () => loopEngine.refresh(), { flush: 'sync' })
+
+  function refreshPlayheads() {
+    playheadFrame = undefined
+    updateLoopStatus()
+  }
 
   watch(options.playing, (playing, previous) => {
     if (!playing) finishSettingChanges()
-    if (loopTimer !== undefined) clearInterval(loopTimer)
-    loopTimer = undefined
     if (!playing) loopEngine.stop()
     else {
+      loopEngine.setScheduled(true)
       const starting = !previous
       const transportStarting = previous === false && !!options.transportStartImmediate()
       for (const loop of options.layout().items) if (loop.type === 'sequenced-loop' &&
@@ -483,9 +515,8 @@ export function useGridPlayback(options: {
         loopEngine.toggle(loop, transportStarting ? 0 : options.clock.position(),
           transportStarting || (starting && !!options.transportStartImmediate() && loop.settings.armed))
       }
-      loopEngine.tick()
-      loopTimer = setInterval(() => { loopEngine.tick(); updateLoopStatus() }, 20)
     }
+    updateLoopStatus()
   }, { immediate: true, flush: 'sync' })
 
   watch([options.playing, options.editing], ([playing, editing]) => {
@@ -495,7 +526,7 @@ export function useGridPlayback(options: {
 
   onBeforeUnmount(() => {
     finishSettingChanges()
-    if (loopTimer !== undefined) clearInterval(loopTimer)
+    if (playheadFrame !== undefined) cancelAnimationFrame(playheadFrame)
     loopEngine.stop()
     unsubscribeBankEvents()
   })

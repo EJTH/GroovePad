@@ -215,6 +215,7 @@ export type GridItem = GridItemBase & (
 export interface ParameterOutput {
   parameter: string
   value: number
+  time?: number
   delta?: number
   active?: boolean
   on?: boolean

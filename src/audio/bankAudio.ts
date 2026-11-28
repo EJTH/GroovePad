@@ -21,6 +21,7 @@ interface Entry {
   wet?: Tone.Gain
   channels?: Map<string, Tone.Channel>
   reverbDecay?: { desired: number; pending: boolean; failed: boolean }
+  filterFrequency?: { signal: Tone.Signal; value: number }
 }
 export interface BoundaryAudio {
   port: ExposedPort
@@ -85,6 +86,13 @@ export class BankAudio {
 
   getInput(id: string) { return this.entries.get(id)?.input }
   getOutput(id: string) { return this.entries.get(id)?.output }
+  getInstrumentFilterFrequency(id: string) { return this.entries.get(id)?.filterFrequency?.signal }
+  setInstrumentFilterFrequency(id: string, value: number) {
+    const frequency = this.entries.get(id)?.filterFrequency
+    if (!frequency) return
+    frequency.value = value
+    if (!this.isModulationDriven(id, 'filterFrequency')) frequency.signal.value = value
+  }
   isModulationDriven(id: string, parameter: string) { return this.drivenParams.has(`${id}:${parameter}`) }
   hasModulationMonitor(id: string) { return this.modulationMonitors.has(id) }
   getModulationSample(id: string) {
@@ -281,6 +289,13 @@ export class BankAudio {
       this.signature = signature
       this.boundary = boundary
     }
+    for (const item of items) if (item.type === 'instrument-pad' && item.settings.instrumentType === '303') {
+      const entry = this.entries.get(item.id)
+      if (entry && !entry.filterFrequency) {
+        const value = item.settings.instrumentParams.filterFrequency
+        entry.filterFrequency = { signal: new Tone.Signal(value), value }
+      }
+    }
     this.updateModulation(layout, modulationOptions)
     for (const item of items) {
       if (item.type !== 'tone-element') continue
@@ -390,9 +405,10 @@ export class BankAudio {
       layout.connections,
       items.map((item) => [item.id, item.type,
         item.type === 'lfo' ? [item.settings.waveform, item.settings.rateMode, item.settings.rate, item.settings.smoothness] :
-          item.type === 'knob' ? [item.settings.min, item.settings.max] :
+          item.type === 'knob' ? [item.settings.min, item.settings.max, item.settings.step] :
             item.type === 'mod-wheel' ? [item.settings.autoCenter, options.wheelPositions?.has(item.id),
               options.automatedWheels?.has(item.id)] :
+                item.type === 'instrument-pad' ? item.settings.instrumentType :
               item.type === 'tone-element' ? item.settings.elementType :
                 item.type === 'output-selector' ? item.settings : undefined,
         outputs(item)]),
@@ -452,6 +468,10 @@ export class BankAudio {
           const nextValue = next.signals?.get(`${item.id}:value`) ?? item.settings.value
           return Math.max(item.settings.min, Math.min(item.settings.max, nextValue))
         }
+        if (item.type === 'instrument-pad' && item.settings.instrumentType === '303' && parameter === 'filterFrequency') {
+          const nextValue: unknown = item.settings.instrumentParams.filterFrequency
+          return typeof nextValue === 'number' ? nextValue : undefined
+        }
         if ((item.type === 'lfo' || item.type === 'mod-wheel' || item.type === 'tone-element') && parameter in item.settings) {
           const nextValue: unknown = Reflect.get(item.settings, parameter)
           return typeof nextValue === 'number' ? nextValue : undefined
@@ -496,6 +516,21 @@ export class BankAudio {
           if (source === null) return null
           if (!source) continue
           const { signal } = source
+          let sourceNode = source.node
+          if (target.type === 'instrument-pad' && target.settings.instrumentType === '303' &&
+            parameter === 'filterFrequency' && signal.source.type === 'knob') {
+            const { min, max, step } = signal.source.settings
+            const center = (min + max) / 2
+            const half = (max - min) / 2
+            const translate = create(new Tone.Add(-center))
+            const normalize = create(new Tone.Multiply(1 / half))
+            const quantize = create(new Tone.WaveShaper((sample) =>
+              Number(Math.max(min, Math.min(max, min + Math.round((center + sample * half - min) / step) * step)).toPrecision(12)), 2049))
+            connect(sourceNode, translate)
+            connect(translate, normalize)
+            connect(normalize, quantize)
+            sourceNode = quantize
+          }
           const center = (signal.max + signal.min) / 2
           const half = (signal.max - signal.min) / 2
           const translate = create(new Tone.Add(-center))
@@ -505,7 +540,7 @@ export class BankAudio {
             const mapped = numericContribution(wire, { ...signal, value: center + value * half }, target, min, max)
             return mapped.absolute ?? mapped.adjustment ?? 0
           }, 2049))
-          connect(source.node, translate)
+          connect(sourceNode, translate)
           connect(translate, normalize)
           connect(normalize, shape)
           if (result.absolute !== undefined) absolute = shape
@@ -604,6 +639,18 @@ export class BankAudio {
       }
 
       for (const item of items) {
+        if (item.type === 'instrument-pad' && item.settings.instrumentType === '303') {
+          const param = this.getInstrumentFilterFrequency(item.id)
+          const base: unknown = item.settings.instrumentParams.filterFrequency
+          if (param && typeof base === 'number' && canInput(item, 'filterFrequency', new Set())) {
+            const node = inputGraph(item, 'filterFrequency', base)
+            if (node) {
+              connect(node, param)
+              this.drivenParams.add(`${item.id}:filterFrequency`)
+            }
+          }
+          continue
+        }
         if (item.type !== 'tone-element' || item.settings.elementType === 'oscillator' || item.settings.elementType === 'noise') continue
         for (const input of inputs(item)) {
           if (input.kind !== 'number') continue
@@ -653,6 +700,9 @@ export class BankAudio {
     this.modulationValues = []
     this.modulationMonitors.clear()
     this.drivenParams.clear()
+    for (const entry of this.entries.values()) if (entry.filterFrequency && !entry.filterFrequency.signal.disposed) {
+      entry.filterFrequency.signal.value = entry.filterFrequency.value
+    }
     for (const id of this.rateDrivenLfos) {
       const lfo = this.lfos.get(id)
       if (lfo && !lfo.node.disposed) lfo.node.frequency.value = lfo.frequency
@@ -665,12 +715,12 @@ export class BankAudio {
     return typeof value === 'number' ? value : undefined
   }
 
-  setNotes(id: string, notes: HeldNote[]) {
+  setNotes(id: string, notes: HeldNote[], time = Tone.immediate()) {
     const entry = this.entries.get(id)
     if (!(entry?.processor instanceof Tone.Envelope)) return
     const active = notes.length > 0
-    if (active && !entry.active) entry.processor.triggerAttack(undefined, notes[notes.length - 1]!.velocity / 127)
-    else if (!active && entry.active) entry.processor.triggerRelease()
+    if (active && !entry.active) entry.processor.triggerAttack(time, notes[notes.length - 1]!.velocity / 127)
+    else if (!active && entry.active) entry.processor.triggerRelease(time)
     entry.active = active
   }
 
@@ -682,6 +732,7 @@ export class BankAudio {
   }
 
   private disposeEntry(entry: Entry) {
+    entry.filterFrequency?.signal.dispose()
     for (const channel of entry.channels?.values() ?? []) channel.dispose()
     entry.dry?.dispose()
     entry.wet?.dispose()

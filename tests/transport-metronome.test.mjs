@@ -6,138 +6,113 @@ import ts from 'typescript'
 import * as vue from 'vue'
 import { createServer } from 'vite'
 
-async function setup(clickLatency = 0) {
+async function setup() {
   const server = await createServer({ configFile: false, server: { middlewareMode: true }, logLevel: 'silent' })
   const sequencer = await server.ssrLoadModule('/src/sequencedLoop.ts')
   const source = await readFile(new URL('../src/composables/useTransport.ts', import.meta.url), 'utf8')
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   let now = 0
-  let positionCalls = 0
-  let timeoutStarts = 0
-  let nextId = 0
-  const timeouts = new Map()
-  const intervals = new Map()
-  const clicks = []
+  let callback
   let cleanup
   let disposed = false
-  class Clock extends sequencer.TransportClock {
-    constructor() { super(() => now) }
-    position() { positionCalls++; return super.position() }
+  const scheduledDraws = []
+  const clicks = []
+  const cancelledClicks = []
+  const releasedClicks = []
+  const starts = []
+  const stops = []
+  const tempos = []
+  const cleared = []
+  const transport = {
+    PPQ: 192,
+    bpm: { setValueAtTime: (value, time) => tempos.push([value, time]) },
+    scheduleRepeat: (fn, interval) => { callback = fn; assert.equal(interval, '4n'); return 7 },
+    getTicksAtTime: (time) => time * 192,
+    start: (...args) => starts.push(args),
+    stop: (...args) => stops.push(args),
+    clear: (id) => cleared.push(id),
   }
   class Synth {
+    envelope = { cancel: (time) => cancelledClicks.push(time) }
     connect() { return this }
-    triggerAttackRelease(note) { clicks.push({ note, at: now }); now += clickLatency }
+    triggerAttackRelease(note, duration, time) { clicks.push([note, duration, time]) }
+    triggerRelease(time) { releasedClicks.push(time) }
     dispose() { disposed = true }
   }
-  const window = {
-    setTimeout: (callback, delay) => { timeoutStarts++; const id = ++nextId; timeouts.set(id, { callback, at: now + delay }); return id },
-    clearTimeout: (id) => timeouts.delete(id),
-    setInterval: (callback, delay) => { const id = ++nextId; intervals.set(id, { callback, delay }); return id },
-    clearInterval: (id) => intervals.delete(id),
+  const tone = {
+    Synth, start: async () => {}, immediate: () => now,
+    getTransport: () => transport,
+    getDraw: () => ({ schedule: (fn, time) => scheduledDraws.push([fn, time]) }),
+    getContext: () => ({ rawContext: { destination: {} } }),
   }
-  const vueMock = { ...vue, onUnmounted: (callback) => { cleanup = callback } }
-  const tone = { Synth, start: async () => {}, getContext: () => ({ rawContext: { destination: {} } }) }
   const module = { exports: {} }
-  vm.runInNewContext(code, { module, exports: module.exports, window, console,
-    require: (path) => path === 'vue' ? vueMock : path === 'tone' ? tone :
-      path === '../sequencedLoop' ? { ...sequencer, TransportClock: Clock } : { gridScopes: () => [], sameBankScope: () => false } })
+  vm.runInNewContext(code, { module, exports: module.exports, console,
+    require: (path) => path === 'vue' ? { ...vue, onUnmounted: (fn) => { cleanup = fn } } : path === 'tone' ? tone :
+      path === '../sequencedLoop' ? sequencer : { gridScopes: () => [], sameBankScope: () => false } })
   const options = { banks: vue.ref([]), bpm: vue.ref(120), editing: vue.ref(false), projectError: vue.ref('') }
   const scope = vue.effectScope()
-  const transport = scope.run(() => module.exports.useTransport(options))
-  function runDue() {
-    while (true) {
-      const next = [...timeouts.entries()].sort((a, b) => a[1].at - b[1].at)[0]
-      if (!next || next[1].at > now) break
-      timeouts.delete(next[0])
-      next[1].callback()
-    }
+  const player = scope.run(() => module.exports.useTransport(options))
+  return {
+    player, options, starts, stops, tempos, clicks, cancelledClicks, releasedClicks, scheduledDraws, cleared,
+    advance: (time) => { now = time },
+    tick: (time) => callback(time),
+    disposed: () => disposed,
+    close: async () => { cleanup(); scope.stop(); await server.close() },
   }
-  function advance(ms) {
-    const end = now + ms
-    while (true) {
-      const next = [...timeouts.values()].sort((a, b) => a.at - b.at)[0]
-      if (!next || next.at > end) break
-      now = next.at
-      runDue()
-    }
-    now = end
-  }
-  return { transport, options, timeouts, intervals, clicks, advance, runDue,
-    jump: (ms) => { now += ms }, positionCalls: () => positionCalls, timeoutStarts: () => timeoutStarts, disposed: () => disposed,
-    close: async () => { cleanup(); scope.stop(); await server.close() } }
 }
 
-test('metronome does no polling while disabled and resumes at the next beat', async () => {
-  const test = await setup()
+test('transport schedules metronome clicks at the supplied audio time', async () => {
+  const context = await setup()
   try {
-    await test.transport.togglePlayback()
-    assert.equal(test.timeouts.size, 0)
-    const calls = test.positionCalls()
-    test.advance(1000)
-    assert.equal(test.positionCalls(), calls)
-    test.transport.metronomeEnabled.value = true
-    assert.equal(test.timeouts.size, 1)
-    test.advance(499)
-    assert.deepEqual(test.clicks, [])
-    test.advance(1)
-    assert.deepEqual(test.clicks.map((click) => click.note), ['G5'])
-    test.transport.metronomeEnabled.value = false
-    assert.equal(test.timeouts.size, 0)
-    test.advance(1000)
-    test.transport.metronomeEnabled.value = true
-    test.advance(500)
-    assert.deepEqual(test.clicks.map((click) => click.note), ['G5', 'G5'])
-    await test.transport.togglePlayback()
-    assert.equal(test.timeouts.size, 0)
-    assert.equal(test.intervals.size, 0)
-  } finally { await test.close() }
+    context.player.metronomeEnabled.value = true
+    await context.player.togglePlayback()
+    assert.deepEqual(context.starts, [[0, 0]])
+    context.tick(0)
+    context.tick(1)
+    context.tick(4)
+    assert.deepEqual(context.clicks, [['C6', 0.03, 0], ['G5', 0.03, 1], ['C6', 0.03, 4]])
+    assert.equal(context.player.beat.value, 0)
+    context.scheduledDraws[1][0]()
+    assert.equal(context.player.beat.value, 1)
+    context.player.metronomeEnabled.value = false
+    assert.deepEqual(context.cancelledClicks, [0])
+    assert.deepEqual(context.releasedClicks, [0])
+    context.tick(5)
+    assert.equal(context.clicks.length, 3)
+  } finally { await context.close() }
+  assert.deepEqual(context.cleared, [7])
+  assert.equal(context.disposed(), true)
 })
 
-test('enabled metronome schedules once per beat at 120 BPM', async () => {
-  const test = await setup()
+test('tempo changes and stop use the audio clock and invalidate pending draws', async () => {
+  const context = await setup()
   try {
-    test.transport.metronomeEnabled.value = true
-    await test.transport.togglePlayback()
-    test.advance(10000)
-    assert.equal(test.clicks.length, 21)
-    assert.equal(test.timeoutStarts(), 21)
-    assert.equal(test.positionCalls(), 42)
-  } finally { await test.close() }
+    await context.player.togglePlayback()
+    context.advance(0.25)
+    assert.equal(context.player.transportClock.position(), 0.25)
+    context.options.bpm.value = 90
+    assert.deepEqual(context.tempos, [[120, 0], [90, 0.25]])
+    context.tick(2)
+    await context.player.togglePlayback()
+    assert.deepEqual(context.stops, [[0.25]])
+    assert.equal(context.player.transportClock.position(), 0.25)
+    context.scheduledDraws[0][0]()
+    assert.equal(context.player.beat.value, 0)
+    await context.player.togglePlayback()
+    context.scheduledDraws[0][0]()
+    assert.equal(context.player.beat.value, 0)
+  } finally { await context.close() }
 })
 
-test('a slow click catches up to the latest beat without waiting another full beat', async () => {
-  const test = await setup(650)
+test('stopping cancels a metronome click already scheduled by Transport', async () => {
+  const context = await setup()
   try {
-    test.transport.metronomeEnabled.value = true
-    await test.transport.togglePlayback()
-    assert.equal([...test.timeouts.values()][0].at, 651)
-    test.jump(1)
-    test.runDue()
-    assert.deepEqual(test.clicks.map((click) => click.note), ['C6', 'G5'])
-  } finally { await test.close() }
-})
-
-test('beat-aligned metronome handles tempo changes, missed beats and cleanup', async () => {
-  const test = await setup()
-  try {
-    test.transport.metronomeEnabled.value = true
-    await test.transport.togglePlayback()
-    assert.deepEqual(test.clicks.map((click) => click.note), ['C6'])
-    test.advance(250)
-    test.options.bpm.value = 60
-    test.advance(499)
-    assert.equal(test.clicks.length, 1)
-    test.advance(1)
-    assert.equal(test.clicks[1].at, 750)
-    assert.equal(test.clicks[1].note, 'G5')
-    test.jump(3200)
-    test.runDue()
-    assert.deepEqual(test.clicks.map((click) => click.note), ['C6', 'G5', 'C6'])
-    assert.equal(test.timeouts.size, 1)
-  } finally {
-    await test.close()
-    assert.equal(test.timeouts.size, 0)
-    assert.equal(test.intervals.size, 0)
-    assert.equal(test.disposed(), true)
-  }
+    context.player.metronomeEnabled.value = true
+    await context.player.togglePlayback()
+    context.tick(1)
+    context.advance(0.5)
+    await context.player.togglePlayback()
+    assert.deepEqual(context.cancelledClicks, [0.5])
+    assert.deepEqual(context.releasedClicks, [0.5])
+  } finally { await context.close() }
 })
